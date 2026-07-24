@@ -1197,6 +1197,24 @@ async fn mysql_columns_from_show(
     Ok(out)
 }
 
+/// Postgres planner/stats → optional approx row count for `schema_overview`.
+///
+/// - `reltuples < 0` (never ANALYZE'd): omit unless `n_live_tup > 0` (stale 0 is common).
+/// - Otherwise prefer `n_live_tup`, else round non-negative `reltuples`.
+fn pg_approx_rows(live: Option<i64>, reltuples: Option<f64>) -> Option<i64> {
+    match reltuples {
+        Some(t) if t < 0.0 => live.filter(|&n| n > 0),
+        Some(t) => live.or(Some(t.round() as i64)),
+        None => live,
+    }
+}
+
+/// `pg_class.reltuples` is Postgres `real` (FLOAT4 / f32). Prefer f32 decode; accept f64
+/// if the query casts to `float8`. Silent f64-only decode used to drop never-analyzed (-1).
+fn pg_decode_reltuples(as_f32: Option<f32>, as_f64: Option<f64>) -> Option<f64> {
+    as_f32.map(f64::from).or(as_f64)
+}
+
 /// One-shot schema survey: tables (+ approx row counts) and foreign keys.
 pub async fn schema_overview(
     pool: &EnginePool,
@@ -1223,10 +1241,9 @@ pub async fn schema_overview(
     let mut tables = match pool.engine() {
         EngineKind::Postgres => {
             let pg = pool.postgres().expect("postgres");
-            // Prefer n_live_tup; fall back to non-negative reltuples.
-            // reltuples < 0 (never analyzed) → omit approx_rows (unknown), never fake 0.
+            // Cast reltuples to float8 for sqlx; also decode f32 because native type is `real`.
             let rows = sqlx::query(
-                "SELECT c.relname, s.n_live_tup, c.reltuples \
+                "SELECT c.relname, s.n_live_tup, c.reltuples::float8 \
                  FROM pg_class c \
                  JOIN pg_namespace n ON n.oid = c.relnamespace \
                  LEFT JOIN pg_stat_user_tables s \
@@ -1241,16 +1258,11 @@ pub async fn schema_overview(
                 .filter_map(|r| {
                     let name: String = r.try_get(0).ok()?;
                     let live: Option<i64> = r.try_get(1).ok().flatten();
-                    let reltuples: Option<f64> = r.try_get(2).ok();
-                    let approx_rows = live.or_else(|| {
-                        reltuples.and_then(|t| {
-                            if t < 0.0 {
-                                None
-                            } else {
-                                Some(t.round() as i64)
-                            }
-                        })
-                    });
+                    let reltuples = pg_decode_reltuples(
+                        r.try_get::<f32, _>(2).ok(),
+                        r.try_get::<f64, _>(2).ok(),
+                    );
+                    let approx_rows = pg_approx_rows(live, reltuples);
                     Some(TableOverview { name, approx_rows })
                 })
                 .collect::<Vec<_>>()
@@ -1650,6 +1662,34 @@ mod tests {
         assert!(!json.contains("CREATE INDEX"));
         assert!(!json.contains("\"indexes\""));
         assert!(!json.contains("data_type"));
+    }
+
+    #[test]
+    fn pg_approx_rows_never_analyzed_omits_stale_zero() {
+        assert_eq!(pg_approx_rows(Some(0), Some(-1.0)), None);
+        assert_eq!(pg_approx_rows(None, Some(-1.0)), None);
+        assert_eq!(pg_approx_rows(Some(2), Some(-1.0)), Some(2));
+    }
+
+    #[test]
+    fn pg_approx_rows_analyzed_prefers_live_then_reltuples() {
+        assert_eq!(pg_approx_rows(Some(0), Some(0.0)), Some(0));
+        assert_eq!(pg_approx_rows(None, Some(100.0)), Some(100));
+        assert_eq!(pg_approx_rows(Some(5), Some(100.0)), Some(5));
+        assert_eq!(pg_approx_rows(Some(3), None), Some(3));
+    }
+
+    #[test]
+    fn pg_decode_reltuples_real_f32_feeds_omit_path() {
+        // Production bug: try_get::<f64> on `real` failed → None → live Some(0) kept.
+        let decoded = pg_decode_reltuples(Some(-1.0_f32), None);
+        assert_eq!(decoded, Some(-1.0));
+        assert_eq!(pg_approx_rows(Some(0), decoded), None);
+        assert_eq!(
+            pg_decode_reltuples(None, Some(42.0_f64)),
+            Some(42.0),
+            "float8 cast path"
+        );
     }
 
     #[test]

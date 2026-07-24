@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.0.4 — 2026-07-24
+
+P0: make `approx_rows` omit path actually run on live Postgres.
+
+### Fixes
+
+- **`schema_overview.approx_rows`:** decode `pg_class.reltuples` as Postgres `real` (`f32`) / `::float8` — `try_get::<f64>` alone failed silently, so never-analyzed (`-1`) never reached `pg_approx_rows` and stale `n_live_tup=0` still emitted fake `0`.
+
+## 1.0.3 — 2026-07-24
+
+Correctness patch: never emit fake `approx_rows: 0` on small/never-analyzed Postgres.
+
+### Fixes
+
+- **`schema_overview.approx_rows`:** if `reltuples < 0` (never ANALYZE'd), omit even when `n_live_tup == 0` (stale stats collector); only trust positive `n_live_tup` until analyzed. `meta.row_counts = "approx"` unchanged.
+
+### DX / ops
+
+- **`scripts/install-local.sh`:** also sync `$CARGO_HOME/bin` (`~/.cargo/bin`) so manual CLI matches Cursor/`~/.local/bin`
+
 ## 1.0.2 — 2026-07-24
 
 Scorecard polish: honest approx rows, quieter indexes, install hygiene.
