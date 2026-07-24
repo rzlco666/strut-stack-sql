@@ -135,9 +135,9 @@ Introspection (always when `--full-tools`):
 | `list_schemas` | Schemas / databases |
 | `list_tables` | Tables in schema (paginated: `offset`, `limit`) |
 | `describe_table` | Columns + indexes (`unique` + `columns[]`; PG domain types via `udt_name`) |
-| `list_indexes` | Indexes for schema/table (includes column lists) |
+| `list_indexes` | Flat indexes: `{schema?,table?,name,columns,unique}` (no nested `indexes[]`, no `CREATE INDEX` blob) |
 | `list_foreign_keys` | Foreign keys for schema/table |
-| `schema_overview` | One-shot: tables + approx row counts + FKs (cap 200 tables) |
+| `schema_overview` | One-shot: tables + approx row counts (`meta.row_counts=approx`; omit unknown; use `COUNT(*)` for exact) + FKs (cap 200 tables) |
 
 DDL tools appear **only** when `--full-tools` **and** `--allow-ddl` (hidden in read-only / writes-only to save tokens):
 

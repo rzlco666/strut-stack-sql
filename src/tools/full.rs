@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{source_endpoint, AppConfig};
 use crate::db::{
-    describe_table, list_foreign_keys, list_indexes, list_schemas, list_tables, schema_overview,
+    describe_table, list_foreign_keys, list_indexes, listed_index_from_schema_object, list_schemas,
+    list_tables, schema_overview,
 };
 use crate::tools::core::{json_result, tool_error};
 
@@ -180,7 +181,11 @@ pub async fn handle_list_indexes(
     )
     .await
     .map_err(|e| tool_error(e.to_string()))?;
-    json_result(&objects)
+    let listed: Vec<_> = objects
+        .into_iter()
+        .map(listed_index_from_schema_object)
+        .collect();
+    json_result(&listed)
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

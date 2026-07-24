@@ -130,7 +130,7 @@ impl McpSqlServer {
         handle_describe_table(&self.config, params.0).await
     }
 
-    #[tool(description = "List indexes for a schema or table.")]
+    #[tool(description = "List indexes (flat: name, columns, unique) for a schema or table.")]
     async fn list_indexes(
         &self,
         params: Parameters<ListIndexesParams>,
@@ -146,7 +146,9 @@ impl McpSqlServer {
         handle_list_foreign_keys(&self.config, params.0).await
     }
 
-    #[tool(description = "One-shot schema survey: tables, approx row counts, and foreign keys.")]
+    #[tool(
+        description = "One-shot schema survey: tables + approx row counts (planner stats; omit if unknown; use COUNT(*) for exact) + FKs."
+    )]
     async fn schema_overview(
         &self,
         params: Parameters<SchemaOverviewParams>,
@@ -221,8 +223,9 @@ impl ServerHandler for McpSqlServer {
         };
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(format!(
-                "strut-stack-sql ({mode}). Core tools: search_objects, execute_sql, analyze_query_performance. \
+                "strut-stack-sql {} ({mode}). Core tools: search_objects, execute_sql, analyze_query_performance. \
                  Results are compact columnar JSON. Default max {} rows. Use page_offset/page_size on execute_sql for pagination.",
+                env!("CARGO_PKG_VERSION"),
                 self.config.max_rows
             ))
     }

@@ -74,6 +74,18 @@ cd strut-stack-sql
 cargo install --path . --bins
 ```
 
+### Local Cursor binary (`~/.local/bin`)
+
+`cargo build --release` writes `target/release/` only. To refresh the binary Cursor uses from `~/.local/bin`:
+
+```bash
+./scripts/install-local.sh
+# PREFIX=~/.local by default; override: PREFIX=/usr/local ./scripts/install-local.sh
+strut-stack-sql --version
+```
+
+Or: `cargo install --path . --force` (installs to `~/.cargo/bin`).
+
 ## After install
 
 ```bash

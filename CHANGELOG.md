@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.0.2 — 2026-07-24
+
+Scorecard polish: honest approx rows, quieter indexes, install hygiene.
+
+### Fixes
+
+- **`schema_overview.approx_rows`:** never fake `0` from never-analyzed Postgres (`reltuples < 0` → omit). Prefer `n_live_tup`; `meta.row_counts = "approx"`.
+- **`list_indexes`:** flat `{schema,table,name,columns,unique}` — no nested `indexes[]`, no full `CREATE INDEX` in `data_type`.
+
+### DX / ops
+
+- MCP `get_info` instructions include `CARGO_PKG_VERSION`
+- **`scripts/install-local.sh`:** release build → `~/.local/bin` (repo `cargo build` alone does not update the Cursor binary)
+- Cursor example args include `--deny-columns password_hash,totp_secret_encrypted,code_hash`
+
 ## 1.0.1 — 2026-07-24
 
 Correctness + agent DX patch from live MCP scorecard.

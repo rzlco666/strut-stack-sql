@@ -7,10 +7,14 @@ Zero-config global MCP for MySQL, PostgreSQL, and SQLite using the official laun
 1. Build or install the binary:
 
 ```bash
-cargo install --path /path/to/strut-stack-sql
-# binary: ~/.cargo/bin/strut-stack-sql
+# Dev loop (updates ~/.local/bin for Cursor):
+./scripts/install-local.sh
+
+# Or cargo install (updates ~/.cargo/bin):
+cargo install --path /path/to/strut-stack-sql --force
 ```
 
+`cargo build --release` alone leaves `~/.local/bin` stale — always run `install-local.sh` (or `cargo install --path . --force`) before expecting Cursor to pick up a new binary.
 2. Each project needs a `.env` with `DATABASE_URL` (or `MYSQL_*` / `POSTGRES_*` parts). See [CONFIGURATION.md](CONFIGURATION.md).
 
 ## Global `~/.cursor/mcp.json`
@@ -29,7 +33,7 @@ Copy [packaging/mcp.json.example](../packaging/mcp.json.example) and adjust path
       ],
       "env": {
         "MCP_SQL_RUST_BIN": "/home/you/.cargo/bin/strut-stack-sql",
-        "MCP_SQL_ARGS": "--allow-writes --full-tools"
+        "MCP_SQL_ARGS": "--full-tools --deny-columns password_hash,totp_secret_encrypted,code_hash"
       }
     }
   }
@@ -41,7 +45,7 @@ Copy [packaging/mcp.json.example](../packaging/mcp.json.example) and adjust path
 1. Cursor passes `${workspaceFolder}` (or cwd fallback) to the launcher.
 2. Launcher walks up from the workspace to find `.env`.
 3. **TCP preflight** (500ms, override `MCP_SQL_PREFLIGHT_MS`): if MySQL/Postgres host is unreachable, prints a clear stderr message and exits before spawning Rust.
-4. Spawns `strut-stack-sql --workspace <path> --allow-writes --full-tools` with env injected.
+4. Spawns `strut-stack-sql --workspace <path> --full-tools --deny-columns …` with env injected.
 5. Rust `chdir`s to workspace, loads `.env`, resolves SQLite relative paths (`sqlite://./data.db`).
 
 ## Lazy connect (default)

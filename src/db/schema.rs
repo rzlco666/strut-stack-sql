@@ -70,6 +70,18 @@ pub struct IndexInfo {
     pub unique: bool,
 }
 
+/// Flat index row for `list_indexes` (token-cheap; no nested `indexes[]` / indexdef).
+#[derive(Debug, Clone, Serialize)]
+pub struct ListedIndex {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub table: Option<String>,
+    pub name: String,
+    pub columns: Vec<String>,
+    pub unique: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct TableOverview {
     pub name: String,
@@ -82,6 +94,8 @@ pub struct SchemaOverviewMeta {
     pub n_tables: usize,
     pub n_foreign_keys: usize,
     pub truncated: bool,
+    /// Always `"approx"` — planner/stats estimates; use `COUNT(*)` for exact.
+    pub row_counts: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -564,12 +578,13 @@ pub async fn list_indexes(
                         let tablename: String = r.try_get(2).ok()?;
                         let unique = pg_indexdef_is_unique(&def);
                         let columns = pg_indexdef_columns(&def);
+                        // Do not put full CREATE INDEX into data_type (token waste).
                         Some(SchemaObject {
                             object_type: ObjectType::Index,
                             schema: Some(schema.into()),
                             name: name.clone(),
                             table: Some(tablename),
-                            data_type: Some(def),
+                            data_type: None,
                             nullable: None,
                             columns: None,
                             indexes: Some(vec![IndexInfo {
@@ -807,6 +822,21 @@ async fn sqlite_list_index_objects(
 fn index_info_from_schema_object(o: SchemaObject) -> IndexInfo {
     let nested = o.indexes.and_then(|i| i.into_iter().next());
     IndexInfo {
+        name: o.name,
+        columns: nested
+            .as_ref()
+            .map(|i| i.columns.clone())
+            .unwrap_or_default(),
+        unique: nested.map(|i| i.unique).unwrap_or(false),
+    }
+}
+
+/// Flatten a schema index object into the compact `list_indexes` row shape.
+pub fn listed_index_from_schema_object(o: SchemaObject) -> ListedIndex {
+    let nested = o.indexes.and_then(|i| i.into_iter().next());
+    ListedIndex {
+        schema: o.schema,
+        table: o.table,
         name: o.name,
         columns: nested
             .as_ref()
@@ -1193,10 +1223,14 @@ pub async fn schema_overview(
     let mut tables = match pool.engine() {
         EngineKind::Postgres => {
             let pg = pool.postgres().expect("postgres");
+            // Prefer n_live_tup; fall back to non-negative reltuples.
+            // reltuples < 0 (never analyzed) → omit approx_rows (unknown), never fake 0.
             let rows = sqlx::query(
-                "SELECT c.relname, GREATEST(c.reltuples::bigint, 0) \
+                "SELECT c.relname, s.n_live_tup, c.reltuples \
                  FROM pg_class c \
                  JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 LEFT JOIN pg_stat_user_tables s \
+                   ON s.relid = c.oid \
                  WHERE n.nspname = $1 AND c.relkind = 'r' \
                  ORDER BY c.relname",
             )
@@ -1206,11 +1240,18 @@ pub async fn schema_overview(
             rows.iter()
                 .filter_map(|r| {
                     let name: String = r.try_get(0).ok()?;
-                    let approx: i64 = r.try_get(1).unwrap_or(0);
-                    Some(TableOverview {
-                        name,
-                        approx_rows: Some(approx),
-                    })
+                    let live: Option<i64> = r.try_get(1).ok().flatten();
+                    let reltuples: Option<f64> = r.try_get(2).ok();
+                    let approx_rows = live.or_else(|| {
+                        reltuples.and_then(|t| {
+                            if t < 0.0 {
+                                None
+                            } else {
+                                Some(t.round() as i64)
+                            }
+                        })
+                    });
+                    Some(TableOverview { name, approx_rows })
                 })
                 .collect::<Vec<_>>()
         }
@@ -1294,6 +1335,7 @@ pub async fn schema_overview(
             n_tables,
             n_foreign_keys,
             truncated,
+            row_counts: "approx",
         },
     })
 }
@@ -1581,5 +1623,44 @@ mod tests {
         assert_eq!(info.name, "users_username_key");
         assert_eq!(info.columns, vec!["username"]);
         assert!(info.unique);
+    }
+
+    #[test]
+    fn listed_index_flattens_without_indexdef() {
+        let o = SchemaObject {
+            object_type: ObjectType::Index,
+            schema: Some("public".into()),
+            name: "users_email_key".into(),
+            table: Some("users".into()),
+            data_type: None,
+            nullable: None,
+            columns: None,
+            indexes: Some(vec![IndexInfo {
+                name: "users_email_key".into(),
+                columns: vec!["email".into()],
+                unique: true,
+            }]),
+        };
+        let listed = listed_index_from_schema_object(o);
+        assert_eq!(listed.name, "users_email_key");
+        assert_eq!(listed.table.as_deref(), Some("users"));
+        assert_eq!(listed.columns, vec!["email"]);
+        assert!(listed.unique);
+        let json = serde_json::to_string(&listed).unwrap();
+        assert!(!json.contains("CREATE INDEX"));
+        assert!(!json.contains("\"indexes\""));
+        assert!(!json.contains("data_type"));
+    }
+
+    #[test]
+    fn schema_overview_meta_marks_approx_row_counts() {
+        let meta = SchemaOverviewMeta {
+            n_tables: 1,
+            n_foreign_keys: 0,
+            truncated: false,
+            row_counts: "approx",
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        assert!(json.contains("\"row_counts\":\"approx\""));
     }
 }
