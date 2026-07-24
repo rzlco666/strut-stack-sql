@@ -1,7 +1,9 @@
 use bigdecimal::BigDecimal;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use ipnetwork::IpNetwork;
 use serde_json::Value;
 use sqlx::{mysql::MySqlRow, postgres::PgRow, sqlite::SqliteRow, Column, Row, TypeInfo, ValueRef};
+use uuid::Uuid;
 
 pub fn bigdecimal_to_json(v: &BigDecimal) -> Value {
     if v.fractional_digit_count() == 0 {
@@ -175,6 +177,37 @@ pub fn decode_mysql_cell(row: &MySqlRow, index: usize) -> Result<Value, sqlx::Er
     Ok(Value::Null)
 }
 
+/// PostgreSQL types that should always surface as JSON strings for agents.
+pub fn pg_type_is_textish(type_name: &str) -> bool {
+    let t = type_name.to_ascii_lowercase();
+    matches!(
+        t.as_str(),
+        "varchar"
+            | "bpchar"
+            | "text"
+            | "name"
+            | "citext"
+            | "xml"
+            | "uuid"
+            | "inet"
+            | "cidr"
+            | "macaddr"
+            | "macaddr8"
+            | "date"
+            | "time"
+            | "timetz"
+            | "timestamp"
+            | "timestamptz"
+            | "interval"
+            | "json"
+            | "jsonb"
+            | "ltree"
+            | "lquery"
+            | "ltxtquery"
+    ) || t.contains("char")
+        || t.contains("text")
+}
+
 pub fn decode_pg_cell(row: &PgRow, index: usize) -> Result<Value, sqlx::Error> {
     let raw = row.try_get_raw(index)?;
     if raw.is_null() {
@@ -196,11 +229,47 @@ pub fn decode_pg_cell(row: &PgRow, index: usize) -> Result<Value, sqlx::Error> {
     if let Ok(v) = row.try_get::<bool, _>(index) {
         return Ok(Value::Bool(v));
     }
+    if let Ok(v) = row.try_get::<Uuid, _>(index) {
+        return Ok(Value::String(v.to_string()));
+    }
+    if let Ok(v) = row.try_get::<DateTime<Utc>, _>(index) {
+        return Ok(Value::String(v.to_rfc3339()));
+    }
+    if let Ok(v) = row.try_get::<NaiveDateTime, _>(index) {
+        return Ok(Value::String(v.to_string()));
+    }
+    if let Ok(v) = row.try_get::<NaiveDate, _>(index) {
+        return Ok(Value::String(v.to_string()));
+    }
+    if let Ok(v) = row.try_get::<NaiveTime, _>(index) {
+        return Ok(Value::String(v.to_string()));
+    }
+    if let Ok(v) = row.try_get::<IpNetwork, _>(index) {
+        return Ok(Value::String(v.to_string()));
+    }
     if let Ok(v) = row.try_get::<Value, _>(index) {
         return Ok(v);
     }
     if let Ok(v) = row.try_get::<String, _>(index) {
         return Ok(Value::String(v));
+    }
+
+    let type_name = row.column(index).type_info().name();
+    if pg_type_is_textish(type_name) {
+        if let Ok(v) = row.try_get::<&str, _>(index) {
+            return Ok(Value::String(v.to_string()));
+        }
+        if let Ok(v) = row.try_get::<Vec<u8>, _>(index) {
+            return Ok(Value::String(utf8_from_bytes(v)));
+        }
+    }
+
+    // Last resort: never silently Null a non-NULL cell when bytes are available.
+    if let Ok(v) = row.try_get::<Vec<u8>, _>(index) {
+        return Ok(match String::from_utf8(v) {
+            Ok(s) => Value::String(s),
+            Err(e) => Value::String(bytes_to_hex(e.as_bytes())),
+        });
     }
     Ok(Value::Null)
 }
@@ -290,5 +359,24 @@ mod tests {
         let bad = vec![0xff, 0xfe, b'a'];
         let s = utf8_from_bytes(bad);
         assert!(s.contains('a'));
+    }
+
+    #[test]
+    fn pg_type_is_textish_covers_agent_pain_types() {
+        for t in [
+            "uuid",
+            "timestamptz",
+            "timestamp",
+            "inet",
+            "cidr",
+            "citext",
+            "text",
+            "varchar",
+            "macaddr",
+        ] {
+            assert!(pg_type_is_textish(t), "{t} should be textish");
+        }
+        assert!(!pg_type_is_textish("int4"));
+        assert!(!pg_type_is_textish("bytea"));
     }
 }

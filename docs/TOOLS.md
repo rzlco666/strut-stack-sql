@@ -80,7 +80,9 @@ Loop until `meta.has_more` is `false`, incrementing `page_offset` by `page_size`
 }
 ```
 
-`meta.limit_injected` is set when the guard auto-appends `LIMIT` (no user LIMIT). `meta.limit_clamped` is set when a user-specified LIMIT exceeds `--max-rows` and was reduced.
+`meta.limit_injected` is set when the guard auto-appends `LIMIT` (no user LIMIT). `meta.limit_clamped` is set when a user-specified LIMIT exceeds `--max-rows` and was reduced. When `--deny-columns` matches result columns, cells are replaced with `"[redacted]"` and `meta.redacted_columns` lists those names.
+
+Typed Postgres values (`uuid`, `timestamptz`, `inet`, `citext`, …) serialize as JSON strings by default (no agent-side `::text` cast required).
 
 **Response (batch):**
 
@@ -93,11 +95,13 @@ Loop until `meta.has_more` is `false`, incrementing `page_offset` by `page_size`
 }
 ```
 
-Batch results may arrive out of order relative to the input `queries[]` array (parallel execution). Map results by array index on the client.
+Batch results preserve input order of `queries[]` (concurrent but ordered via `buffered`). Map results by array index.
 
 ### `analyze_query_performance`
 
 Runs `EXPLAIN (FORMAT JSON)` (Postgres), `EXPLAIN FORMAT=JSON` (MySQL), or `EXPLAIN QUERY PLAN` (SQLite). Returns a distilled summary.
+
+Pass the **raw SELECT** only — do not wrap with `EXPLAIN` (the tool wraps for you).
 
 Supports optional `params` for `?` placeholders (same rules as `execute_sql`).
 
@@ -127,12 +131,13 @@ Introspection (always when `--full-tools`):
 
 | Tool | Purpose |
 |------|---------|
-| `list_sources` | Configured connection names |
+| `list_sources` | Connection targets: `name`, `engine`, `host`, `port`, `database` (no credentials) |
 | `list_schemas` | Schemas / databases |
 | `list_tables` | Tables in schema (paginated: `offset`, `limit`) |
-| `describe_table` | Columns + indexes (`unique` flag; MySQL `key`/`extra`/`comment`/`default`) |
-| `list_indexes` | Indexes for schema/table |
+| `describe_table` | Columns + indexes (`unique` + `columns[]`; PG domain types via `udt_name`) |
+| `list_indexes` | Indexes for schema/table (includes column lists) |
 | `list_foreign_keys` | Foreign keys for schema/table |
+| `schema_overview` | One-shot: tables + approx row counts + FKs (cap 200 tables) |
 
 DDL tools appear **only** when `--full-tools` **and** `--allow-ddl` (hidden in read-only / writes-only to save tokens):
 
@@ -158,3 +163,4 @@ Destructive ops (`drop_*`, `truncate_table`) require `"confirm": true`. Prefer `
 | `--batch-concurrency` | 8 | Max parallel batch queries |
 | `--pool-size` | 10 | sqlx pool per source |
 | `--connect-timeout` | 2s | sqlx pool acquire / handshake after TCP preflight |
+| `--deny-columns` | (empty) | Opt-in comma-separated column names to redact in results |

@@ -96,6 +96,7 @@ pub fn exec_options(config: &AppConfig) -> ExecOptions {
         limit_injected: false,
         page_offset: 0,
         page_size: None,
+        deny_columns: config.deny_columns.clone(),
     }
 }
 
@@ -220,6 +221,13 @@ pub async fn handle_analyze_query(
     config: &Arc<AppConfig>,
     params: AnalyzeQueryParams,
 ) -> Result<CallToolResult, McpError> {
+    let trimmed = params.sql.trim_start();
+    if trimmed.len() >= 7 && trimmed[..7].eq_ignore_ascii_case("EXPLAIN") {
+        return Err(tool_error(
+            "pass the raw SELECT to analyze_query_performance; do not wrap with EXPLAIN (it wraps for you)",
+        ));
+    }
+
     let source = config
         .source(params.source.as_deref())
         .map_err(|e| tool_error(e.to_string()))?;

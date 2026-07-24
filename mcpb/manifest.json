@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.2",
   "name": "strut-stack-sql",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Strut Stack SQL — token-efficient MCP for MySQL, PostgreSQL, and SQLite",
   "author": {
     "name": "rzlco666"

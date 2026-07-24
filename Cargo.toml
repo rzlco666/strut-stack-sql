@@ -1,6 +1,6 @@
 [package]
 name = "strut-stack-sql"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 rust-version = "1.88"
 description = "Strut Stack SQL — token-efficient MCP server for MySQL, PostgreSQL, and SQLite"
@@ -58,7 +58,9 @@ sqlx = { version = "0.8", default-features = false, features = [
     "chrono",
     "uuid",
     "bigdecimal",
+    "ipnetwork",
 ] }
+ipnetwork = "0.20"
 
 sqlparser = "0.62"
 

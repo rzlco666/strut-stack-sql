@@ -71,6 +71,30 @@ pub struct IndexInfo {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct TableOverview {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approx_rows: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SchemaOverviewMeta {
+    pub n_tables: usize,
+    pub n_foreign_keys: usize,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SchemaOverview {
+    pub schema: String,
+    pub tables: Vec<TableOverview>,
+    pub foreign_keys: Vec<ForeignKeyInfo>,
+    pub meta: SchemaOverviewMeta,
+}
+
+const SCHEMA_OVERVIEW_MAX_TABLES: usize = 200;
+
+#[derive(Debug, Clone, Serialize)]
 pub struct SearchResult {
     pub objects: Vec<SchemaObject>,
     pub meta: SearchMeta,
@@ -314,7 +338,9 @@ async fn list_columns(
             let pool = pool.postgres().expect("postgres");
             let schema = schema.unwrap_or("public");
             let rows = sqlx::query(
-                "SELECT table_name, column_name, data_type, is_nullable \
+                "SELECT table_name, column_name, \
+                 CASE WHEN data_type = 'USER-DEFINED' THEN udt_name ELSE data_type END, \
+                 is_nullable \
                  FROM information_schema.columns \
                  WHERE table_schema = $1 ORDER BY table_name, ordinal_position",
             )
@@ -445,7 +471,9 @@ pub async fn describe_table(
         EngineKind::Postgres => {
             let pool = pool.postgres().expect("postgres");
             let rows = sqlx::query(
-                "SELECT column_name, data_type, is_nullable \
+                "SELECT column_name, \
+                 CASE WHEN data_type = 'USER-DEFINED' THEN udt_name ELSE data_type END, \
+                 is_nullable \
                  FROM information_schema.columns \
                  WHERE table_schema = $1 AND table_name = $2 \
                  ORDER BY ordinal_position",
@@ -512,7 +540,7 @@ pub async fn list_indexes(
             let schema = schema.unwrap_or("public");
             let rows = if let Some(table) = table {
                 sqlx::query(
-                    "SELECT indexname, indexdef FROM pg_indexes \
+                    "SELECT indexname, indexdef, tablename FROM pg_indexes \
                      WHERE schemaname = $1 AND tablename = $2 ORDER BY indexname",
                 )
                 .bind(schema)
@@ -521,7 +549,7 @@ pub async fn list_indexes(
                 .await?
             } else {
                 sqlx::query(
-                    "SELECT indexname, indexdef FROM pg_indexes \
+                    "SELECT indexname, indexdef, tablename FROM pg_indexes \
                      WHERE schemaname = $1 ORDER BY indexname",
                 )
                 .bind(schema)
@@ -533,18 +561,20 @@ pub async fn list_indexes(
                     .filter_map(|r| {
                         let name: String = r.try_get(0).ok()?;
                         let def: String = r.try_get(1).ok()?;
+                        let tablename: String = r.try_get(2).ok()?;
                         let unique = pg_indexdef_is_unique(&def);
+                        let columns = pg_indexdef_columns(&def);
                         Some(SchemaObject {
                             object_type: ObjectType::Index,
                             schema: Some(schema.into()),
                             name: name.clone(),
-                            table: table.map(str::to_string),
+                            table: Some(tablename),
                             data_type: Some(def),
                             nullable: None,
                             columns: None,
                             indexes: Some(vec![IndexInfo {
                                 name,
-                                columns: vec![],
+                                columns,
                                 unique,
                             }]),
                         })
@@ -790,6 +820,92 @@ fn index_info_from_schema_object(o: SchemaObject) -> IndexInfo {
 fn pg_indexdef_is_unique(indexdef: &str) -> bool {
     let upper = indexdef.trim_start().to_ascii_uppercase();
     upper.starts_with("CREATE UNIQUE INDEX")
+}
+
+/// Extract indexed column / expression names from a `pg_indexes.indexdef` string.
+fn pg_indexdef_columns(indexdef: &str) -> Vec<String> {
+    let upper = indexdef.to_ascii_uppercase();
+    let open = if let Some(pos) = upper.find(" USING ") {
+        indexdef[pos..].find('(').map(|i| pos + i)
+    } else if let Some(pos) = upper.find(" ON ") {
+        indexdef[pos..].find('(').map(|i| pos + i)
+    } else {
+        None
+    };
+    let Some(open) = open else {
+        return Vec::new();
+    };
+    let rest = &indexdef[open + 1..];
+    let mut depth = 1i32;
+    let mut end = None;
+    for (i, c) in rest.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(end) = end else {
+        return Vec::new();
+    };
+    split_index_col_list(&rest[..end])
+}
+
+fn split_index_col_list(inner: &str) -> Vec<String> {
+    let mut cols = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0;
+    for (i, c) in inner.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                if let Some(name) = normalize_index_col(&inner[start..i]) {
+                    cols.push(name);
+                }
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    if let Some(name) = normalize_index_col(&inner[start..]) {
+        cols.push(name);
+    }
+    cols
+}
+
+fn normalize_index_col(part: &str) -> Option<String> {
+    let mut s = part.trim();
+    loop {
+        let upper = s.to_ascii_uppercase();
+        let stripped = if upper.ends_with(" NULLS FIRST") {
+            Some(&s[..s.len() - " NULLS FIRST".len()])
+        } else if upper.ends_with(" NULLS LAST") {
+            Some(&s[..s.len() - " NULLS LAST".len()])
+        } else if upper.ends_with(" DESC") {
+            Some(&s[..s.len() - " DESC".len()])
+        } else if upper.ends_with(" ASC") {
+            Some(&s[..s.len() - " ASC".len()])
+        } else {
+            None
+        };
+        match stripped {
+            Some(next) => s = next.trim_end(),
+            None => break,
+        }
+    }
+    let s = s.trim().trim_matches('"').trim();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_string())
+    }
 }
 
 fn filter_objects(mut objects: Vec<SchemaObject>, keyword: Option<&str>) -> Vec<SchemaObject> {
@@ -1051,6 +1167,137 @@ async fn mysql_columns_from_show(
     Ok(out)
 }
 
+/// One-shot schema survey: tables (+ approx row counts) and foreign keys.
+pub async fn schema_overview(
+    pool: &EnginePool,
+    connection_url: Option<&str>,
+    schema: Option<&str>,
+) -> Result<SchemaOverview, sqlx::Error> {
+    let schema_name = match pool.engine() {
+        EngineKind::Postgres => schema.unwrap_or("public").to_string(),
+        EngineKind::Mysql => {
+            let mysql = pool.mysql().expect("mysql");
+            match resolve_mysql_schema(mysql, schema, connection_url).await? {
+                MysqlSchemaScope::One(name) => name,
+                MysqlSchemaScope::All => {
+                    return Err(sqlx::Error::Configuration(
+                        "schema_overview requires schema on MySQL (or omit for current database)"
+                            .into(),
+                    ));
+                }
+            }
+        }
+        EngineKind::Sqlite => resolve_sqlite_schema(schema).to_string(),
+    };
+
+    let mut tables = match pool.engine() {
+        EngineKind::Postgres => {
+            let pg = pool.postgres().expect("postgres");
+            let rows = sqlx::query(
+                "SELECT c.relname, GREATEST(c.reltuples::bigint, 0) \
+                 FROM pg_class c \
+                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE n.nspname = $1 AND c.relkind = 'r' \
+                 ORDER BY c.relname",
+            )
+            .bind(&schema_name)
+            .fetch_all(pg)
+            .await?;
+            rows.iter()
+                .filter_map(|r| {
+                    let name: String = r.try_get(0).ok()?;
+                    let approx: i64 = r.try_get(1).unwrap_or(0);
+                    Some(TableOverview {
+                        name,
+                        approx_rows: Some(approx),
+                    })
+                })
+                .collect::<Vec<_>>()
+        }
+        EngineKind::Mysql => {
+            let mysql = pool.mysql().expect("mysql");
+            let rows = sqlx::query(
+                "SELECT table_name, table_rows \
+                 FROM information_schema.tables \
+                 WHERE table_schema = ? AND table_type = 'BASE TABLE' \
+                 ORDER BY table_name",
+            )
+            .bind(&schema_name)
+            .fetch_all(mysql)
+            .await?;
+            rows.iter()
+                .filter_map(|r| {
+                    let name: String = r.try_get(0).ok()?;
+                    let approx = r
+                        .try_get::<Option<i64>, _>(1)
+                        .ok()
+                        .flatten()
+                        .or_else(|| {
+                            r.try_get::<Option<u64>, _>(1)
+                                .ok()
+                                .flatten()
+                                .and_then(|v| i64::try_from(v).ok())
+                        })
+                        .or_else(|| {
+                            r.try_get::<i64, _>(1).ok().or_else(|| {
+                                r.try_get::<u64, _>(1)
+                                    .ok()
+                                    .and_then(|v| i64::try_from(v).ok())
+                            })
+                        });
+                    Some(TableOverview {
+                        name,
+                        approx_rows: approx,
+                    })
+                })
+                .collect::<Vec<_>>()
+        }
+        EngineKind::Sqlite => {
+            let objects = list_tables(pool, connection_url, Some(&schema_name), None).await?;
+            objects
+                .into_iter()
+                .map(|o| TableOverview {
+                    name: o.name,
+                    approx_rows: None,
+                })
+                .collect()
+        }
+    };
+
+    let truncated = tables.len() > SCHEMA_OVERVIEW_MAX_TABLES;
+    if truncated {
+        tables.truncate(SCHEMA_OVERVIEW_MAX_TABLES);
+    }
+
+    let foreign_keys = match pool.engine() {
+        EngineKind::Sqlite => {
+            // SQLite PRAGMA requires a table; aggregate across overview tables.
+            let mut all = Vec::new();
+            for t in &tables {
+                let fks =
+                    list_foreign_keys(pool, connection_url, Some(&schema_name), Some(&t.name))
+                        .await?;
+                all.extend(fks);
+            }
+            all
+        }
+        _ => list_foreign_keys(pool, connection_url, Some(&schema_name), None).await?,
+    };
+
+    let n_tables = tables.len();
+    let n_foreign_keys = foreign_keys.len();
+    Ok(SchemaOverview {
+        schema: schema_name,
+        tables,
+        foreign_keys,
+        meta: SchemaOverviewMeta {
+            n_tables,
+            n_foreign_keys,
+            truncated,
+        },
+    })
+}
+
 pub async fn list_foreign_keys(
     pool: &EnginePool,
     connection_url: Option<&str>,
@@ -1290,6 +1537,28 @@ mod tests {
         assert!(!pg_indexdef_is_unique(
             "CREATE INDEX users_email_idx ON public.users USING btree (email)"
         ));
+    }
+
+    #[test]
+    fn pg_indexdef_columns_parses_simple_and_composite() {
+        assert_eq!(
+            pg_indexdef_columns(
+                "CREATE UNIQUE INDEX users_email_key ON public.users USING btree (email)"
+            ),
+            vec!["email"]
+        );
+        assert_eq!(
+            pg_indexdef_columns(
+                "CREATE INDEX idx_u ON public.users USING btree (email, username DESC)"
+            ),
+            vec!["email", "username"]
+        );
+        assert_eq!(
+            pg_indexdef_columns(
+                "CREATE INDEX idx_expr ON public.users USING btree (lower((email)::text))"
+            ),
+            vec!["lower((email)::text)"]
+        );
     }
 
     #[test]

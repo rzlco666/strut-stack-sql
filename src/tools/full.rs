@@ -4,8 +4,10 @@ use rmcp::model::{CallToolResult, ContentBlock};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::config::AppConfig;
-use crate::db::{describe_table, list_foreign_keys, list_indexes, list_schemas, list_tables};
+use crate::config::{source_endpoint, AppConfig};
+use crate::db::{
+    describe_table, list_foreign_keys, list_indexes, list_schemas, list_tables, schema_overview,
+};
 use crate::tools::core::{json_result, tool_error};
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -66,10 +68,29 @@ struct ListTablesResult {
 pub async fn handle_list_sources(
     config: &Arc<AppConfig>,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    let names: Vec<&str> = config.sources.keys().map(String::as_str).collect();
+    let mut sources: Vec<_> = config
+        .sources
+        .values()
+        .map(|s| {
+            let endpoint = source_endpoint(&s.url, s.engine);
+            serde_json::json!({
+                "name": s.name,
+                "engine": endpoint.engine,
+                "host": endpoint.host,
+                "port": endpoint.port,
+                "database": endpoint.database,
+            })
+        })
+        .collect();
+    sources.sort_by(|a, b| {
+        a.get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .cmp(b.get("name").and_then(|v| v.as_str()).unwrap_or(""))
+    });
     let payload = serde_json::json!({
         "default": config.default_source,
-        "sources": names,
+        "sources": sources,
     });
     Ok(CallToolResult::success(vec![ContentBlock::text(
         payload.to_string(),
@@ -172,6 +193,14 @@ pub struct ListForeignKeysParams {
     pub source: Option<String>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SchemaOverviewParams {
+    #[serde(default)]
+    pub schema: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
 pub async fn handle_list_foreign_keys(
     config: &Arc<AppConfig>,
     params: ListForeignKeysParams,
@@ -189,4 +218,18 @@ pub async fn handle_list_foreign_keys(
     .await
     .map_err(|e| tool_error(e.to_string()))?;
     json_result(&fks)
+}
+
+pub async fn handle_schema_overview(
+    config: &Arc<AppConfig>,
+    params: SchemaOverviewParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    let source = config
+        .source(params.source.as_deref())
+        .map_err(|e| tool_error(e.to_string()))?;
+    let pool = source.pool().await.map_err(|e| tool_error(e.to_string()))?;
+    let overview = schema_overview(&pool, Some(&source.url), params.schema.as_deref())
+        .await
+        .map_err(|e| tool_error(e.to_string()))?;
+    json_result(&overview)
 }

@@ -56,6 +56,7 @@ See [`strut-stack-sql.example.toml`](../strut-stack-sql.example.toml):
 
 ```toml
 default_source = "app"
+deny_columns = ["password_hash"]
 
 [[sources]]
 name = "app"
@@ -83,9 +84,20 @@ strut-stack-sql --url "$DATABASE_URL"
 strut-stack-sql --max-rows 50 --max-bytes 32768
 strut-stack-sql --pool-size 16 --query-timeout 15 --connect-timeout 2
 strut-stack-sql --batch-concurrency 4 --fail-fast
+strut-stack-sql --deny-columns password_hash,totp_secret
 strut-stack-sql --workspace /path/to/project   # chdir + .env walk + SQLite relative paths
 strut-stack-sql --eager-connect                # connect at startup (default: lazy)
 ```
+
+## Column deny-list (opt-in)
+
+Empty by default (no silent redaction). Resolve order:
+
+1. CLI `--deny-columns a,b`
+2. Env `MCP_SQL_DENY_COLUMNS=a,b`
+3. TOML `deny_columns = ["a", "b"]`
+
+Matched column names (case-insensitive) are replaced with `"[redacted]"` in `execute_sql` results; `meta.redacted_columns` lists hits.
 
 ## Lazy connect
 

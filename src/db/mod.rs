@@ -12,6 +12,6 @@ pub use pool::{
     CONNECT_TIMEOUT, DEFAULT_CONNECT_TIMEOUT_SECS, TCP_PREFLIGHT_TIMEOUT,
 };
 pub use schema::{
-    describe_table, list_foreign_keys, list_indexes, list_schemas, list_tables, search_objects,
-    ForeignKeyInfo, ObjectType, SchemaObject,
+    describe_table, list_foreign_keys, list_indexes, list_schemas, list_tables, schema_overview,
+    search_objects, ForeignKeyInfo, ObjectType, SchemaObject, SchemaOverview,
 };

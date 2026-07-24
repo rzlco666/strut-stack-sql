@@ -32,8 +32,8 @@ use crate::tools::ddl::{
 };
 use crate::tools::full::{
     handle_describe_table, handle_list_foreign_keys, handle_list_indexes, handle_list_schemas,
-    handle_list_sources, handle_list_tables, DescribeTableParams, ListForeignKeysParams,
-    ListIndexesParams, ListTablesParams, SourceParams,
+    handle_list_sources, handle_list_tables, handle_schema_overview, DescribeTableParams,
+    ListForeignKeysParams, ListIndexesParams, ListTablesParams, SchemaOverviewParams, SourceParams,
 };
 
 const CORE_TOOLS: &[&str] = &["search_objects", "execute_sql", "analyze_query_performance"];
@@ -46,6 +46,7 @@ const FULL_INTROSPECT_TOOLS: &[&str] = &[
     "describe_table",
     "list_indexes",
     "list_foreign_keys",
+    "schema_overview",
 ];
 
 /// DDL tools — only listed when `--full-tools` and `--allow-ddl`.
@@ -143,6 +144,14 @@ impl McpSqlServer {
         params: Parameters<ListForeignKeysParams>,
     ) -> Result<CallToolResult, McpError> {
         handle_list_foreign_keys(&self.config, params.0).await
+    }
+
+    #[tool(description = "One-shot schema survey: tables, approx row counts, and foreign keys.")]
+    async fn schema_overview(
+        &self,
+        params: Parameters<SchemaOverviewParams>,
+    ) -> Result<CallToolResult, McpError> {
+        handle_schema_overview(&self.config, params.0).await
     }
 
     #[tool(description = "DDL schema mutations (requires --allow-ddl).")]

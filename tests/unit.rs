@@ -152,6 +152,7 @@ mod format_tests {
                 page_size: None,
                 has_more: None,
                 total_fetched: None,
+                redacted_columns: None,
             },
         };
         let trimmed = truncate_to_bytes(result, 4096);
@@ -176,6 +177,57 @@ mod config_tests {
         assert_eq!(
             detect_engine(None, "postgresql://localhost/db").unwrap(),
             strut_stack_sql::db::EngineKind::Postgres
+        );
+    }
+
+    #[test]
+    fn source_endpoint_hides_credentials() {
+        use strut_stack_sql::config::source_endpoint;
+        use strut_stack_sql::db::EngineKind;
+        let ep = source_endpoint(
+            "postgresql://user:s3cret@db.example:5433/strutstack",
+            EngineKind::Postgres,
+        );
+        let json = serde_json::to_string(&ep).unwrap();
+        assert!(!json.contains("s3cret"));
+        assert!(!json.contains("user"));
+        assert_eq!(ep.engine, "postgres");
+        assert_eq!(ep.host.as_deref(), Some("db.example"));
+        assert_eq!(ep.port, Some(5433));
+        assert_eq!(ep.database.as_deref(), Some("strutstack"));
+    }
+}
+
+#[cfg(test)]
+mod redact_tests {
+    use serde_json::json;
+    use strut_stack_sql::db::exec::redact_denied_columns;
+    use strut_stack_sql::format::{ColumnarMeta, ColumnarResult};
+
+    #[test]
+    fn redacts_matching_columns_case_insensitive() {
+        let result = ColumnarResult {
+            cols: vec!["id".into(), "password_hash".into(), "email".into()],
+            rows: vec![vec![json!(1), json!("abc"), json!("a@b.c")]],
+            meta: ColumnarMeta {
+                n: 1,
+                truncated: false,
+                rows_affected: None,
+                limit_injected: None,
+                limit_clamped: None,
+                page_offset: None,
+                page_size: None,
+                has_more: None,
+                total_fetched: None,
+                redacted_columns: None,
+            },
+        };
+        let out = redact_denied_columns(result, &["Password_Hash".into()]);
+        assert_eq!(out.rows[0][1], json!("[redacted]"));
+        assert_eq!(out.rows[0][2], json!("a@b.c"));
+        assert_eq!(
+            out.meta.redacted_columns.as_deref(),
+            Some(&["password_hash".to_string()][..])
         );
     }
 }

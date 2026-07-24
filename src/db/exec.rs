@@ -45,6 +45,8 @@ pub struct ExecOptions {
     pub limit_injected: bool,
     pub page_offset: usize,
     pub page_size: Option<usize>,
+    /// Case-insensitive column names to redact in result cells (opt-in).
+    pub deny_columns: Vec<String>,
 }
 
 pub async fn execute_query(
@@ -119,6 +121,7 @@ pub async fn execute_query(
                 }
             }
             let columnar = truncate_to_bytes(columnar, opts.max_bytes);
+            let columnar = redact_denied_columns(columnar, &opts.deny_columns);
             tracing::info!(
                 duration_ms = started.elapsed().as_millis() as u64,
                 rows = columnar.meta.n,
@@ -183,7 +186,7 @@ pub async fn execute_batch(
                 }
             }
         })
-        .buffer_unordered(concurrency)
+        .buffered(concurrency)
         .collect::<Vec<_>>()
         .await;
 
@@ -301,6 +304,7 @@ fn pg_rows_to_columnar(rows: &[PgRow]) -> Result<ColumnarResult, ExecError> {
             page_size: None,
             has_more: None,
             total_fetched: None,
+            redacted_columns: None,
         },
     })
 }
@@ -339,6 +343,7 @@ fn mysql_rows_to_columnar(rows: &[MySqlRow]) -> Result<ColumnarResult, ExecError
             page_size: None,
             has_more: None,
             total_fetched: None,
+            redacted_columns: None,
         },
     })
 }
@@ -377,6 +382,7 @@ fn sqlite_rows_to_columnar(rows: &[SqliteRow]) -> Result<ColumnarResult, ExecErr
             page_size: None,
             has_more: None,
             total_fetched: None,
+            redacted_columns: None,
         },
     })
 }
@@ -395,6 +401,41 @@ fn empty_columnar() -> ColumnarResult {
             page_size: None,
             has_more: None,
             total_fetched: None,
+            redacted_columns: None,
         },
     }
+}
+
+/// Replace denied column cells with `"[redacted]"` and record names in meta.
+pub fn redact_denied_columns(
+    mut result: ColumnarResult,
+    deny_columns: &[String],
+) -> ColumnarResult {
+    if deny_columns.is_empty() || result.cols.is_empty() {
+        return result;
+    }
+    let denied: Vec<(usize, String)> = result
+        .cols
+        .iter()
+        .enumerate()
+        .filter_map(|(i, col)| {
+            deny_columns
+                .iter()
+                .find(|d| d.eq_ignore_ascii_case(col))
+                .map(|_| (i, col.clone()))
+        })
+        .collect();
+    if denied.is_empty() {
+        return result;
+    }
+    let redacted_value = Value::String("[redacted]".into());
+    for row in &mut result.rows {
+        for &(idx, _) in &denied {
+            if let Some(cell) = row.get_mut(idx) {
+                *cell = redacted_value.clone();
+            }
+        }
+    }
+    result.meta.redacted_columns = Some(denied.into_iter().map(|(_, name)| name).collect());
+    result
 }

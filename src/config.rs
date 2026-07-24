@@ -7,7 +7,8 @@ use clap::Parser;
 use serde::{Deserialize, Serialize};
 
 use crate::db::{
-    detect_engine_from_url, EngineKind, EnginePool, LazyEnginePool, DEFAULT_CONNECT_TIMEOUT_SECS,
+    detect_engine_from_url, parse_host_port, EngineKind, EnginePool, LazyEnginePool,
+    DEFAULT_CONNECT_TIMEOUT_SECS,
 };
 
 pub const DEFAULT_MAX_ROWS: u32 = 100;
@@ -103,6 +104,10 @@ pub struct Cli {
     /// Stop batch on first error.
     #[arg(long)]
     pub fail_fast: bool,
+
+    /// Comma-separated column names to redact in query results (opt-in).
+    #[arg(long, value_delimiter = ',')]
+    pub deny_columns: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -111,6 +116,8 @@ pub struct TomlConfig {
     pub default_source: Option<String>,
     #[serde(default)]
     pub sources: Vec<SourceConfig>,
+    #[serde(default)]
+    pub deny_columns: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -163,6 +170,7 @@ pub struct AppConfig {
     pub query_timeout: Duration,
     pub batch_concurrency: usize,
     pub fail_fast: bool,
+    pub deny_columns: Vec<String>,
     pub default_source: String,
     pub sources: HashMap<String, ResolvedSource>,
     pub searched_paths: Vec<PathBuf>,
@@ -212,6 +220,7 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
             .with_context(|| format!("reading config {}", path.display()))?;
         let toml_cfg: TomlConfig =
             toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        let deny_columns = resolve_deny_columns(cli, Some(&toml_cfg.deny_columns));
         for src in toml_cfg.sources {
             let url = resolve_url(src.url.as_deref(), src.url_env.as_deref())?;
             let url = resolve_sqlite_path(&url, workspace.as_deref());
@@ -245,12 +254,15 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
             query_timeout: Duration::from_secs(cli.query_timeout),
             batch_concurrency: cli.batch_concurrency,
             fail_fast: cli.fail_fast,
+            deny_columns,
             default_source,
             sources,
             searched_paths,
             workspace,
         });
     }
+
+    let deny_columns = resolve_deny_columns(cli, None);
 
     let url = if let Some(url) = &cli.url {
         url.clone()
@@ -299,6 +311,7 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
         query_timeout: Duration::from_secs(cli.query_timeout),
         batch_concurrency: cli.batch_concurrency,
         fail_fast: cli.fail_fast,
+        deny_columns,
         default_source: "default".into(),
         sources,
         searched_paths,
@@ -431,6 +444,102 @@ fn build_mysql_url_from_parts() -> Option<String> {
 
 pub fn detect_engine(hint: Option<&str>, url: &str) -> Result<EngineKind> {
     detect_engine_from_url(hint, url)
+}
+
+/// Resolve deny-list: CLI wins, then env `MCP_SQL_DENY_COLUMNS`, then TOML.
+fn resolve_deny_columns(cli: &Cli, toml_cols: Option<&[String]>) -> Vec<String> {
+    if !cli.deny_columns.is_empty() {
+        return normalize_deny_columns(cli.deny_columns.clone());
+    }
+    if let Ok(env) = std::env::var("MCP_SQL_DENY_COLUMNS") {
+        let cols: Vec<String> = env
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+        if !cols.is_empty() {
+            return normalize_deny_columns(cols);
+        }
+    }
+    if let Some(cols) = toml_cols {
+        if !cols.is_empty() {
+            return normalize_deny_columns(cols.to_vec());
+        }
+    }
+    Vec::new()
+}
+
+fn normalize_deny_columns(cols: Vec<String>) -> Vec<String> {
+    cols.into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Public connection target metadata for `list_sources` (no credentials).
+pub fn source_endpoint(url: &str, engine: EngineKind) -> SourceEndpoint {
+    let (host, port) = match parse_host_port(url, engine) {
+        Some((h, p)) => (Some(h), Some(p)),
+        None => (None, None),
+    };
+    SourceEndpoint {
+        engine: match engine {
+            EngineKind::Postgres => "postgres".into(),
+            EngineKind::Mysql => "mysql".into(),
+            EngineKind::Sqlite => "sqlite".into(),
+        },
+        host,
+        port,
+        database: database_from_url(url, engine),
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SourceEndpoint {
+    pub engine: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
+}
+
+fn database_from_url(url: &str, engine: EngineKind) -> Option<String> {
+    match engine {
+        EngineKind::Sqlite => {
+            let path = url
+                .strip_prefix("sqlite://")
+                .or_else(|| url.strip_prefix("sqlite:"))
+                .unwrap_or(url);
+            if path.is_empty() || path == ":memory:" || path == "memory:" {
+                Some(":memory:".into())
+            } else {
+                Some(path.split('?').next().unwrap_or(path).to_string())
+            }
+        }
+        EngineKind::Postgres | EngineKind::Mysql => {
+            let lower = url.to_ascii_lowercase();
+            let rest = if lower.starts_with("postgresql://") {
+                url.get("postgresql://".len()..)?
+            } else if lower.starts_with("postgres://") {
+                url.get("postgres://".len()..)?
+            } else if lower.starts_with("mysql://") {
+                url.get("mysql://".len()..)?
+            } else {
+                return None;
+            };
+            let after_at = rest.rsplit('@').next().unwrap_or(rest);
+            let db = after_at.split('/').nth(1)?;
+            let db = db.split('?').next()?.trim();
+            if db.is_empty() {
+                None
+            } else {
+                Some(db.to_string())
+            }
+        }
+    }
 }
 
 #[cfg(test)]

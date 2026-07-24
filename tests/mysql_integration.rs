@@ -35,6 +35,7 @@ fn exec_opts() -> ExecOptions {
         limit_injected: false,
         page_offset: 0,
         page_size: None,
+        deny_columns: vec![],
     }
 }
 

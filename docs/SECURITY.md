@@ -75,6 +75,8 @@ GRANT SELECT ON ALL TABLES IN SCHEMA public TO mcp_ro;
 
 - Credentials from `.env` / env / TOML `url_env` — never from tool arguments
 - Connection errors **redact passwords** in URLs (`mysql://user:***@host/db`)
+- `list_sources` exposes engine/host/port/database only — never user/password
+- Optional **opt-in** column deny-list (`--deny-columns` / `MCP_SQL_DENY_COLUMNS` / TOML) redacts matching cells as `"[redacted]"`
 - Do not log full DSNs (`MCP_SQL_LOG` goes to stderr)
 - Optional audit trail: `MCP_SQL_LOG=audit` logs executed SQL (no param values)
 - Do not put passwords in MCP client JSON `args`

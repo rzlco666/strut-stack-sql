@@ -92,6 +92,8 @@ pub struct ColumnarMeta {
     pub has_more: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_fetched: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redacted_columns: Option<Vec<String>>,
 }
 
 impl ColumnarResult {
@@ -109,6 +111,7 @@ impl ColumnarResult {
                 page_size: None,
                 has_more: None,
                 total_fetched: None,
+                redacted_columns: None,
             },
         }
     }
@@ -168,6 +171,7 @@ mod tests {
                 page_size: None,
                 has_more: None,
                 total_fetched: None,
+                redacted_columns: None,
             },
         };
         let json = serde_json::to_string(&result).unwrap();
@@ -189,6 +193,7 @@ mod tests {
                 page_size: None,
                 has_more: None,
                 total_fetched: None,
+                redacted_columns: None,
             },
         };
         result.apply_pagination(2, 2);

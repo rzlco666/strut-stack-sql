@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.0.1 — 2026-07-24
+
+Correctness + agent DX patch from live MCP scorecard.
+
+### P0
+
+- **Postgres typed cells:** `uuid` / `timestamptz` / `inet` / `citext` serialize as JSON strings (no silent `null`)
+- **Index columns:** `describe_table` / `list_indexes` fill `indexes[].columns` on Postgres
+
+### P1
+
+- **Domain types:** `USER-DEFINED` resolved to `udt_name` (`citext`, …)
+- **`list_sources`:** returns `engine` / `host` / `port` / `database` (no credentials)
+- **Batch order:** `execute_sql` `queries[]` results preserve input order
+- **`analyze_query_performance`:** rejects SQL already wrapped in `EXPLAIN`
+
+### P2
+
+- **Opt-in column deny-list:** `--deny-columns` / `MCP_SQL_DENY_COLUMNS` / TOML → `"[redacted]"` + `meta.redacted_columns`
+- **`schema_overview`:** one-shot tables + approx row counts + FKs (`--full-tools`)
+
 ## 1.0.0 — 2026-07-24
 
 **Strut Stack SQL** — first stable release (rebrand from `mcp-sql-rust`).

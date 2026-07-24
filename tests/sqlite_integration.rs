@@ -29,6 +29,7 @@ fn exec_opts(write_mode: WriteMode) -> ExecOptions {
         limit_injected: false,
         page_offset: 0,
         page_size: None,
+        deny_columns: vec![],
     }
 }
 
