@@ -19,6 +19,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Download mcp-publisher
         run: |
@@ -27,12 +29,47 @@ jobs:
             | tar xz mcp-publisher
           chmod +x mcp-publisher
 
-      - name: Sync server.json version with release tag
-        if: github.event_name == 'release'
+      - name: Sync server.json from latest release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          jq --arg v "$VERSION" '.version = $v' server.json > server.json.tmp
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "release" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="$(gh release view --repo "${{ github.repository }}" --json tagName -q .tagName | sed 's/^v//')"
+          fi
+          echo "Publishing version=$VERSION"
+          REPO="${{ github.repository }}"
+          BASE="https://github.com/${REPO}/releases/download/v${VERSION}"
+          TMP="$(mktemp -d)"
+          gh release download "v${VERSION}" --repo "$REPO" -p "SHA256SUMS" -D "$TMP"
+          hash_for() {
+            awk -v f="$1" '$2 == f { print $1; exit }' "${TMP}/SHA256SUMS"
+          }
+          jq \
+            --arg v "$VERSION" \
+            --arg linux_x64 "${BASE}/strut-stack-sql-linux-x64.mcpb" \
+            --arg linux_x64_h "$(hash_for strut-stack-sql-linux-x64.mcpb)" \
+            --arg macos_arm "${BASE}/strut-stack-sql-macos-arm64.mcpb" \
+            --arg macos_arm_h "$(hash_for strut-stack-sql-macos-arm64.mcpb)" \
+            --arg macos_x64 "${BASE}/strut-stack-sql-macos-x64.mcpb" \
+            --arg macos_x64_h "$(hash_for strut-stack-sql-macos-x64.mcpb)" \
+            --arg linux_arm "${BASE}/strut-stack-sql-linux-arm64.mcpb" \
+            --arg linux_arm_h "$(hash_for strut-stack-sql-linux-arm64.mcpb)" \
+            '
+            .version = $v
+            | .packages[0].identifier = $linux_x64
+            | .packages[0].fileSha256 = $linux_x64_h
+            | .packages[1].identifier = $macos_arm
+            | .packages[1].fileSha256 = $macos_arm_h
+            | .packages[2].identifier = $macos_x64
+            | .packages[2].fileSha256 = $macos_x64_h
+            | .packages[3].identifier = $linux_arm
+            | .packages[3].fileSha256 = $linux_arm_h
+            ' server.json > server.json.tmp
           mv server.json.tmp server.json
+          jq '{name, version, packages: [.packages[]|{identifier,fileSha256}]}' server.json
 
       - name: Validate manifest
         run: ./mcp-publisher validate server.json
@@ -44,4 +81,4 @@ jobs:
 
       - name: Verify registry entry
         run: |
-          curl -fsSL "https://registry.modelcontextprotocol.io/v0/servers?search=io.github.rzlco666/mcp-sql-rust" | jq .
+          curl -fsSL "https://registry.modelcontextprotocol.io/v0/servers?search=io.github.rzlco666/strut-stack-sql" | jq .

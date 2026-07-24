@@ -41,24 +41,23 @@ On GitHub Release (`release: published`) or after Release workflow completes:
 
 Manual fallback: `workflow_dispatch` on `registry-publish.yml`.
 
-## Manual publish
-
-1. Install `mcp-publisher` (see [MCP Registry docs](https://github.com/modelcontextprotocol/registry))
-2. After release, patch MCPB hash:
-
-```bash
-./scripts/update-server-json-sha.sh 0.4.0
-```
-
-3. Authenticate (interactive): `mcp-publisher login github`
-4. `mcp-publisher validate server.json && mcp-publisher publish`
-
 ## Verify
 
 ```bash
 curl -s "https://registry.modelcontextprotocol.io/v0/servers?search=io.github.rzlco666/strut-stack-sql"
 ```
 
+## Manual publish
+
+1. Install `mcp-publisher` (see [MCP Registry docs](https://github.com/modelcontextprotocol/registry))
+2. After release, patch MCPB hashes:
+
+```bash
+./scripts/update-server-json-sha.sh 1.0.4
+```
+
+3. Authenticate (interactive): `mcp-publisher login github`
+4. `mcp-publisher validate server.json && mcp-publisher publish`
 ## Cursor install (binary)
 
 ```json
