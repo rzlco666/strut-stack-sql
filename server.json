@@ -93,5 +93,11 @@
         }
       ]
     }
-  ]
+  ],
+  "_meta": {
+    "io.modelcontextprotocol.registry/publisher-provided": {
+      "mcpSpecVersion": "2025-06-18",
+      "conformanceReport": "docs/CONFORMANCE.md"
+    }
+  }
 }

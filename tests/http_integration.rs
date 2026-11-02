@@ -1499,3 +1499,139 @@ async fn admin_gate_allows_grant_with_flag_and_admin_grant() {
     assert_ne!(status, StatusCode::FORBIDDEN, "{body}");
     assert!(!body.contains("--allow-grants"), "{body}");
 }
+
+// ---------------------------------------------------------------------------
+// MCP conformance: pinned protocol version + Origin validation
+// ---------------------------------------------------------------------------
+
+fn initialize_body(protocol_version: &str) -> String {
+    json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": protocol_version,
+            "capabilities": {},
+            "clientInfo": { "name": "conformance-test", "version": "0" }
+        }
+    })
+    .to_string()
+}
+
+async fn post_initialize(app: axum::Router, protocol_version: &str) -> (StatusCode, String) {
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/mcp")
+                .header("content-type", "application/json")
+                .header("accept", "application/json, text/event-stream")
+                .header("host", "localhost")
+                .body(Body::from(initialize_body(protocol_version)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    (status, String::from_utf8_lossy(&bytes).to_string())
+}
+
+#[tokio::test]
+async fn initialize_negotiates_pinned_protocol_version() {
+    for requested in ["2025-06-18", "2025-03-26", "2024-11-05", "not-a-version"] {
+        let config = sqlite_config(WriteMode::ReadOnly).await;
+        let (app, _ct) = build_http_router(config);
+        let (status, body) = post_initialize(app, requested).await;
+        assert_eq!(status, StatusCode::OK, "requested {requested}: {body}");
+        assert!(
+            body.contains("\"protocolVersion\":\"2025-06-18\""),
+            "requested {requested} must negotiate the pinned version, got: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn initialize_advertises_this_server_identity() {
+    let config = sqlite_config(WriteMode::ReadOnly).await;
+    let (app, _ct) = build_http_router(config);
+    let (status, body) = post_initialize(app, "2025-06-18").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body.contains("\"serverInfo\":{\"name\":\"strut-stack-sql\""),
+        "serverInfo must identify this server, got: {body}"
+    );
+    assert!(
+        body.contains(env!("CARGO_PKG_VERSION")),
+        "serverInfo must carry the crate version, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn http_rejects_unsupported_protocol_version_header() {
+    let config = sqlite_config(WriteMode::ReadOnly).await;
+    let (app, _ct) = build_http_router(config);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/mcp")
+                .header("content-type", "application/json")
+                .header("accept", "application/json, text/event-stream")
+                .header("host", "localhost")
+                .header("mcp-protocol-version", "2025-03-26")
+                .body(Body::from(initialize_body("2025-03-26")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn http_rejects_non_loopback_origin() {
+    let config = sqlite_config(WriteMode::ReadOnly).await;
+    let (app, _ct) = build_http_router(config);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/mcp")
+                .header("content-type", "application/json")
+                .header("accept", "application/json, text/event-stream")
+                .header("host", "evil.example.com")
+                .header("origin", "http://evil.example.com")
+                .body(Body::from(initialize_body("2025-06-18")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "non-loopback Origin must be rejected (DNS rebinding)"
+    );
+}
+
+#[tokio::test]
+async fn http_accepts_loopback_origin() {
+    let config = sqlite_config(WriteMode::ReadOnly).await;
+    let (app, _ct) = build_http_router(config);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/mcp")
+                .header("content-type", "application/json")
+                .header("accept", "application/json, text/event-stream")
+                .header("host", "127.0.0.1:8080")
+                .header("origin", "http://127.0.0.1:8080")
+                .body(Body::from(initialize_body("2025-06-18")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}

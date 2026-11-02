@@ -32,7 +32,7 @@ Copy [packaging/mcp.json.example](../packaging/mcp.json.example) and adjust path
         "${workspaceFolder}"
       ],
       "env": {
-        "MCP_SQL_RUST_BIN": "/home/you/.cargo/bin/strut-stack-sql",
+        "STRUT_STACK_SQL_BIN": "/home/you/.cargo/bin/strut-stack-sql",
         "MCP_SQL_ARGS": "--full-tools --deny-columns password_hash,totp_secret_encrypted,code_hash"
       }
     }

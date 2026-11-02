@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+### MCP conformance gate & client matrix (B6)
+
+- **Runnable conformance gate**: `scripts/conformance/run.sh` (Python 3
+  stdlib only) exercises stdio and Streamable HTTP — initialize/version
+  negotiation, `ping`, `tools/list` schema validity for all 20 tools,
+  `tools/call` per group, unknown-tool and malformed-message shapes, batch
+  rejection, HTTP auth/OAuth metadata/session headers, and DNS-rebinding
+  Origin checks. It writes JSON plus a human summary and fails CI on required
+  failures.
+- **Pinned MCP spec 2025-06-18**: the server now advertises its own
+  `serverInfo` identity, answers older/unknown requested versions with
+  2025-06-18, rejects unsupported `MCP-Protocol-Version` headers with 400, and
+  no longer echo-negotiates 2025-03-26 (whose batch requirement is not
+  implemented).
+- **DNS rebinding defense**: non-loopback `Origin` values are rejected with
+  403; loopback origins must match the `Host` header and port. Remote
+  deployments allowlist exact origins with
+  `STRUT_STACK_SQL_ALLOWED_ORIGINS`.
+- **Six-client matrix**: `docs/CLIENTS.md` has paste-ready stdio + HTTP
+  configs for Cursor, Claude Code, VS Code, Codex, Windsurf, and OpenCode;
+  every JSON/TOML block is parsed by `scripts/conformance/check_clients.py`
+  and the minimal stdio command line is smoke-run.
+- **Measured result**: repo runner 48 pass / 0 fail / 3 optional (51 checks);
+  official suite 6 applicable passes, 20 not applicable (recorded in
+  `docs/CONFORMANCE.md`). CI and release workflows now run the gate; the
+  release job depends on it.
+
 ### Schema intelligence & performance advisor (PRD-F3)
 
 - **Ranked `search_objects`**: relevance ordering exact > prefix > substring >

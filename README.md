@@ -60,6 +60,7 @@ Feature comparison against the common categories of SQL MCP servers. No benchmar
 - **Two transports, both first-class**
   - **stdio** for local agents (Cursor, Claude Code, VS Code, …).
   - **Streamable HTTP** (`--http`) with **API-token authentication and a write mode per token**, safe `/livez` + `/readyz` probes, and a hard rule: binding a non-loopback address without tokens is refused.
+- **Pinned MCP spec: 2025-06-18** — version negotiation, `tools/list` schemas, error shapes, session headers, and DNS-rebinding Origin checks are covered by a runnable conformance gate ([docs/CONFORMANCE.md](docs/CONFORMANCE.md)). Client configs: [docs/CLIENTS.md](docs/CLIENTS.md).
 - **Token-efficient results** — columnar JSON by default, `--max-rows` / `--max-bytes` caps, server-side pagination, optional per-column redaction (`--deny-columns`).
 - **Audit log** — executed SQL is emitted on the `audit` tracing target (statement text only, never parameter values).
 - **Multi-source** — one server, several named databases via TOML config; pick per call with `"source": "..."`.
@@ -175,6 +176,8 @@ Full reference: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 | [docs/QUICKSTART.md](docs/QUICKSTART.md) | First run, step by step |
 | [docs/INSTALL.md](docs/INSTALL.md) | All install channels |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | CLI / env / TOML, precedence, HTTP tokens |
+| [docs/CLIENTS.md](docs/CLIENTS.md) | Paste-ready configs for the six supported clients |
+| [docs/CONFORMANCE.md](docs/CONFORMANCE.md) | MCP conformance results + runnable gate |
 | [docs/TOOLS.md](docs/TOOLS.md) | Tool schemas + the supported SQL surface |
 | [docs/SECURITY.md](docs/SECURITY.md) | Guard, write tiers, HTTP auth, audit log |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Module map |

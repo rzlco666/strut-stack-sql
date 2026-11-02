@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -15,13 +16,15 @@ use axum::{
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    CallToolResult, JsonObject, ListToolsResult, ServerCapabilities, ServerInfo, Tool,
+    CallToolResult, ClientRequest, Implementation, JsonObject, JsonRpcMessage, ListToolsResult,
+    ProtocolVersion, ServerCapabilities, ServerInfo, Tool,
 };
-use rmcp::service::RequestContext;
-use rmcp::transport::stdio;
+use rmcp::service::{RequestContext, RxJsonRpcMessage, TxJsonRpcMessage};
+use rmcp::transport::async_rw::AsyncRwTransport;
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
+use rmcp::transport::Transport;
 use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler, ServiceExt};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -62,6 +65,21 @@ pub use oauth::{OAuthValidator, ProtectedResourceMetadata};
 /// target's level (no sqlx dependency outside the driver crates); audit
 /// events are info-level so the default filter shows them.
 pub const DEFAULT_LOG_FILTER: &str = "info,sqlx=warn,audit=info";
+
+/// The exact MCP specification version this server implements (PRD-CONF-02).
+///
+/// 2025-06-18 is the last spec revision whose server requirements this
+/// codebase actually satisfies end to end. Older versions are *not*
+/// advertised: 2025-03-26 and earlier require receiving JSON-RPC batches,
+/// which this transport stack does not implement. A client that asks for an
+/// unsupported version is answered with this version, as the lifecycle spec
+/// requires.
+pub const SUPPORTED_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::V_2025_06_18;
+
+/// Whether `version` is exactly the pinned supported spec version.
+pub fn is_supported_protocol_version(version: &ProtocolVersion) -> bool {
+    version == &SUPPORTED_PROTOCOL_VERSION
+}
 
 /// Principal attached to an HTTP request by the auth middleware. The MCP
 /// service copies HTTP request extensions into the per-call
@@ -528,6 +546,10 @@ impl ServerHandler for McpSqlServer {
             );
         }
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::new(
+                "strut-stack-sql",
+                env!("CARGO_PKG_VERSION"),
+            ))
             .with_instructions(instructions)
     }
 
@@ -623,10 +645,51 @@ impl ServerHandler for McpSqlServer {
     }
 }
 
+/// Transport wrapper that pins the initialize handshake to the supported
+/// spec version. rmcp negotiates by echoing any version its SDK knows, so a
+/// client asking for 2025-03-26 would otherwise be told 2025-03-26 even
+/// though this server does not implement that revision's batch requirement.
+/// Rewriting the requested version makes rmcp's echo land on our pin; the
+/// lifecycle spec explicitly permits answering an unsupported version with a
+/// supported one.
+struct PinProtocolVersion<T>(T);
+
+impl<T> Transport<rmcp::RoleServer> for PinProtocolVersion<T>
+where
+    T: Transport<rmcp::RoleServer> + Send + 'static,
+{
+    type Error = T::Error;
+
+    fn send(
+        &mut self,
+        item: TxJsonRpcMessage<rmcp::RoleServer>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        self.0.send(item)
+    }
+
+    async fn receive(&mut self) -> Option<RxJsonRpcMessage<rmcp::RoleServer>> {
+        let mut message = self.0.receive().await?;
+        if let JsonRpcMessage::Request(request) = &mut message {
+            if let ClientRequest::InitializeRequest(initialize) = &mut request.request {
+                initialize.params.protocol_version = SUPPORTED_PROTOCOL_VERSION;
+            }
+        }
+        Some(message)
+    }
+
+    async fn close(&mut self) -> Result<(), Self::Error> {
+        self.0.close().await
+    }
+}
+
 pub async fn run_stdio(config: AppConfig) -> Result<()> {
     let server = McpSqlServer::new(config);
+    let transport = PinProtocolVersion(AsyncRwTransport::new_server(
+        tokio::io::stdin(),
+        tokio::io::stdout(),
+    ));
     let service = server
-        .serve(stdio())
+        .serve(transport)
         .await
         .inspect_err(|e| tracing::error!("stdio serve error: {e:?}"))?;
     service.waiting().await?;
@@ -639,6 +702,9 @@ pub struct HttpState {
     /// Present when OAuth is configured; served at
     /// `/.well-known/oauth-protected-resource`.
     protected_resource: Option<Arc<ProtectedResourceMetadata>>,
+    /// Extra non-loopback origins allowed to call the MCP endpoint
+    /// (`STRUT_STACK_SQL_ALLOWED_ORIGINS`, comma-separated).
+    allowed_origins: Arc<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -999,6 +1065,162 @@ async fn protected_resource(State(state): State<HttpState>) -> Response {
     }
 }
 
+const MCP_PROTOCOL_VERSION_HEADER: &str = "mcp-protocol-version";
+const ALLOWED_ORIGINS_ENV: &str = "STRUT_STACK_SQL_ALLOWED_ORIGINS";
+
+/// Enforce the pinned spec version on Streamable HTTP:
+/// * a present `MCP-Protocol-Version` header must equal the supported version
+///   (the spec requires 400 for an unsupported version);
+/// * an `initialize` body asking for another version is rewritten to the
+///   supported version, which is the spec-mandated fallback answer.
+async fn mcp_protocol_version_middleware(req: Request<Body>, next: Next) -> Response {
+    if let Some(value) = req.headers().get(MCP_PROTOCOL_VERSION_HEADER) {
+        let supported = value
+            .to_str()
+            .map(|value| value == SUPPORTED_PROTOCOL_VERSION.as_str())
+            .unwrap_or(false);
+        if !supported {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "unsupported MCP-Protocol-Version header" })),
+            )
+                .into_response();
+        }
+    }
+
+    if req.method() != Method::POST {
+        return next.run(req).await;
+    }
+
+    let (mut parts, body) = req.into_parts();
+    let bytes = match axum::body::to_bytes(body, MAX_MCP_BODY_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(json!({ "error": "request body too large" })),
+            )
+                .into_response();
+        }
+    };
+    let rewritten = match serde_json::from_slice::<Value>(&bytes) {
+        Ok(mut value) => {
+            if rewrite_initialize_version(&mut value) {
+                serde_json::to_vec(&value).unwrap_or_else(|_| bytes.to_vec())
+            } else {
+                bytes.to_vec()
+            }
+        }
+        Err(_) => bytes.to_vec(),
+    };
+    parts.headers.remove(header::CONTENT_LENGTH);
+    next.run(Request::from_parts(parts, Body::from(rewritten)))
+        .await
+}
+
+/// Point an `initialize` request at the pinned version. Returns whether the
+/// document changed.
+fn rewrite_initialize_version(value: &mut Value) -> bool {
+    if value.get("method").and_then(Value::as_str) != Some("initialize") {
+        return false;
+    }
+    let Some(params) = value.get_mut("params").and_then(Value::as_object_mut) else {
+        return false;
+    };
+    let Some(version) = params.get("protocolVersion").and_then(Value::as_str) else {
+        return false;
+    };
+    if version == SUPPORTED_PROTOCOL_VERSION.as_str() {
+        return false;
+    }
+    params.insert(
+        "protocolVersion".to_string(),
+        Value::String(SUPPORTED_PROTOCOL_VERSION.as_str().to_string()),
+    );
+    true
+}
+
+/// Split an HTTP authority (`host`, `host:port`, `[v6]`, `[v6]:port`).
+fn split_authority(authority: &str) -> (String, Option<u16>) {
+    if let Some(rest) = authority.strip_prefix('[') {
+        let (host, tail) = rest.split_once(']').unwrap_or((rest, ""));
+        let port = tail.strip_prefix(':').and_then(|p| p.parse().ok());
+        return (host.to_ascii_lowercase(), port);
+    }
+    match authority.rsplit_once(':') {
+        Some((host, port)) if !host.contains(':') => (host.to_ascii_lowercase(), port.parse().ok()),
+        _ => (authority.to_ascii_lowercase(), None),
+    }
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    let host = host.trim_matches(['[', ']']);
+    host.eq_ignore_ascii_case("localhost")
+        || host == "::1"
+        || host
+            .parse::<std::net::Ipv4Addr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
+}
+
+/// DNS-rebinding defense (MCP transports spec, Security Warning): browser
+/// requests carry an `Origin` header. Accept loopback origins only when the
+/// `Host` header is loopback too and the ports agree; accept other origins
+/// only when explicitly allowlisted.
+fn origin_allowed(origin: &str, host_header: Option<&str>, allowed: &[String]) -> bool {
+    let Some((scheme, rest)) = origin.split_once("://") else {
+        return false;
+    };
+    let scheme = scheme.to_ascii_lowercase();
+    if scheme != "http" && scheme != "https" {
+        return false;
+    }
+    let authority = rest.split('/').next().unwrap_or("");
+    if authority.is_empty() || authority.contains('@') {
+        return false;
+    }
+    let (origin_host, origin_port) = split_authority(authority);
+    if is_loopback_host(&origin_host) {
+        let Some(host) = host_header else {
+            return true;
+        };
+        let (host_host, host_port) = split_authority(host);
+        if !is_loopback_host(&host_host) {
+            return false;
+        }
+        let default_origin_port = if scheme == "https" { 443 } else { 80 };
+        return origin_port.unwrap_or(default_origin_port) == host_port.unwrap_or(80);
+    }
+    allowed
+        .iter()
+        .any(|allowed_origin| allowed_origin.eq_ignore_ascii_case(origin))
+}
+
+async fn validate_origin_middleware(
+    State(state): State<HttpState>,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
+    if let Some(origin) = req.headers().get(header::ORIGIN) {
+        let host = req
+            .headers()
+            .get(header::HOST)
+            .and_then(|v| v.to_str().ok());
+        let ok = origin
+            .to_str()
+            .map(|origin| origin_allowed(origin, host, &state.allowed_origins))
+            .unwrap_or(false);
+        if !ok {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "forbidden: origin not allowed" })),
+            )
+                .into_response();
+        }
+    }
+    next.run(req).await
+}
+
 /// Build the HTTP router without OAuth (API keys only).
 pub fn build_http_router(config: AppConfig) -> (Router, CancellationToken) {
     build_http_router_with_auth(config, None)
@@ -1017,7 +1239,17 @@ pub fn build_http_router_with_auth(
     let http_state = HttpState {
         config: Arc::new(config.clone()),
         protected_resource: protected_metadata,
+        allowed_origins: Arc::new(
+            std::env::var(ALLOWED_ORIGINS_ENV)
+                .unwrap_or_default()
+                .split(',')
+                .map(str::trim)
+                .filter(|origin| !origin.is_empty())
+                .map(str::to_string)
+                .collect(),
+        ),
     };
+    let origin_state = http_state.clone();
     let auth_state = HttpAuthState {
         config: Arc::new(config),
         oauth,
@@ -1030,13 +1262,13 @@ pub fn build_http_router_with_auth(
         StreamableHttpServerConfig::default().with_cancellation_token(ct.child_token()),
     );
 
-    let mcp_router =
-        Router::new()
-            .nest_service("/mcp", service)
-            .layer(axum::middleware::from_fn_with_state(
-                auth_state,
-                http_auth_middleware,
-            ));
+    let mcp_router = Router::new()
+        .nest_service("/mcp", service)
+        .layer(axum::middleware::from_fn_with_state(
+            auth_state,
+            http_auth_middleware,
+        ))
+        .layer(axum::middleware::from_fn(mcp_protocol_version_middleware));
 
     let router = Router::new()
         .route("/livez", get(livez))
@@ -1051,7 +1283,11 @@ pub fn build_http_router_with_auth(
             get(protected_resource),
         )
         .with_state(http_state)
-        .merge(mcp_router);
+        .merge(mcp_router)
+        .layer(axum::middleware::from_fn_with_state(
+            origin_state,
+            validate_origin_middleware,
+        ));
 
     (router, ct)
 }

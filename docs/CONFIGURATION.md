@@ -143,6 +143,14 @@ mode = the process mode). Clients send `Authorization: Bearer <token>`.
 Requests are rate-limited per token (`--http-rate-limit-per-minute`,
 default 600, 0 = off).
 
+The HTTP transport pins MCP spec **2025-06-18**. An unsupported
+`MCP-Protocol-Version` header is rejected with 400; an `initialize` body that
+requests an older/unknown version is answered with 2025-06-18. Browser-style
+`Origin` headers are checked for DNS rebinding: loopback origins must match the
+`Host` header and port, and non-loopback origins are rejected unless listed in
+`STRUT_STACK_SQL_ALLOWED_ORIGINS` (comma-separated exact origins). Requests
+without an `Origin` header (normal MCP clients) are unaffected.
+
 Binding a **non-loopback** address with no tokens configured is refused at
 startup; the only override is the explicit, loudly warned
 `--allow-unauthenticated-http` flag. Loopback binds without tokens work for
