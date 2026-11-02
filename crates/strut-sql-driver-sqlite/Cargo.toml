@@ -1,0 +1,25 @@
+[package]
+name = "strut-sql-driver-sqlite"
+version = "1.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "SQLite driver for Strut Stack SQL"
+license = "MIT"
+repository = "https://github.com/rzlco666/strut-stack-sql"
+
+[dependencies]
+strut-sql-driver-api = { path = "../strut-sql-driver-api" }
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio-rustls",
+    "sqlite",
+    "chrono",
+] }
+async-trait = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["std", "serde"] }
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+strut-sql-driver-conformance = { path = "../strut-sql-driver-conformance" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tempfile = "3"

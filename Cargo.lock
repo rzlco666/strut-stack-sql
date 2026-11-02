@@ -2105,6 +2105,73 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
+name = "strut-sql-driver-api"
+version = "1.1.0"
+dependencies = [
+ "async-trait",
+ "bigdecimal",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "strut-sql-driver-conformance"
+version = "1.1.0"
+dependencies = [
+ "async-trait",
+ "strut-sql-driver-api",
+]
+
+[[package]]
+name = "strut-sql-driver-mysql"
+version = "1.1.0"
+dependencies = [
+ "async-trait",
+ "bigdecimal",
+ "chrono",
+ "serde_json",
+ "sqlx",
+ "strut-sql-driver-api",
+ "strut-sql-driver-conformance",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "strut-sql-driver-postgres"
+version = "1.1.0"
+dependencies = [
+ "async-trait",
+ "bigdecimal",
+ "chrono",
+ "serde_json",
+ "sqlx",
+ "strut-sql-driver-api",
+ "strut-sql-driver-conformance",
+ "thiserror",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "strut-sql-driver-sqlite"
+version = "1.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "serde_json",
+ "sqlx",
+ "strut-sql-driver-api",
+ "strut-sql-driver-conformance",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "strut-stack-sql"
 version = "1.1.0"
 dependencies = [
