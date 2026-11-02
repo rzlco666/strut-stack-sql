@@ -1,11 +1,24 @@
 #!/usr/bin/env bash
-# Update packaging/homebrew/mcp-sql-rust.rb version and sha256 from release SHA256SUMS.
+# Update the Homebrew formulas to a released version, filling sha256 values
+# from that release's SHA256SUMS.
+#
+# Usage: scripts/bump-homebrew-formula.sh VERSION     (e.g. 1.1.0)
+#
+# Artifact names follow .github/workflows/release.yml:
+#   strut-stack-sql-{macos-arm64,macos-x64,linux-arm64,linux-x64}.tar.gz
+# Both formulas are updated: packaging/homebrew/strut-stack-sql.rb (primary)
+# and packaging/homebrew/mcp-sql-rust.rb (compat name). In the manifests the
+# sha256 placeholder is the literal UPDATE_AFTER_RELEASE; this script replaces
+# it (or a previous release's hash) with the real digest, per artifact.
 set -euo pipefail
 
-VERSION="${1:?usage: $0 VERSION (e.g. 0.4.0)}"
-REPO="${REPO:-rzlco666/mcp-sql-rust}"
+VERSION="${1:?usage: $0 VERSION (e.g. 1.1.0)}"
+REPO="${REPO:-rzlco666/strut-stack-sql}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-FORMULA="${ROOT}/packaging/homebrew/mcp-sql-rust.rb"
+FORMULAS=(
+  "${ROOT}/packaging/homebrew/strut-stack-sql.rb"
+  "${ROOT}/packaging/homebrew/mcp-sql-rust.rb"
+)
 SUMS_URL="https://github.com/${REPO}/releases/download/v${VERSION}/SHA256SUMS"
 TMP="$(mktemp)"
 trap 'rm -f "$TMP"' EXIT
@@ -13,30 +26,57 @@ trap 'rm -f "$TMP"' EXIT
 curl -fsSL "$SUMS_URL" -o "$TMP"
 
 hash_for() {
-  local artifact="$1"
-  grep " ${artifact}$" "$TMP" | awk '{print $1}'
+  awk -v f="$1" '$2 == f { print $1; exit }' "$TMP"
 }
 
-AARCH64_APPLE="$(hash_for "mcp-sql-rust-aarch64-apple-darwin.tar.gz")"
-X86_64_APPLE="$(hash_for "mcp-sql-rust-x86_64-apple-darwin.tar.gz")"
-AARCH64_LINUX="$(hash_for "mcp-sql-rust-aarch64-unknown-linux-gnu.tar.gz")"
-X86_64_LINUX="$(hash_for "mcp-sql-rust-x86_64-unknown-linux-gnu.tar.gz")"
+MACOS_ARM="strut-stack-sql-macos-arm64.tar.gz"
+MACOS_X64="strut-stack-sql-macos-x64.tar.gz"
+LINUX_ARM="strut-stack-sql-linux-arm64.tar.gz"
+LINUX_X64="strut-stack-sql-linux-x64.tar.gz"
 
-for h in "$AARCH64_APPLE" "$X86_64_APPLE" "$AARCH64_LINUX" "$X86_64_LINUX"; do
-  if [ -z "$h" ]; then
-    echo "Missing hash in SHA256SUMS" >&2
+for artifact in "$MACOS_ARM" "$MACOS_X64" "$LINUX_ARM" "$LINUX_X64"; do
+  if [ -z "$(hash_for "$artifact")" ]; then
+    echo "Missing hash for ${artifact} in ${SUMS_URL}" >&2
     exit 1
   fi
 done
 
-sed -i \
-  -e "s/version \"[^\"]*\"/version \"${VERSION}\"/" \
-  -e "s|releases/download/v[^/]*/|releases/download/v${VERSION}/|g" \
-  -e "s/REPLACE_ME_AARCH64_APPLE_DARWIN/${AARCH64_APPLE}/" \
-  -e "s/REPLACE_ME_X86_64_APPLE_DARWIN/${X86_64_APPLE}/" \
-  -e "s/REPLACE_ME_AARCH64_LINUX/${AARCH64_LINUX}/" \
-  -e "s/REPLACE_ME_X86_64_LINUX/${X86_64_LINUX}/" \
-  "$FORMULA"
+# Replace the sha256 on the first sha256 line following the URL of $artifact.
+set_hash_after_url() {
+  local file="$1" artifact="$2" hash="$3"
+  local url_line sha_line
+  url_line="$(grep -n "$artifact" "$file" | head -1 | cut -d: -f1)"
+  if [ -z "$url_line" ]; then
+    echo "Artifact URL not found in $file: $artifact" >&2
+    exit 1
+  fi
+  sha_line="$(awk -v start="$url_line" 'NR > start && /sha256/ { print NR; exit }' "$file")"
+  sed -i "${sha_line}s/sha256 \"[^\"]*\"/sha256 \"${hash}\"/" "$file"
+}
 
-echo "Updated ${FORMULA} for v${VERSION}"
-echo "Copy to homebrew-tap: Formula/mcp-sql-rust.rb"
+for FORMULA in "${FORMULAS[@]}"; do
+  # Version + download path, and normalize any legacy (pre-1.0) artifact
+  # names to the current release scheme so old manifests self-heal.
+  sed -i \
+    -e "s/version \"[^\"]*\"/version \"${VERSION}\"/" \
+    -e "s|releases/download/v[^/]*/|releases/download/v${VERSION}/|g" \
+    -e "s/strut-stack-sql-aarch64-apple-darwin\.tar\.gz/${MACOS_ARM}/g" \
+    -e "s/strut-stack-sql-x86_64-apple-darwin\.tar\.gz/${MACOS_X64}/g" \
+    -e "s/strut-stack-sql-aarch64-unknown-linux-gnu\.tar\.gz/${LINUX_ARM}/g" \
+    -e "s/strut-stack-sql-x86_64-unknown-linux-gnu\.tar\.gz/${LINUX_X64}/g" \
+    -e "s/mcp-sql-rust-aarch64-apple-darwin\.tar\.gz/${MACOS_ARM}/g" \
+    -e "s/mcp-sql-rust-x86_64-apple-darwin\.tar\.gz/${MACOS_X64}/g" \
+    -e "s/mcp-sql-rust-aarch64-unknown-linux-gnu\.tar\.gz/${LINUX_ARM}/g" \
+    -e "s/mcp-sql-rust-x86_64-unknown-linux-gnu\.tar\.gz/${LINUX_X64}/g" \
+    "$FORMULA"
+
+  set_hash_after_url "$FORMULA" "$MACOS_ARM" "$(hash_for "$MACOS_ARM")"
+  set_hash_after_url "$FORMULA" "$MACOS_X64" "$(hash_for "$MACOS_X64")"
+  set_hash_after_url "$FORMULA" "$LINUX_ARM" "$(hash_for "$LINUX_ARM")"
+  set_hash_after_url "$FORMULA" "$LINUX_X64" "$(hash_for "$LINUX_X64")"
+
+  if grep -q "UPDATE_AFTER_RELEASE" "$FORMULA"; then
+    echo "WARNING: UPDATE_AFTER_RELEASE placeholder remains in $FORMULA" >&2
+  fi
+  echo "Updated ${FORMULA} for v${VERSION}"
+done

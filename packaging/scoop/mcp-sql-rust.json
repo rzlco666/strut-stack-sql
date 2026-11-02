@@ -1,12 +1,12 @@
 {
-  "version": "0.4.0",
+  "version": "1.1.0",
   "description": "Token-efficient MCP server for MySQL, PostgreSQL, and SQLite",
   "homepage": "https://github.com/rzlco666/strut-stack-sql",
   "license": "MIT",
   "architecture": {
     "64bit": {
-      "url": "https://github.com/rzlco666/strut-stack-sql/releases/download/v0.4.0/strut-stack-sql-x86_64-pc-windows-msvc.zip",
-      "hash": "e4965a15bf48edfd030951f0796f5db7b41e09fe0f098afc191bddb2c5318348"
+      "url": "https://github.com/rzlco666/strut-stack-sql/releases/download/v1.1.0/strut-stack-sql-windows-x64.zip",
+      "hash": "UPDATE_AFTER_RELEASE"
     }
   },
   "bin": "strut-stack-sql.exe",
@@ -16,7 +16,7 @@
   "autoupdate": {
     "architecture": {
       "64bit": {
-        "url": "https://github.com/rzlco666/strut-stack-sql/releases/download/v0.4.0/strut-stack-sql-x86_64-pc-windows-msvc.zip"
+        "url": "https://github.com/rzlco666/strut-stack-sql/releases/download/v$version/strut-stack-sql-windows-x64.zip"
       }
     }
   }

@@ -6,6 +6,9 @@ use sqlx::{mysql::MySqlRow, postgres::PgRow, sqlite::SqliteRow, Column, Row, Typ
 use uuid::Uuid;
 
 pub fn bigdecimal_to_json(v: &BigDecimal) -> Value {
+    // SQL-BUG-06(c): never lose precision silently. Emit a JSON number only
+    // when the value survives a decimal → f64 → decimal round-trip exactly;
+    // otherwise emit the exact decimal as a JSON string.
     if v.fractional_digit_count() == 0 {
         if let Ok(i) = v.to_string().parse::<i64>() {
             if (-(1i64 << 53)..=(1i64 << 53)).contains(&i) {
@@ -13,12 +16,25 @@ pub fn bigdecimal_to_json(v: &BigDecimal) -> Value {
             }
         }
     }
-    if let Ok(f) = v.to_string().parse::<f64>() {
+    let s = v.to_string();
+    if let Ok(f) = s.parse::<f64>() {
         if f.is_finite() {
-            return Value::from(f);
+            if let Ok(back) = f.to_string().parse::<BigDecimal>() {
+                if back == *v {
+                    return Value::from(f);
+                }
+            }
         }
     }
-    Value::String(v.to_string())
+    Value::String(s)
+}
+
+/// Tagged JSON representation for binary payloads so agents never confuse a
+/// BLOB with text or with SQL NULL: `{"$blob_hex": "65646f63"}`.
+pub fn blob_hex_json(v: &[u8]) -> Value {
+    let mut map = serde_json::Map::new();
+    map.insert("$blob_hex".into(), Value::String(bytes_to_hex(v)));
+    Value::Object(map)
 }
 
 fn bytes_to_hex(v: &[u8]) -> String {
@@ -107,6 +123,22 @@ pub fn decode_mysql_cell(row: &MySqlRow, index: usize) -> Result<Value, sqlx::Er
         return Ok(Value::Null);
     }
 
+    // SQL-BUG-06(a): check BOOL/BOOLEAN *before* the numeric decoders — sqlx
+    // happily decodes a boolean column as i64, which used to win the race and
+    // surface `1`/`0` instead of `true`/`false`. Caveat: sqlx reports the
+    // type name "BOOLEAN" only for columns actually declared BOOL/BOOLEAN;
+    // a plain TINYINT(1) is indistinguishable from a boolean at the protocol
+    // level and stays numeric by design.
+    let type_name = row.column(index).type_info().name();
+    if mysql_type_is_bool(type_name) {
+        if let Ok(v) = row.try_get::<bool, _>(index) {
+            return Ok(Value::Bool(v));
+        }
+        if let Ok(v) = row.try_get::<i64, _>(index) {
+            return Ok(Value::Bool(v != 0));
+        }
+    }
+
     if let Ok(v) = row.try_get::<i64, _>(index) {
         return Ok(Value::from(v));
     }
@@ -144,8 +176,6 @@ pub fn decode_mysql_cell(row: &MySqlRow, index: usize) -> Result<Value, sqlx::Er
         return Ok(Value::String(v.to_rfc3339()));
     }
 
-    let type_name = row.column(index).type_info().name();
-
     if mysql_type_is_text(type_name) {
         if let Some(s) = mysql_decode_text_by_index(row, index) {
             return Ok(Value::String(s));
@@ -155,12 +185,6 @@ pub fn decode_mysql_cell(row: &MySqlRow, index: usize) -> Result<Value, sqlx::Er
     if mysql_type_is_binary(type_name) {
         if let Ok(v) = row.try_get::<Vec<u8>, _>(index) {
             return Ok(Value::String(bytes_to_hex(&v)));
-        }
-    }
-
-    if mysql_type_is_bool(type_name) {
-        if let Ok(v) = row.try_get::<bool, _>(index) {
-            return Ok(Value::Bool(v));
         }
     }
 
@@ -247,6 +271,29 @@ pub fn decode_pg_cell(row: &PgRow, index: usize) -> Result<Value, sqlx::Error> {
     if let Ok(v) = row.try_get::<IpNetwork, _>(index) {
         return Ok(Value::String(v.to_string()));
     }
+
+    // SQL-BUG-06(b/d): bytea and array columns must never fall through to a
+    // silent Null. bytea gets the same tagged hex shape as SQLite BLOBs;
+    // arrays decode element-wise for the common element types, and anything
+    // unrecognized surfaces as a tagged raw-bytes marker instead of Null.
+    let type_name = row.column(index).type_info().name();
+    if type_name.eq_ignore_ascii_case("bytea") {
+        if let Ok(v) = row.try_get::<Vec<u8>, _>(index) {
+            return Ok(blob_hex_json(&v));
+        }
+    }
+    if pg_type_is_array(type_name) {
+        if let Some(v) = decode_pg_array(row, index) {
+            return Ok(v);
+        }
+        if let Ok(bytes) = raw.as_bytes() {
+            let mut map = serde_json::Map::new();
+            map.insert("$raw_hex".into(), Value::String(bytes_to_hex(bytes)));
+            return Ok(Value::Object(map));
+        }
+        return Ok(Value::String(format!("<undecoded {type_name} value>")));
+    }
+
     if let Ok(v) = row.try_get::<Value, _>(index) {
         return Ok(v);
     }
@@ -274,6 +321,44 @@ pub fn decode_pg_cell(row: &PgRow, index: usize) -> Result<Value, sqlx::Error> {
     Ok(Value::Null)
 }
 
+/// Postgres array type names arrive as `text[]` / `int4[]` from sqlx, or the
+/// internal `_text` form depending on the catalog path.
+pub fn pg_type_is_array(type_name: &str) -> bool {
+    type_name.ends_with("[]") || (type_name.starts_with('_') && type_name.len() > 1)
+}
+
+/// Best-effort element-wise decode of a Postgres array column (SQL-BUG-06d).
+/// Returns `None` when no known element type matches, so the caller can fall
+/// back to a tagged raw representation instead of a silent Null.
+fn decode_pg_array(row: &PgRow, index: usize) -> Option<Value> {
+    if let Ok(v) = row.try_get::<Vec<String>, _>(index) {
+        return Some(Value::Array(v.into_iter().map(Value::String).collect()));
+    }
+    if let Ok(v) = row.try_get::<Vec<i64>, _>(index) {
+        return Some(Value::Array(v.into_iter().map(Value::from).collect()));
+    }
+    if let Ok(v) = row.try_get::<Vec<i32>, _>(index) {
+        return Some(Value::Array(v.into_iter().map(Value::from).collect()));
+    }
+    if let Ok(v) = row.try_get::<Vec<f64>, _>(index) {
+        return Some(Value::Array(v.into_iter().map(Value::from).collect()));
+    }
+    if let Ok(v) = row.try_get::<Vec<bool>, _>(index) {
+        return Some(Value::Array(v.into_iter().map(Value::Bool).collect()));
+    }
+    if let Ok(v) = row.try_get::<Vec<Uuid>, _>(index) {
+        return Some(Value::Array(
+            v.into_iter()
+                .map(|u| Value::String(u.to_string()))
+                .collect(),
+        ));
+    }
+    if let Ok(v) = row.try_get::<Vec<BigDecimal>, _>(index) {
+        return Some(Value::Array(v.iter().map(bigdecimal_to_json).collect()));
+    }
+    None
+}
+
 pub fn decode_sqlite_cell(row: &SqliteRow, index: usize) -> Result<Value, sqlx::Error> {
     let raw = row.try_get_raw(index)?;
     if raw.is_null() {
@@ -291,6 +376,11 @@ pub fn decode_sqlite_cell(row: &SqliteRow, index: usize) -> Result<Value, sqlx::
     }
     if let Ok(v) = row.try_get::<String, _>(index) {
         return Ok(Value::String(v));
+    }
+    // SQL-BUG-06(b): BLOB storage class used to fall through to a silent
+    // Null. Surface it as tagged hex so the agent can see data exists.
+    if let Ok(v) = row.try_get::<Vec<u8>, _>(index) {
+        return Ok(blob_hex_json(&v));
     }
     Ok(Value::Null)
 }
@@ -310,6 +400,42 @@ mod tests {
         let v: BigDecimal = "107744.5".parse().unwrap();
         let json = bigdecimal_to_json(&v);
         assert!(json.is_number());
+    }
+
+    #[test]
+    fn bigdecimal_high_precision_falls_back_to_string() {
+        // f64 cannot represent this exactly — precision must not be lost.
+        let v: BigDecimal = "12345678901234567890.123456789".parse().unwrap();
+        let json = bigdecimal_to_json(&v);
+        assert_eq!(json, Value::String("12345678901234567890.123456789".into()));
+    }
+
+    #[test]
+    fn bigdecimal_exact_binary_friendly_stays_number() {
+        let v: BigDecimal = "0.1".parse().unwrap();
+        // 0.1 in f64 prints back as "0.1", so the round-trip is exact in
+        // decimal terms and a JSON number is honest.
+        assert!(bigdecimal_to_json(&v).is_number());
+        let v: BigDecimal = "9007199254740993".parse().unwrap(); // 2^53 + 1
+        assert!(
+            bigdecimal_to_json(&v).is_string(),
+            "unsafe integer → string"
+        );
+    }
+
+    #[test]
+    fn blob_hex_json_is_tagged_object() {
+        let v = blob_hex_json(b"edoc");
+        assert_eq!(v, serde_json::json!({"$blob_hex": "65646f63"}));
+    }
+
+    #[test]
+    fn pg_type_is_array_detects_forms() {
+        assert!(pg_type_is_array("text[]"));
+        assert!(pg_type_is_array("int4[]"));
+        assert!(pg_type_is_array("_text"));
+        assert!(!pg_type_is_array("text"));
+        assert!(!pg_type_is_array("bytea"));
     }
 
     #[test]

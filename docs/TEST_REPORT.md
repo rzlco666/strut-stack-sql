@@ -1,101 +1,80 @@
-# Test Report — strut-stack-sql v0.4.0
+# Test Report — strut-stack-sql v1.1.0
 
-Structured summary of verification for v0.4.0 production readiness. Automated suites live in `cargo test`; this document captures scope, CI behavior, and distribution audit.
+What the automated tests in this repository actually cover, counted from the
+code — no scorecards, no self-assessment. If a number here ever disagrees
+with a fresh count from the tree, the tree wins and this file is the bug.
 
-## Automated test matrix
+- **Version:** 1.1.0
+- **Counted on:** 2026-11-02
+- **Counting method:** `grep -rn "#\[test\]\|#\[tokio::test\]" src tests`
+  (test attributes), cross-checked per file below. Snapshot taken while the
+  1.1.0 hardening was landing (count verified stable across two consecutive
+  counts); **recount at release freeze** before quoting externally.
 
-| Suite | File | Tests | CI default |
-|-------|------|-------|------------|
-| Lib unit | `src/**` | 24 | Yes |
-| Standalone unit | `tests/unit.rs` | 12 | Yes |
-| SQLite integration | `tests/sqlite_integration.rs` | 5 | Yes |
-| HTTP / handler integration | `tests/http_integration.rs` | 23 + 5 ignored | Yes (SQLite); PG/MySQL in `integration-http-docker` job |
-| MySQL integration | `tests/mysql_integration.rs` | 5 ignored | Optional (`MYSQL_DATABASE_URL` secret) |
+## Totals
 
-**Total:** 69 tests (64 always runnable; 10 engine-specific ignored locally unless DSN set).
+| | Count |
+|---|---:|
+| Test functions in `src/` (inline unit tests) | 139 |
+| Test functions in `tests/` (integration/unit files) | 62 |
+| **Total** | **201** |
+| Runnable by default (`cargo test`) | 187 |
+| `#[ignore]`d — need a live engine DSN | 14 |
 
-### HTTP integration categories (`tests/http_integration.rs`)
+## Coverage matrix (per area)
 
-| Category | Count | Engine |
-|----------|-------|--------|
-| `GET /healthz` | 1 | SQLite |
-| Security guard (DML, DDL, TXN, multi-stmt, empty, GRANT) | 6 | SQLite |
-| Parameterized queries | 3 | SQLite |
-| Param count validation | 2 | SQLite |
-| SQL injection via params | 3 | SQLite |
-| Type boundaries | 2 | SQLite |
-| Batch (legacy, parameterized, mixed) | 3 | SQLite |
-| Pagination (server-side OFFSET/LIMIT) | 1 | SQLite |
-| Bug regressions (`describe_table`, COUNT) | 2 | SQLite |
-| `search_objects` | 1 | SQLite |
-| PostgreSQL smoke | 2 | Docker PG (CI) |
-| MySQL regressions (PROCESSLIST, COUNT, describe) | 3 | Docker MySQL (CI) |
+| Area | Files | Tests | Runs where |
+|---|---|---:|---|
+| SQL guard & classification | `src/guard/classify.rs` (12), `src/guard/mod.rs` (38), `src/guard/params.rs` (15) | 65 | Default |
+| Configuration & HTTP tokens | `src/config.rs` | 12 | Default |
+| DB layer (bind, exec, pool, schema, value) | `src/db/bind.rs` (6), `src/db/exec.rs` (1), `src/db/pool.rs` (3), `src/db/schema.rs` (18), `src/db/value.rs` (12) | 40 | Default |
+| Result formatting | `src/format/columnar.rs` | 7 | Default |
+| URL redaction | `src/redact.rs` | 6 | Default |
+| DDL tools | `src/tools/ddl.rs` | 9 | Default |
+| Standalone unit tests | `tests/unit.rs` | 14 | Default |
+| SQLite integration | `tests/sqlite_integration.rs` | 6 | Default |
+| HTTP / handler integration | `tests/http_integration.rs` | 34 (28 default on SQLite + 6 ignored) | Default + CI docker job |
+| MySQL integration | `tests/mysql_integration.rs` | 8 (all ignored) | Only with `MYSQL_DATABASE_URL` |
 
-Run locally:
+## What runs in CI
 
-```bash
-# Phase 1 — always
-cargo test --test http_integration
+| Job | What it runs |
+|---|---|
+| `test` | `cargo test --all-targets` (the 187 default tests), then `cargo build --release` |
+| `lint` | `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`, `cargo audit` (RustSec) |
+| `integration-http-docker` | Seeds PostgreSQL 16 + MySQL 8.4 service containers, runs the 6 ignored HTTP integration tests against both engines |
+| `integration-mysql` (main pushes only) | The 8 MySQL integration tests when the `MYSQL_DATABASE_URL` secret is set; skips loudly otherwise |
 
-# Phase 2 — docker compose
-docker compose up -d postgres mysql
-POSTGRES_DATABASE_URL=postgresql://demo:demo@localhost:5433/demo \
-MYSQL_DATABASE_URL=mysql://demo:demo@127.0.0.1:3307/demo \
-  cargo test --test http_integration -- --ignored
-```
+## 1.1.0 regression tests (named, by fix)
 
-## Bug regressions (confirmed fixed)
+Each 1.1.0 audit fix ships with a test that fails on v1.0.4 behavior:
 
-| Bug | Fix commits | Verification |
-|-----|-------------|--------------|
-| `describe_table` MySQL empty columns | `9132d28`, `77439f9` | Integration + HTTP tests |
-| `COUNT(0/1)` → boolean JSON | `9132d28` | `mysql_value` numeric-before-bool + tests |
-| `SHOW PROCESSLIST` blocked | `9132d28` | AST classify + guard/http tests |
+| Fix | Tests |
+|---|---|
+| CTE writes classified as DML | `cte_delete_is_dml_not_read`, `cte_update_and_insert_are_dml`, `nested_cte_write_is_found`, `plain_cte_select_is_read` |
+| `SELECT INTO` / `INTO OUTFILE` not reads | `select_into_is_not_read`, `mysql_into_outfile_is_not_read` |
+| GRANT/REVOKE are Admin class, need `--allow-grants` | `grant_and_revoke_are_admin_not_ddl`, `grant_blocked_below_ddl_mode`, `grant_allowed_at_guard_level_in_ddl_mode` |
+| Parameterized LIMIT clamp | `parameterized_limit_clamp_preserves_placeholder`, `clamps_explicit_limit_above_max_rows`, `clamps_user_limit_to_max_rows` |
+| HTTP token parsing & modes | `parse_http_tokens_full_format`, `parse_http_tokens_rejects_garbage` |
+| Deterministic, strict TOML config | `toml_default_source_is_deterministic`, `toml_unknown_fields_rejected` |
+| URL redaction hardening | `redacts_password_containing_at_sign`, `redacts_password_containing_colon`, `redacts_sensitive_query_params` |
+| Value fidelity | `blob_hex_json_is_tagged_object`, `bytes_to_hex_encodes_ascii`, `bigdecimal_high_precision_falls_back_to_string`, `bigdecimal_exact_binary_friendly_stays_number` |
+| Param binding strictness | `param_count_mismatch_rejected`, `params_extra_rejected`, `params_missing_placeholder_rejected`, `unexpected_params_rejected` |
 
-## Security audit
+## Known gaps (stated, not hidden)
 
-| Layer | Mechanism | Status |
-|-------|-----------|--------|
-| AST guard | sqlparser → classify → WriteMode | Enforced before pool |
-| Write tiers | ReadOnly / AllowWrites / AllowDdl | CLI flags |
-| Session RO | PG `default_transaction_read_only`; MySQL `SESSION TRANSACTION READ ONLY`; SQLite `?mode=ro` URL | `config.rs` |
-| Multi-statement | Parse + reject `;` chains | Unit + HTTP tests |
-| Empty query | Length + parse guard | HTTP tests |
-| Placeholder count | Before/after LIMIT rewrite | Unit + HTTP tests |
-| Parameter binding | sqlx bind (no concat) | HTTP injection tests |
-| Batch fail-soft | Per-item guard in batch | HTTP tests |
+- There is no coverage/line-percentage gate in CI yet.
+- Property-based tests for the placeholder scanner do not exist yet (the
+  scanner is covered by example-based tests in `src/guard/params.rs`).
+- MySQL integration tests depend on a repository secret and do not run on
+  pull requests from forks.
+- Performance is not asserted by tests; see [BENCHMARKS.md](BENCHMARKS.md)
+  for the (historical) measurements and their stated limits.
 
-## Performance (reference)
+## History note
 
-See [BENCHMARKS.md](BENCHMARKS.md):
-
-- PostgreSQL vs MCP rivals (`scripts/benchmark/run.sh`)
-- MySQL localhost v0.4.0 numbers (`scripts/benchmark/run-mysql.sh`)
-
-## Distribution audit (v0.4.0)
-
-| Channel | Status | Notes |
-|---------|--------|-------|
-| GitHub Release `v0.4.0` | Live | Binaries, MCPB, SHA256SUMS |
-| `server.json` sha256 | Match | Aligns with release asset digests |
-| GHCR Docker | Live | `docker.yml` succeeded on tag |
-| Homebrew / Scoop / winget manifests | At 0.4.0 in repo | Submit/update upstream taps separately |
-| MCP Registry | Live (0.4.0) | Published 2026-07-11 via Registry Publish workflow |
-
-## Scorecard rationale (9.9 / 10)
-
-| Aspect | Score | Notes |
-|--------|-------|-------|
-| Engine coverage (PG/MySQL/SQLite) | 10 | Full tool parity |
-| Security design + execution | 10 | No bypass in automated suites |
-| Performance | 10 | See BENCHMARKS.md |
-| Token efficiency | 10 | Columnar JSON |
-| Developer experience | 10 | Docker, packaging, docs |
-| Test coverage | 9.5 | HTTP matrix now automated; property-based tests optional |
-| Innovation | 10 | Columnar + 3 DB + parameterized MCP |
-
-**Deductions:** MCP Registry lag (-0.05); very large result sets still use `fetch_all` within LIMIT window (-0.05). Server-side pagination (OFFSET/LIMIT in guard) addresses pagination memory for `page_offset`/`page_size`.
-
-## CI coverage note
-
-Default `cargo test --all-targets` on push runs **64** tests. Full **69** requires ignored integration tests with live DSNs or the `integration-http-docker` CI job (PG + MySQL service containers).
+The v0.4.0 edition of this report claimed 69 tests and a 9.9/10 self
+scorecard. Both were stale by the time of the audit that produced 1.1.0
+(the code already contained more tests than the report claimed). The
+scorecard format is retired: this report now only states counts, coverage
+areas, and gaps.

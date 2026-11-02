@@ -33,6 +33,8 @@ jq \
   --arg macos_x64_h "$(hash_for strut-stack-sql-macos-x64.mcpb)" \
   --arg linux_arm "${BASE}/strut-stack-sql-linux-arm64.mcpb" \
   --arg linux_arm_h "$(hash_for strut-stack-sql-linux-arm64.mcpb)" \
+  --arg win_x64 "${BASE}/strut-stack-sql-windows-x64.mcpb" \
+  --arg win_x64_h "$(hash_for strut-stack-sql-windows-x64.mcpb)" \
   '
   .version = $version
   | .name = "io.github.rzlco666/strut-stack-sql"
@@ -45,6 +47,8 @@ jq \
   | .packages[2].fileSha256 = $macos_x64_h
   | .packages[3].identifier = $linux_arm
   | .packages[3].fileSha256 = $linux_arm_h
+  | .packages[4].identifier = $win_x64
+  | .packages[4].fileSha256 = $win_x64_h
   ' \
   "$SERVER_JSON" > "${SERVER_JSON}.tmp"
 

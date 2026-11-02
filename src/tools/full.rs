@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{source_endpoint, AppConfig};
 use crate::db::{
-    describe_table, list_foreign_keys, list_indexes, listed_index_from_schema_object, list_schemas,
-    list_tables, schema_overview,
+    describe_table, list_foreign_keys, list_indexes, list_schemas, list_tables,
+    listed_index_from_schema_object, schema_overview,
 };
 use crate::tools::core::{json_result, tool_error};
 
@@ -69,18 +69,29 @@ struct ListTablesResult {
 pub async fn handle_list_sources(
     config: &Arc<AppConfig>,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
+    // SQL-SEC-15: when endpoints are hidden (explicit override, or the
+    // automatic default under authenticated HTTP) only name + engine are
+    // exposed — host/port/database are reconnaissance data.
+    let hide = config.endpoints_hidden();
     let mut sources: Vec<_> = config
         .sources
         .values()
         .map(|s| {
             let endpoint = source_endpoint(&s.url, s.engine);
-            serde_json::json!({
-                "name": s.name,
-                "engine": endpoint.engine,
-                "host": endpoint.host,
-                "port": endpoint.port,
-                "database": endpoint.database,
-            })
+            if hide {
+                serde_json::json!({
+                    "name": s.name,
+                    "engine": endpoint.engine,
+                })
+            } else {
+                serde_json::json!({
+                    "name": s.name,
+                    "engine": endpoint.engine,
+                    "host": endpoint.host,
+                    "port": endpoint.port,
+                    "database": endpoint.database,
+                })
+            }
         })
         .collect();
     sources.sort_by(|a, b| {

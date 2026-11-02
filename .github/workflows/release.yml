@@ -93,6 +93,24 @@ jobs:
           Remove-Item "dist/strut-stack-sql.exe"
 
       - uses: actions/setup-node@v4
+        if: matrix.os == 'windows-latest'
+        with:
+          node-version: "20"
+
+      # Windows used to ship only the .zip; server.json (MCP Registry) also
+      # lists a windows-x64 .mcpb package, so build it: same manifest with the
+      # entry point pointed at the .exe.
+      - name: Package MCPB bundle (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          mkdir -p mcpb-pack-win
+          cp "target/${{ matrix.target }}/release/strut-stack-sql.exe" mcpb-pack-win/strut-stack-sql.exe
+          node -e "const fs=require('fs');const m=JSON.parse(fs.readFileSync('mcpb/manifest.json','utf8'));m.server.entry_point='strut-stack-sql.exe';m.server.mcp_config.command='\${__dirname}/strut-stack-sql.exe';fs.writeFileSync('mcpb-pack-win/manifest.json',JSON.stringify(m,null,2))"
+          npm install -g @anthropic-ai/mcpb
+          mcpb pack mcpb-pack-win "dist/${{ matrix.asset }}.mcpb" || true
+
+      - uses: actions/setup-node@v4
         if: matrix.os != 'windows-latest'
         with:
           node-version: "20"

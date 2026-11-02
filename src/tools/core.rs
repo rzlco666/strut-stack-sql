@@ -8,9 +8,10 @@ use serde_json::Value;
 
 use crate::config::AppConfig;
 use crate::db::{
-    analyze_query, execute_batch, execute_query, search_objects, ExecOptions, ObjectType,
+    analyze_query, execute_batch, execute_query, search_objects, ExecError, ExecOptions, ObjectType,
 };
 use crate::format::{format_columnar, resolve_result_format, to_json_text, ResultFormat};
+use crate::redact::redact_url;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchObjectsParams {
@@ -100,8 +101,38 @@ pub fn exec_options(config: &AppConfig) -> ExecOptions {
     }
 }
 
+/// Error category for tool failures (SQL-BUG-14): clients/agents judge
+/// retryability from the JSON-RPC error code, so validation problems and
+/// database execution failures must not share one code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolErrorKind {
+    /// Caller supplied something invalid (bad params, guard denial,
+    /// unknown source) → `invalid_params`; retrying unchanged is pointless.
+    Validation,
+    /// The database/driver failed (connect, execute) → `internal_error`;
+    /// retrying later may succeed.
+    Db,
+}
+
 pub fn tool_error(msg: impl Into<String>) -> McpError {
-    McpError::invalid_params(msg.into(), None)
+    tool_error_code(msg, ToolErrorKind::Validation)
+}
+
+pub fn tool_error_code(msg: impl Into<String>, kind: ToolErrorKind) -> McpError {
+    // Never leak credentials embedded in URLs inside error text.
+    let msg = redact_url(&msg.into());
+    match kind {
+        ToolErrorKind::Validation => McpError::invalid_params(msg, None),
+        ToolErrorKind::Db => McpError::internal_error(msg, None),
+    }
+}
+
+/// Map an execution-layer error to its tool error kind.
+fn exec_error_kind(err: &ExecError) -> ToolErrorKind {
+    match err {
+        ExecError::Guard(_) => ToolErrorKind::Validation,
+        ExecError::Database(_) | ExecError::Other(_) => ToolErrorKind::Db,
+    }
 }
 
 pub fn json_result<T: serde::Serialize>(value: &T) -> Result<CallToolResult, McpError> {
@@ -138,7 +169,10 @@ pub async fn handle_search_objects(
     let source = config
         .source(params.source.as_deref())
         .map_err(|e| tool_error(e.to_string()))?;
-    let pool = source.pool().await.map_err(|e| tool_error(e.to_string()))?;
+    let pool = source
+        .pool()
+        .await
+        .map_err(|e| tool_error_code(e.to_string(), ToolErrorKind::Db))?;
     let offset = params.offset.unwrap_or(0);
     let limit = params.limit.unwrap_or(50).min(200);
 
@@ -152,7 +186,7 @@ pub async fn handle_search_objects(
         limit,
     )
     .await
-    .map_err(|e| tool_error(e.to_string()))?;
+    .map_err(|e| tool_error_code(e.to_string(), ToolErrorKind::Db))?;
 
     json_result(&result)
 }
@@ -184,7 +218,10 @@ pub async fn handle_execute_sql(
         if queries.is_empty() {
             return Err(tool_error("queries array is empty"));
         }
-        let pool = source.pool().await.map_err(|e| tool_error(e.to_string()))?;
+        let pool = source
+            .pool()
+            .await
+            .map_err(|e| tool_error_code(e.to_string(), ToolErrorKind::Db))?;
         let batch_items: Vec<(String, Vec<Value>)> =
             queries.into_iter().map(|q| q.into_sql_params()).collect();
         let batch = execute_batch(
@@ -208,10 +245,13 @@ pub async fn handle_execute_sql(
     opts.page_offset = params.page_offset.unwrap_or(0);
     opts.page_size = params.page_size;
 
-    let pool = source.pool().await.map_err(|e| tool_error(e.to_string()))?;
+    let pool = source
+        .pool()
+        .await
+        .map_err(|e| tool_error_code(e.to_string(), ToolErrorKind::Db))?;
     let result = execute_query(&pool, &sql, &query_params, &opts)
         .await
-        .map_err(|e| tool_error(e.to_string()))?;
+        .map_err(|e| tool_error_code(e.to_string(), exec_error_kind(&e)))?;
     Ok(CallToolResult::success(vec![ContentBlock::text(
         serde_json::to_string(&format_query_result(&result, format)).unwrap_or_default(),
     )]))
@@ -232,7 +272,10 @@ pub async fn handle_analyze_query(
         .source(params.source.as_deref())
         .map_err(|e| tool_error(e.to_string()))?;
 
-    let pool = source.pool().await.map_err(|e| tool_error(e.to_string()))?;
+    let pool = source
+        .pool()
+        .await
+        .map_err(|e| tool_error_code(e.to_string(), ToolErrorKind::Db))?;
 
     let summary = analyze_query(
         &pool,
@@ -242,7 +285,7 @@ pub async fn handle_analyze_query(
         config.query_timeout,
     )
     .await
-    .map_err(|e| tool_error(e.to_string()))?;
+    .map_err(|e| tool_error_code(e.to_string(), ToolErrorKind::Db))?;
 
     json_result(&summary)
 }

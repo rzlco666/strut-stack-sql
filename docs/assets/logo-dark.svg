@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" role="img" aria-label="Strut Stack SQL logo (dark backgrounds)">
+  <!-- Strut Stack SQL mark (for dark backgrounds):
+       same geometry as logo.svg, cylinder in light slate so the mark stays
+       legible on dark surfaces; strut beam stays steel orange. -->
+  <!-- strut beam -->
+  <line x1="12" y1="84" x2="84" y2="12" stroke="#F97316" stroke-width="10" stroke-linecap="round"/>
+  <!-- database cylinder -->
+  <g>
+    <path d="M22 34 v30 a26 9 0 0 0 52 0 v-30 z" fill="#E2E8F0"/>
+    <path d="M22 49 a26 9 0 0 0 52 0" fill="none" stroke="#F59E0B" stroke-width="2.5"/>
+    <ellipse cx="48" cy="34" rx="26" ry="9" fill="#F8FAFC"/>
+    <ellipse cx="48" cy="34" rx="26" ry="9" fill="none" stroke="#F59E0B" stroke-width="2.5"/>
+  </g>
+  <!-- bolts on the exposed strut ends -->
+  <circle cx="12" cy="84" r="3.2" fill="#0F172A"/>
+  <circle cx="84" cy="12" r="3.2" fill="#0F172A"/>
+</svg>

@@ -1,17 +1,17 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.singleton.1.6.0.schema.json
 
-PackageIdentifier: rzlco666.strut-stack-sql
-PackageVersion: 0.4.0
+PackageIdentifier: rzlco666.mcp-sql-rust
+PackageVersion: 1.1.0
 PackageLocale: en-US
 Publisher: rzlco666
 PublisherUrl: https://github.com/rzlco666
 PublisherSupportUrl: https://github.com/rzlco666/strut-stack-sql/issues
-PackageName: strut-stack-sql
+PackageName: mcp-sql-rust
 PackageUrl: https://github.com/rzlco666/strut-stack-sql
 License: MIT
 LicenseUrl: https://github.com/rzlco666/strut-stack-sql/blob/main/LICENSE
 ShortDescription: Token-efficient MCP server for MySQL, PostgreSQL, and SQLite
-Moniker: strut-stack-sql
+Moniker: mcp-sql-rust
 Tags:
   - mcp
   - mysql
@@ -25,7 +25,7 @@ Installers:
     NestedInstallerFiles:
       - RelativeFilePath: strut-stack-sql.exe
         PortableCommandAlias: strut-stack-sql
-    InstallerUrl: https://github.com/rzlco666/strut-stack-sql/releases/download/v0.4.0/strut-stack-sql-x86_64-pc-windows-msvc.zip
-    InstallerSha256: e4965a15bf48edfd030951f0796f5db7b41e09fe0f098afc191bddb2c5318348
+    InstallerUrl: https://github.com/rzlco666/strut-stack-sql/releases/download/v1.1.0/strut-stack-sql-windows-x64.zip
+    InstallerSha256: UPDATE_AFTER_RELEASE
 ManifestType: singleton
 ManifestVersion: 1.6.0

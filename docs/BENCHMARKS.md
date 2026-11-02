@@ -2,16 +2,32 @@
 
 Reproducible performance comparison of **strut-stack-sql** against other MCP SQL servers on PostgreSQL.
 
-## MySQL comparison (v0.5+)
+> ## ⚠ Historical numbers — read this first
+>
+> Every number on this page was measured on **v0.4.0** (PostgreSQL harness,
+> 2026-07-11), on **one machine** (WSL2 laptop, see below), with **n=15**
+> iterations. They have **not** been regenerated for v1.1.0 and must not be
+> quoted as v1.1.0 performance. They are kept because the raw artifact
+> (`scripts/benchmark/benchmark-results.json`) exists and the methodology is
+> documented, so anyone can re-run and compare. Regenerating this page with
+> current-version numbers on stated hardware is planned work.
+>
+> The previous MySQL results table has been **removed**: it was a manual
+> markdown table with no raw artifact in this repository, so it could not
+> be verified. See "Removed: unverified MySQL numbers" at the bottom.
 
-Compare against `mcp-mysql-server` (local-mysql rival) on the same queries:
+## MySQL comparison scripts
 
 ```bash
-MYSQL_DATABASE_URL=mysql://demo:demo@127.0.0.1:3307/demo \
+MYSQL_DATABASE_URL=mysql://demo:demo@localhost:3307/demo \
   ./scripts/benchmark/run-mysql-vs-mcp-mysql.sh
 ```
 
-See also [`run-mysql.sh`](scripts/benchmark/run-mysql.sh) for the rival-only baseline.
+Caution: despite its name, `run-mysql-vs-mcp-mysql.sh` is a smoke script,
+not a head-to-head benchmark — treat anything it prints as a local timing
+sample of this server only. See also
+[`run-mysql.sh`](../scripts/benchmark/run-mysql.sh) for the single-server
+MySQL harness.
 
 ## Summary (reference run)
 
@@ -88,38 +104,17 @@ Requirements: Node.js 20+ (`npx`), Linux recommended for RSS.
 | v0.5.0 | BIGINT/DECIMAL fidelity, lazy connect, schema isolation, pagination, `schema_mutate` |
 | v0.4.0 | Initial harness + WSL2 reference numbers |
 
-## Scorecard (v0.5.2 target)
+## Removed: unverified MySQL numbers
 
-Closes remaining gaps vs local-mysql (DDL UX + unique metadata + fail-fast connect). Target overall **10.0**.
+Earlier editions of this page carried a "MySQL localhost (v0.4.0
+reference)" table (single-SELECT averages, batch timings, `describe_table`
+and `search_objects` timings). Those numbers were recorded manually, no raw
+measurement artifact was ever committed to `scripts/benchmark/`, and they
+cannot be reproduced from this repository. They were removed in the 1.1.0
+documentation audit rather than kept as unverifiable marketing.
 
-| Category | v0.5.1 | v0.5.2 target | local-mysql |
-|----------|--------|---------------|-------------|
-| Schema/DDL | 8 | **10** | 9 |
-| Cold start / Memory | 9 | **10** | 3–4 |
-| Type fidelity / readability | 10 | **10** | 8–9 |
-| Overall | 9.6 | **10.0** | 6.0 |
-
-## MySQL localhost (v0.4.0 reference)
-
-Manual HTTP benchmark on **WSL2**, MySQL 8.4 via `docker compose` (`localhost:3307`), seed [`docker/seed/mysql.sql`](../docker/seed/mysql.sql). Method: Streamable HTTP `execute_sql` / tool handlers, release binary.
-
-| Metric | v0.1.0 | v0.4.0 |
-|--------|--------|--------|
-| Single SELECT avg | 14.5 ms | **6.5 ms** |
-| P50 latency | — | 6.4 ms |
-| P95 latency | — | 7.4 ms |
-| P99 latency | — | 7.8 ms |
-| Batch 4 queries | — | 8 ms |
-| Batch 8 queries | — | 8 ms |
-| Batch 16 queries | 31 ms | **10 ms** |
-| 10× concurrent `SLEEP(0.2)` | — | 238 ms (≈8× speedup) |
-| `describe_table` 80 cols | — | 11 ms |
-| `search_objects` 200 tables | 109 ms | **13 ms** |
-| Response 100 rows (`pegawai`) | — | 67 KB (~674 B/row) |
-
-> These numbers measure end-to-end MCP + MySQL round-trip on one machine. They are **not** comparable 1:1 with the PostgreSQL rival harness above (different DB, transport path, and query mix).
-
-Reproduce MySQL timings:
+To produce defensible MySQL numbers, run the harness yourself and commit
+the raw output alongside any table derived from it:
 
 ```bash
 docker compose up -d mysql

@@ -22,11 +22,18 @@ flowchart LR
 - Reject empty / multi-statement strings
 - Classify: Read / Dml / Ddl / Txn / Other (unknown → deny)
 - Explicit deny labels: `COPY`, `CALL`, `ATTACH DATABASE`, `LOAD DATA`, `PREPARE`, `EXECUTE`
-- Complexity limits: max 8 joins, max subquery depth 5
+- Complexity limits: max 8 joins, max subquery depth 5 (checked across the whole statement tree, including subqueries and CTE bodies)
 - Enforce against `WriteMode`
 - Inject `LIMIT` on SELECT when missing; clamp explicit `LIMIT` above `--max-rows`
 - `EXPLAIN ANALYZE` requires writes
 - Batch `queries[]` items are each parsed as a single statement
+
+**Since 1.1.0 — bypass closure:**
+
+- **CTE bodies are classified recursively.** A `WITH x AS (DELETE … RETURNING …) SELECT …` is DML, not a read; the class of a query is the most dangerous class found anywhere in its tree (CTEs, subqueries, set operations).
+- **`SELECT … INTO` / `INTO OUTFILE` / `INTO DUMPFILE` are not reads.** They create tables or files and are denied in read-only mode.
+- **Dangerous functions are denied or tier-gated per engine** — file access (`pg_read_file`, `pg_ls_dir`, `lo_export`, MySQL `LOAD_FILE`, SQLite `readfile`/`writefile`), sequence mutation (`nextval`/`setval`), session/DoS functions (`pg_sleep`, `pg_terminate_backend`, MySQL `SLEEP`/`BENCHMARK`), and extension/plugin loaders (`dblink`, …). A function on the denylist can never ride along inside an otherwise innocent `SELECT`.
+- **Parameterized row limits are clamped too.** `LIMIT ?` and `FETCH FIRST ? ROWS ONLY` are rewritten against `--max-rows` after parameter binding is accounted for — a parameter value can no longer widen a result past the cap.
 
 ### 1c. Timeouts
 
@@ -49,9 +56,15 @@ flowchart LR
 |------|------|---------|
 | ReadOnly | (default) | SELECT, SHOW, DESCRIBE, EXPLAIN |
 | AllowWrites | `--allow-writes` | + INSERT/UPDATE/DELETE/MERGE |
-| AllowDdl | `--allow-ddl` | + DROP/ALTER/TRUNCATE/CREATE/GRANT… |
+| AllowDdl | `--allow-ddl` | + DROP/ALTER/TRUNCATE/CREATE … |
 
-Transaction control (`BEGIN`/`COMMIT`/`ROLLBACK`) is blocked at the guard.
+`GRANT` / `REVOKE` form their own guard class (**Admin** since 1.1.0) and
+are **not** unlocked by `--allow-ddl` alone: privilege management
+additionally requires the explicit `--allow-grants` opt-in, so a schema-DDL
+token can never silently become a privilege-escalation token. See
+[TOOLS.md](TOOLS.md#supported-sql-surface).
+
+Transaction control (`BEGIN`/`COMMIT`/`ROLLBACK`/`SAVEPOINT`) is always blocked at the guard, in every mode.
 
 ### 3. Session hardening
 
@@ -79,7 +92,7 @@ GRANT SELECT ON ALL TABLES IN SCHEMA public TO mcp_ro;
 - Optional **opt-in** column deny-list (`--deny-columns` / `MCP_SQL_DENY_COLUMNS` / TOML) redacts matching cells as `"[redacted]"`
 - Recommended Cursor args: `--full-tools --deny-columns password_hash,totp_secret_encrypted,code_hash` (see [CURSOR.md](CURSOR.md))
 - Do not log full DSNs (`MCP_SQL_LOG` goes to stderr)
-- Optional audit trail: `MCP_SQL_LOG=audit` logs executed SQL (no param values)
+- Audit trail: see [Audit log](#audit-log) — `MCP_SQL_LOG=audit=info` enables it
 - Do not put passwords in MCP client JSON `args`
 
 ### 5. Schema isolation (v0.5+)
@@ -100,9 +113,69 @@ sha256sum -c SHA256SUMS --ignore-missing
 
 [`install.sh`](../install.sh) verifies by default. See [INSTALL.md](INSTALL.md).
 
+## Audit log
+
+Executed SQL is audited through the `audit` tracing target:
+
+```bash
+MCP_SQL_LOG=audit=info strut-stack-sql
+# combine with diagnostics, e.g. MCP_SQL_LOG=info,audit=info
+```
+
+Each executed statement emits one audit event on stderr with the statement
+text, its guard classification, the effective write tier, the source name,
+and the outcome. **Parameter values are never logged** — values bound through
+`params` stay out of the audit trail, and tokens/credentials are never
+written to any log. (Before 1.1.0 some docs described the audit trail as
+merely "optional/future"; as of 1.1.0 it is implemented exactly as above —
+the filter is the tracing target `audit`, e.g. `MCP_SQL_LOG=audit=info`.)
+
 ## HTTP transport
 
-`--http` binds Streamable HTTP without OAuth in v1. Bind to `127.0.0.1` unless behind TLS + access controls.
+`--http` serves Streamable HTTP at `/mcp`, plus two probe endpoints:
+
+| Endpoint | Behavior |
+|----------|----------|
+| `GET /livez` | Static liveness — answers without touching any database |
+| `GET /readyz` | Readiness from cached pool status; never returns raw database error text |
+| `GET /healthz` | Compat alias of `/readyz` |
+
+The v1 `/healthz` behavior (connect to every source on each probe and
+return raw error strings to anonymous callers) is gone; the path remains
+only as an alias of the safe readiness handler.
+
+### HTTP token authentication
+
+Configure API tokens with `STRUT_STACK_SQL_HTTP_TOKENS` (see
+[CONFIGURATION.md](CONFIGURATION.md#http-tokens)):
+
+```bash
+STRUT_STACK_SQL_HTTP_TOKENS="alice:s3cr3t:readonly,bob:other-token:writes:main|reporting" \
+  strut-stack-sql --http 0.0.0.0:8080
+```
+
+Format: comma-separated `name:token:mode[:source1|source2|...]` entries
+(a single token can also be set with `--http-token`). Full syntax:
+[CONFIGURATION.md](CONFIGURATION.md#http-tokens).
+
+- Clients authenticate with `Authorization: Bearer <token>`; requests
+  without a valid token are rejected before any tool runs.
+- **Each token carries a maximum write mode** (`readonly`, `writes`, or
+  `ddl`) and optionally a **source allowlist**. The effective mode for a
+  call is the *lower* of the process tier (CLI flags) and the token's mode
+  — a read-only token cannot write even if the server was started with
+  `--allow-ddl`. Requests are rate-limited per token
+  (`--http-rate-limit-per-minute`, default 600).
+- **Binding a non-loopback address without any token configured is refused
+  at startup** (the only override is the explicit, loudly warned
+  `--allow-unauthenticated-http` flag). An unauthenticated SQL endpoint on
+  a routable interface is never started by accident.
+- Loopback binds (`127.0.0.1`) without tokens remain available for local
+  development and print a startup warning.
+- Token auth is an API-token scheme for self-hosted/remote use; OAuth 2.1
+  support is on the v2 roadmap, not in 1.1.0.
+- Terminate TLS in front of the server (reverse proxy or tunnel) whenever
+  tokens cross a network you do not control.
 
 ## Reporting
 

@@ -1,31 +1,67 @@
 #!/usr/bin/env bash
-# Update Scoop and winget manifests from release SHA256SUMS.
+# Update the Scoop and winget manifests to a released version, filling the
+# Windows zip sha256 from that release's SHA256SUMS.
+#
+# Usage: scripts/bump-windows-manifests.sh VERSION     (e.g. 1.1.0)
+#
+# Artifact name follows .github/workflows/release.yml:
+#   strut-stack-sql-windows-x64.zip
+# Both name variants are updated (strut-stack-sql + mcp-sql-rust compat).
+# In the manifests the hash placeholder is the literal UPDATE_AFTER_RELEASE;
+# this script replaces it (or a previous release's hash) with the real digest.
 set -euo pipefail
 
-VERSION="${1:?usage: $0 VERSION (e.g. 0.4.0)}"
-REPO="${REPO:-rzlco666/mcp-sql-rust}"
+VERSION="${1:?usage: $0 VERSION (e.g. 1.1.0)}"
+REPO="${REPO:-rzlco666/strut-stack-sql}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SUMS_URL="https://github.com/${REPO}/releases/download/v${VERSION}/SHA256SUMS"
-ARTIFACT="mcp-sql-rust-x86_64-pc-windows-msvc.zip"
+ARTIFACT="strut-stack-sql-windows-x64.zip"
 TMP="$(mktemp)"
 trap 'rm -f "$TMP"' EXIT
 
 curl -fsSL "$SUMS_URL" -o "$TMP"
-HASH="$(grep " ${ARTIFACT}$" "$TMP" | awk '{print $1}')"
+HASH="$(awk -v f="$ARTIFACT" '$2 == f { print $1; exit }' "$TMP")"
 if [ -z "$HASH" ]; then
-  echo "Hash not found for ${ARTIFACT}" >&2
+  echo "Hash not found for ${ARTIFACT} in ${SUMS_URL}" >&2
   exit 1
 fi
 
-SCOOP="${ROOT}/packaging/scoop/mcp-sql-rust.json"
-WINGET="${ROOT}/packaging/winget/rzlco666.mcp-sql-rust.yaml"
+SCOOPS=(
+  "${ROOT}/packaging/scoop/strut-stack-sql.json"
+  "${ROOT}/packaging/scoop/mcp-sql-rust.json"
+)
+WINGETS=(
+  "${ROOT}/packaging/winget/rzlco666.strut-stack-sql.yaml"
+  "${ROOT}/packaging/winget/rzlco666.mcp-sql-rust.yaml"
+)
 
-sed -i \
-  -e "s/\"version\": \"[^\"]*\"/\"version\": \"${VERSION}\"/" \
-  -e "s|releases/download/v[^/]*/|releases/download/v${VERSION}/|g" \
-  -e "s/REPLACE_ME_WINDOWS_ZIP_SHA256/${HASH}/" \
-  "$SCOOP" "$WINGET"
+for SCOOP in "${SCOOPS[@]}"; do
+  # The URL rewrite must not touch the autoupdate block: its URL template
+  # uses Scoop's $version placeholder on purpose. So: rewrite download URLs
+  # only in the part of the file before "autoupdate".
+  sed -i \
+    -e "s/\"version\": \"[^\"]*\"/\"version\": \"${VERSION}\"/" \
+    -e "s/strut-stack-sql-x86_64-pc-windows-msvc\.zip/${ARTIFACT}/g" \
+    -e "s/mcp-sql-rust-x86_64-pc-windows-msvc\.zip/${ARTIFACT}/g" \
+    -e "s/\"hash\": \"[^\"]*\"/\"hash\": \"${HASH}\"/" \
+    "$SCOOP"
+  sed -i "/\"autoupdate\"/,\$!s|releases/download/v[^/]*/|releases/download/v${VERSION}/|g" "$SCOOP"
+  echo "Updated ${SCOOP} for v${VERSION}"
+done
 
-echo "Updated Scoop and winget manifests for v${VERSION}"
-echo "  ${SCOOP}"
-echo "  ${WINGET}"
+for WINGET in "${WINGETS[@]}"; do
+  sed -i \
+    -e "s/^PackageVersion: .*/PackageVersion: ${VERSION}/" \
+    -e "s|releases/download/v[^/]*/|releases/download/v${VERSION}/|g" \
+    -e "s/strut-stack-sql-x86_64-pc-windows-msvc\.zip/${ARTIFACT}/g" \
+    -e "s/mcp-sql-rust-x86_64-pc-windows-msvc\.zip/${ARTIFACT}/g" \
+    -e "s/^    InstallerSha256: .*/    InstallerSha256: ${HASH}/" \
+    "$WINGET"
+  echo "Updated ${WINGET} for v${VERSION}"
+done
+
+for f in "${SCOOPS[@]}" "${WINGETS[@]}"; do
+  if grep -q "UPDATE_AFTER_RELEASE" "$f"; then
+    echo "WARNING: UPDATE_AFTER_RELEASE placeholder remains in $f" >&2
+  fi
+done

@@ -14,7 +14,7 @@ Progressive schema discovery.
 | `keyword` | string? | case-insensitive filter |
 | `schema` | string? | scope |
 | `source` | string? | multi-source name |
-| `offset` | number? | default 0 |
+| `offset` | number? | default 0; an offset past the end returns an empty page, never an error |
 | `limit` | number? | default 50, max 200 |
 
 ### `execute_sql`
@@ -27,7 +27,7 @@ Run SQL or concurrent batch.
 | `params` | array? | bound values for `?` placeholders (single-query mode) |
 | `page_offset` | number? | row offset after guard LIMIT (single-query only; default 0) |
 | `page_size` | number? | rows per page (single-query only; default `--max-rows`) |
-| `format` | `auto` \| `columnar` \| `rows`? | response shape (default `auto`: row objects if ≤10 rows) |
+| `format` | `columnar` \| `rows` \| `auto`? | response shape (default **columnar**; `auto` = row objects if ≤10 rows, else columnar — only when explicitly requested, or via `MCP_SQL_FORMAT=auto`) |
 | `queries` | string[] or object[]? | batch (not both with `sql`) |
 | `source` | string? | connection name |
 
@@ -152,6 +152,63 @@ DDL tools appear **only** when `--full-tools` **and** `--allow-ddl` (hidden in r
 | `truncate_table` | Alias — needs `confirm: true` |
 
 Destructive ops (`drop_*`, `truncate_table`) require `"confirm": true`. Prefer `search_objects` in default mode to save tokens.
+
+## Supported SQL surface
+
+The guard (`src/guard/classify.rs`) decides everything. If a statement type
+is not listed as supported below, it is **rejected in every mode** — there is
+no silent subset. (Before 1.1.0 this surface was undocumented; several types
+fell into the reject bucket without any doc saying so.)
+
+### Read — allowed in every mode (ReadOnly and up)
+
+- `SELECT` (including `WITH … SELECT` — **read-only CTEs only**, see below),
+  set operations (`UNION` / `INTERSECT` / `EXCEPT`)
+- `EXPLAIN`, `EXPLAIN <statement>` (`EXPLAIN ANALYZE` executes the statement
+  and therefore requires the write tier of the inner statement)
+- `SHOW …` family: `SHOW TABLES`, `SHOW COLUMNS`, `SHOW VARIABLES`,
+  `SHOW DATABASES`/`SCHEMAS`, `SHOW CREATE`, `SHOW PROCESSLIST`, …
+
+### DML — requires `--allow-writes` (or `--allow-ddl`)
+
+- `INSERT`, `UPDATE`, `DELETE`, `MERGE`
+- A CTE whose body contains any of the above (e.g.
+  `WITH d AS (DELETE … RETURNING …) SELECT …`) is classified **DML**,
+  never Read — classification is recursive since 1.1.0
+
+### DDL — requires `--allow-ddl`
+
+- `CREATE TABLE` / `CREATE VIEW` / `CREATE INDEX` / `CREATE SCHEMA` /
+  `CREATE DATABASE` / `CREATE FUNCTION`
+- `DROP …`, `ALTER TABLE`, `ALTER INDEX`, `TRUNCATE`
+- `GRANT` / `REVOKE` are their own class (**Admin**, since 1.1.0) and need
+  more than `--allow-ddl`: the additional explicit `--allow-grants` opt-in
+  (see [SECURITY.md](SECURITY.md)).
+
+### Always rejected — in every mode, including `--allow-ddl`
+
+| Statement | Why |
+|-----------|-----|
+| Transaction control (`BEGIN` / `START TRANSACTION` / `COMMIT` / `ROLLBACK` / `SAVEPOINT` / `RELEASE`) | The server manages connections; callers never own transactions |
+| Multiple statements in one string (`SELECT 1; DROP …`) | One string = one statement, always |
+| `COPY` | Bulk file/stdin transfer bypasses result caps |
+| `ATTACH DATABASE` / `DETACH` | Would widen the reachable data beyond configured sources |
+| `LOAD DATA` | Server-side file ingestion |
+| `CALL`, `PREPARE`, `EXECUTE` (prepared-statement control) | Would bypass AST classification of the executed statement |
+| `SELECT … INTO`, `INTO OUTFILE`, `INTO DUMPFILE` in read modes | Creates tables/files; not a read |
+| Dangerous functions (per-engine denylist: `pg_read_file`, `LOAD_FILE`, `readfile`, `nextval`/`setval`, `pg_sleep`, `SLEEP`, `BENCHMARK`, …) | File access, sequence mutation, or DoS primitives |
+
+### Not supported (rejected as unknown statement type)
+
+These fall into the guard's deny-by-default bucket. They are listed here so
+the rejection is a documented contract, not a surprise:
+
+- `CREATE SEQUENCE` / `CREATE TYPE` / `CREATE EXTENSION` / `CREATE ROLE`
+- `COMMENT`, `VACUUM`, `ANALYZE` (as a standalone statement), `SET`, `USE`, `PRAGMA` (the server's own introspection uses PRAGMAs internally; agent-issued PRAGMAs are not exposed)
+
+If you need one of these, run it with a regular database client — the MCP
+server deliberately covers the query/introspection/DDL surface agents need,
+not full database administration.
 
 ## Caps
 

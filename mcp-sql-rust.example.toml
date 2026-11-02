@@ -1,3 +1,10 @@
+# Example multi-source configuration for strut-stack-sql.
+# Copy to strut-stack-sql.toml and run:  strut-stack-sql --config ./strut-stack-sql.toml
+#
+# Prefer url_env for every source: credentials stay in the environment /
+# .env and never land in a config file. Do NOT paste URLs containing
+# plaintext passwords into TOML.
+
 default_source = "app"
 
 [[sources]]
@@ -6,5 +13,5 @@ url_env = "DATABASE_URL"
 
 [[sources]]
 name = "analytics"
-url = "postgresql://readonly:secret@localhost:5432/analytics"
+url_env = "ANALYTICS_DATABASE_URL"
 engine = "postgres"

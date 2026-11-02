@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{AppConfig, WriteMode};
 use crate::db::{execute_query, EngineKind, ExecOptions};
-use crate::guard::validate_and_prepare;
+use crate::guard::{classify_sql, validate_and_prepare, SqlClass};
 use crate::tools::core::{exec_options, json_result, tool_error};
 
 #[derive(Debug, Clone, Copy, Deserialize, JsonSchema, Serialize)]
@@ -287,6 +287,30 @@ fn build_ddl_sql(
     params: &SchemaMutateParams,
     engine: EngineKind,
 ) -> Result<String, rmcp::ErrorData> {
+    let sql = build_ddl_sql_unchecked(params, engine)?;
+    // SQL-SEC-14: the tool's name must guarantee the statement's class.
+    // Classify the FINAL assembled SQL with the guard itself and refuse
+    // anything that is not DDL — and for create_table, anything that is not
+    // literally a CREATE TABLE (previously `ddl: "GRANT …"` sailed through
+    // schema_mutate because GRANT classified as plain Ddl).
+    let class = classify_sql(&sql, engine).map_err(|e| tool_error(e.to_string()))?;
+    if class.sql_class() != SqlClass::Ddl {
+        return Err(tool_error(format!(
+            "assembled SQL classified as {} ({:?}), expected DDL — refused",
+            class.label(),
+            class.sql_class()
+        )));
+    }
+    if matches!(params.action, SchemaMutateAction::CreateTable) && class.label() != "CREATE TABLE" {
+        return Err(tool_error("create_table requires a CREATE TABLE statement"));
+    }
+    Ok(sql)
+}
+
+fn build_ddl_sql_unchecked(
+    params: &SchemaMutateParams,
+    engine: EngineKind,
+) -> Result<String, rmcp::ErrorData> {
     match params.action {
         SchemaMutateAction::CreateTable => {
             let ddl = params
@@ -314,6 +338,7 @@ fn build_ddl_sql(
                 .as_ref()
                 .ok_or_else(|| tool_error("add_column requires column"))?;
             let qualified = qualify_table(params.schema.as_deref(), table, engine);
+            let data_type = validate_column_type(&column.data_type)?;
             let null_sql = match column.nullable {
                 Some(true) | None => "",
                 Some(false) => " NOT NULL",
@@ -321,7 +346,7 @@ fn build_ddl_sql(
             Ok(format!(
                 "ALTER TABLE {qualified} ADD COLUMN {} {}{}",
                 quote_ident(&column.name, engine),
-                column.data_type,
+                data_type,
                 null_sql
             ))
         }
@@ -333,10 +358,10 @@ fn build_ddl_sql(
                 .ok_or_else(|| tool_error("alter_column requires column"))?;
             let qualified = qualify_table(params.schema.as_deref(), table, engine);
             let col = quote_ident(&column.name, engine);
+            let data_type = validate_column_type(&column.data_type)?;
             match engine {
                 EngineKind::Mysql => Ok(format!(
-                    "ALTER TABLE {qualified} MODIFY COLUMN {col} {}",
-                    column.data_type
+                    "ALTER TABLE {qualified} MODIFY COLUMN {col} {data_type}"
                 )),
                 EngineKind::Postgres => {
                     if column.nullable.is_some() {
@@ -345,8 +370,7 @@ fn build_ddl_sql(
                         ));
                     }
                     Ok(format!(
-                        "ALTER TABLE {qualified} ALTER COLUMN {col} TYPE {}",
-                        column.data_type
+                        "ALTER TABLE {qualified} ALTER COLUMN {col} TYPE {data_type}"
                     ))
                 }
                 EngineKind::Sqlite => Err(tool_error(
@@ -368,6 +392,118 @@ fn build_ddl_sql(
             ))
         }
     }
+}
+
+/// Words that may appear in a column type declaration (upper-case).
+/// Deliberately a superset across PostgreSQL / MySQL / SQLite — a word that
+/// is harmless-but-unknown on the target engine fails at the database, not
+/// silently through this tool. Constraint/keyword smuggling (`NOT NULL`,
+/// `DEFAULT`, `REFERENCES`, `SELECT`, …) is impossible because none of those
+/// words are in this set (nullability has its own structured field).
+const TYPE_WORDS: &[&str] = &[
+    "INT",
+    "INTEGER",
+    "BIGINT",
+    "SMALLINT",
+    "TINYINT",
+    "MEDIUMINT",
+    "SERIAL",
+    "BIGSERIAL",
+    "SMALLSERIAL",
+    "INT2",
+    "INT4",
+    "INT8",
+    "FLOAT",
+    "FLOAT4",
+    "FLOAT8",
+    "DOUBLE",
+    "PRECISION",
+    "REAL",
+    "DECIMAL",
+    "NUMERIC",
+    "MONEY",
+    "CHAR",
+    "VARCHAR",
+    "CHARACTER",
+    "VARYING",
+    "TEXT",
+    "TINYTEXT",
+    "MEDIUMTEXT",
+    "LONGTEXT",
+    "NCHAR",
+    "NVARCHAR",
+    "STRING",
+    "BLOB",
+    "TINYBLOB",
+    "MEDIUMBLOB",
+    "LONGBLOB",
+    "BYTEA",
+    "BINARY",
+    "VARBINARY",
+    "BIT",
+    "BOOLEAN",
+    "BOOL",
+    "DATE",
+    "TIME",
+    "TIMESTAMP",
+    "TIMESTAMPTZ",
+    "DATETIME",
+    "YEAR",
+    "JSON",
+    "JSONB",
+    "UUID",
+    "INET",
+    "CIDR",
+    "MACADDR",
+    "MACADDR8",
+    "XML",
+    "INTERVAL",
+    "UNSIGNED",
+    "WITH",
+    "WITHOUT",
+    "ZONE",
+    "ARRAY",
+];
+
+/// SQL-SEC-14: validate a user-supplied column `type` before it is spliced
+/// into assembled DDL. Previously the raw string was interpolated verbatim,
+/// so `type: "INT); DROP TABLE x; --"` was an injection fragment waiting for
+/// a path that skipped the guard. Rules: only letters/digits/spaces and
+/// `( ) , . _ [ ]` characters; every word token must be a known type word
+/// or a pure number (precision/scale). Returns the trimmed type unchanged.
+fn validate_column_type(raw: &str) -> Result<String, rmcp::ErrorData> {
+    let ty = raw.trim();
+    if ty.is_empty() {
+        return Err(tool_error("column type must not be empty"));
+    }
+    if !ty.chars().all(|c| {
+        c.is_ascii_alphanumeric()
+            || matches!(c, ' ' | '\t' | '(' | ')' | ',' | '.' | '_' | '[' | ']')
+    }) {
+        return Err(tool_error(format!(
+            "column type contains forbidden characters: {raw:?}"
+        )));
+    }
+    let mut saw_word = false;
+    for token in ty.split(|c: char| !c.is_ascii_alphanumeric() && c != '_') {
+        if token.is_empty() {
+            continue;
+        }
+        if token.chars().all(|c| c.is_ascii_digit()) {
+            continue; // precision / scale, e.g. VARCHAR(255), DECIMAL(10,2)
+        }
+        saw_word = true;
+        let upper = token.to_ascii_uppercase();
+        if !TYPE_WORDS.contains(&upper.as_str()) {
+            return Err(tool_error(format!(
+                "column type token not in allowlist: {token}"
+            )));
+        }
+    }
+    if !saw_word {
+        return Err(tool_error(format!("column type has no type name: {raw:?}")));
+    }
+    Ok(ty.to_string())
 }
 
 fn require_confirm(params: &SchemaMutateParams) -> Result<(), rmcp::ErrorData> {
@@ -471,5 +607,121 @@ mod tests {
             source: None,
         };
         assert!(build_ddl_sql(&params, EngineKind::Sqlite).is_err());
+    }
+
+    fn mutate_params(
+        action: SchemaMutateAction,
+        ddl: Option<&str>,
+        data_type: Option<&str>,
+    ) -> SchemaMutateParams {
+        SchemaMutateParams {
+            action,
+            schema: None,
+            table: Some("t".into()),
+            ddl: ddl.map(str::to_string),
+            column: data_type.map(|ty| ColumnDef {
+                name: "c".into(),
+                data_type: ty.into(),
+                nullable: None,
+            }),
+            confirm: Some(true),
+            source: None,
+        }
+    }
+
+    // --- SQL-SEC-14: data_type allowlist ---
+
+    #[test]
+    fn valid_column_types_pass() {
+        for ty in [
+            "INT",
+            "BIGINT UNSIGNED",
+            "VARCHAR(255)",
+            "DECIMAL(10,2)",
+            "DOUBLE PRECISION",
+            "TIMESTAMP WITH TIME ZONE",
+            "TIMESTAMP WITHOUT TIME ZONE",
+            "TEXT",
+            "text",
+            "JSONB",
+            "CHARACTER VARYING(64)",
+            "INT[]",
+        ] {
+            assert_eq!(validate_column_type(ty).unwrap(), ty, "type={ty}");
+        }
+    }
+
+    #[test]
+    fn injected_column_types_rejected() {
+        for ty in [
+            "INT); DROP TABLE x; --",
+            "INT, (SELECT password FROM users)",
+            "VARCHAR(10) DEFAULT 'x'",
+            "INT NOT NULL",
+            "INT REFERENCES other(id)",
+            "INT); GRANT ALL ON t TO bob; --",
+            "SOME_RANDOM_TYPE",
+            "",
+            "123",
+        ] {
+            assert!(
+                validate_column_type(ty).is_err(),
+                "type should be rejected: {ty:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn add_column_with_injected_type_rejected_end_to_end() {
+        let params = mutate_params(
+            SchemaMutateAction::AddColumn,
+            None,
+            Some("INT); DROP TABLE x; --"),
+        );
+        assert!(build_ddl_sql(&params, EngineKind::Postgres).is_err());
+        let params = mutate_params(
+            SchemaMutateAction::AlterColumn,
+            None,
+            Some("INT, (SELECT 1)"),
+        );
+        assert!(build_ddl_sql(&params, EngineKind::Mysql).is_err());
+    }
+
+    #[test]
+    fn add_column_with_valid_type_builds() {
+        let params = mutate_params(SchemaMutateAction::AddColumn, None, Some("DECIMAL(10,2)"));
+        let sql = build_ddl_sql(&params, EngineKind::Postgres).unwrap();
+        assert_eq!(sql, "ALTER TABLE \"t\" ADD COLUMN \"c\" DECIMAL(10,2)");
+    }
+
+    // --- SQL-SEC-14: create_table must really be CREATE TABLE ---
+
+    #[test]
+    fn create_table_accepts_create_table() {
+        let params = mutate_params(
+            SchemaMutateAction::CreateTable,
+            Some("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR(64))"),
+            None,
+        );
+        let sql = build_ddl_sql(&params, EngineKind::Postgres).unwrap();
+        assert!(sql.starts_with("CREATE TABLE"));
+    }
+
+    #[test]
+    fn create_table_rejects_non_create_statements() {
+        for ddl in [
+            "GRANT ALL ON t TO bob",
+            "REVOKE ALL ON t FROM bob",
+            "DROP TABLE t",
+            "INSERT INTO t VALUES (1)",
+            "CREATE INDEX idx ON t (id)",
+            "CREATE TABLE t (id INT); DROP TABLE t",
+        ] {
+            let params = mutate_params(SchemaMutateAction::CreateTable, Some(ddl), None);
+            assert!(
+                build_ddl_sql(&params, EngineKind::Postgres).is_err(),
+                "ddl should be rejected: {ddl}"
+            );
+        }
     }
 }

@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::Value;
-use sqlx::Row;
+use sqlx::{Column, Row};
 
 use crate::config::WriteMode;
 use crate::db::bind::{bind_mysql_params, bind_pg_params, bind_sqlite_params};
@@ -137,9 +137,30 @@ async fn fetch_explain_sqlite(
         .map_err(|e| ExplainError::Other(e.to_string()))?
         .fetch_all(pool)
         .await?;
+    // SQL-BUG-15: do not hardcode column index 3. `EXPLAIN QUERY PLAN`
+    // returns (id, parent, notused, detail) — locate `detail` by name and
+    // fall back gracefully (`opcode` for plain EXPLAIN, else last column).
+    let detail_idx = rows.first().and_then(sqlite_detail_column_index);
     rows.iter()
-        .map(|row| row.try_get::<String, _>(3).map_err(ExplainError::from))
+        .map(|row| match detail_idx {
+            Some(idx) => row.try_get::<String, _>(idx).map_err(ExplainError::from),
+            None => Ok(String::new()),
+        })
         .collect()
+}
+
+/// Index of the human-readable plan column in a SQLite EXPLAIN result row.
+fn sqlite_detail_column_index(row: &sqlx::sqlite::SqliteRow) -> Option<usize> {
+    let cols = row.columns();
+    for wanted in ["detail", "opcode"] {
+        if let Some(idx) = cols
+            .iter()
+            .position(|c| c.name().eq_ignore_ascii_case(wanted))
+        {
+            return Some(idx);
+        }
+    }
+    cols.len().checked_sub(1)
 }
 
 fn normalize_sqlite(query: &str, details: Vec<String>) -> ExplainSummary {
@@ -224,7 +245,7 @@ fn normalize_postgres(query: &str, json: Value) -> ExplainSummary {
 
     if let Some(arr) = json.as_array() {
         if let Some(plan_root) = arr.first().and_then(|v| v.get("Plan")) {
-            walk_pg_plan(plan_root, &mut nodes, &mut warnings);
+            walk_pg_plan(plan_root, &mut nodes);
             total_cost = plan_root.get("Total Cost").and_then(|v| v.as_f64());
             plan_rows = plan_root.get("Plan Rows").and_then(|v| v.as_i64());
         }
@@ -244,7 +265,7 @@ fn normalize_postgres(query: &str, json: Value) -> ExplainSummary {
     }
 }
 
-fn walk_pg_plan(plan: &Value, nodes: &mut Vec<PlanNode>, _warnings: &mut Vec<String>) {
+fn walk_pg_plan(plan: &Value, nodes: &mut Vec<PlanNode>) {
     let node_type = plan
         .get("Node Type")
         .and_then(|v| v.as_str())
@@ -282,7 +303,7 @@ fn walk_pg_plan(plan: &Value, nodes: &mut Vec<PlanNode>, _warnings: &mut Vec<Str
 
     if let Some(children) = plan.get("Plans").and_then(|v| v.as_array()) {
         for child in children {
-            walk_pg_plan(child, nodes, _warnings);
+            walk_pg_plan(child, nodes);
         }
     }
 }
@@ -298,7 +319,7 @@ fn normalize_mysql(query: &str, json: Value) -> ExplainSummary {
             total_cost = cost.get("query_cost").and_then(|v| v.as_f64());
             plan_rows = cost.get("rows_examined_per_scan").and_then(|v| v.as_i64());
         }
-        walk_mysql_block(query_block, &mut nodes, &mut warnings);
+        walk_mysql_block(query_block, &mut nodes);
     }
 
     if total_cost.is_none() {
@@ -325,7 +346,7 @@ fn normalize_mysql(query: &str, json: Value) -> ExplainSummary {
     }
 }
 
-fn walk_mysql_block(block: &Value, nodes: &mut Vec<PlanNode>, _warnings: &mut Vec<String>) {
+fn walk_mysql_block(block: &Value, nodes: &mut Vec<PlanNode>) {
     if let Some(table) = block.get("table") {
         let node_type = table
             .get("access_type")
@@ -373,10 +394,10 @@ fn walk_mysql_block(block: &Value, nodes: &mut Vec<PlanNode>, _warnings: &mut Ve
         if let Some(nested) = block.get(key) {
             if let Some(arr) = nested.as_array() {
                 for item in arr {
-                    walk_mysql_block(item, nodes, _warnings);
+                    walk_mysql_block(item, nodes);
                 }
             } else if nested.is_object() && key != "table" {
-                walk_mysql_block(nested, nodes, _warnings);
+                walk_mysql_block(nested, nodes);
             }
         }
     }

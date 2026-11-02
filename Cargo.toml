@@ -1,6 +1,6 @@
 [package]
 name = "strut-stack-sql"
-version = "1.0.4"
+version = "1.1.0"
 edition = "2021"
 rust-version = "1.88"
 description = "Strut Stack SQL — token-efficient MCP server for MySQL, PostgreSQL, and SQLite"

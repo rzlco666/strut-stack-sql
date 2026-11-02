@@ -10,7 +10,20 @@ use crate::db::bind::{bind_mysql_params, bind_pg_params, bind_sqlite_params};
 use crate::db::value::{decode_mysql_cell, decode_pg_cell, decode_sqlite_cell};
 use crate::db::{EngineKind, EnginePool};
 use crate::format::{truncate_to_bytes, ColumnarMeta, ColumnarResult};
-use crate::guard::{validate_and_prepare_with_options, GuardError, PrepareOptions};
+use crate::guard::{
+    validate_and_prepare_with_options, GuardError, PrepareOptions, SqlClass, StmtClass,
+};
+
+/// Whether a guard-classified statement yields rows and must go through the
+/// fetch path (SQL-BUG-05). This replaces the old string-prefix heuristic
+/// (`is_select_like` on the raw SQL): the decision now comes exclusively from
+/// the guard's own classification — `is_select_like()` for queries, plus the
+/// other row-returning Read statements (SHOW / EXPLAIN / DESCRIBE), which the
+/// guard labels separately. A writing CTE classified as DML by the guard now
+/// correctly takes the execute path.
+fn class_fetches_rows(class: &StmtClass) -> bool {
+    class.is_select_like() || class.sql_class() == SqlClass::Read
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ExecError {
@@ -89,9 +102,28 @@ pub async fn execute_query(
         });
     }
 
+    // SQL-BUG-05 / SQL-SEC (limit_unverified): execution shape derives from
+    // the guard's classification, never from the SQL text. When the guard
+    // could not verify the statement's LIMIT (parameterized / FETCH FIRST),
+    // cap the rows actually taken from the DB at max_rows (+1 probe row) and
+    // mark the result truncated.
+    let fetch_rows = class_fetches_rows(&prepared.class);
+    let row_cap = if prepared.limit_unverified && !prepared.server_pagination {
+        Some(opts.max_rows as usize)
+    } else {
+        None
+    };
+
     let result = match tokio::time::timeout(
         opts.timeout,
-        run_sql(pool, &prepared.sql, &prepared.params, engine),
+        run_sql(
+            pool,
+            &prepared.sql,
+            &prepared.params,
+            engine,
+            fetch_rows,
+            row_cap,
+        ),
     )
     .await
     {
@@ -201,23 +233,53 @@ pub async fn execute_batch(
     BatchResult { results }
 }
 
+/// Stream rows from a bound query, stopping after `cap` kept rows plus one
+/// probe row. Returns the kept rows and whether a probe row existed (i.e. the
+/// result was truncated at `cap`).
+macro_rules! fetch_rows_capped {
+    ($query:expr, $pool:expr, $cap:expr) => {{
+        let mut stream = $query.fetch($pool);
+        let mut rows = Vec::new();
+        let mut overflow = false;
+        while let Some(item) = stream.next().await {
+            let row = item?;
+            if rows.len() >= $cap {
+                overflow = true;
+                break;
+            }
+            rows.push(row);
+        }
+        (rows, overflow)
+    }};
+}
+
 async fn run_sql(
     pool: &EnginePool,
     sql: &str,
     params: &[Value],
     engine: EngineKind,
+    fetch_rows: bool,
+    row_cap: Option<usize>,
 ) -> Result<ColumnarResult, ExecError> {
     match engine {
         EngineKind::Postgres => {
             let pool = pool
                 .postgres()
                 .map_err(|e| ExecError::Other(e.to_string()))?;
-            if is_select_like(sql) {
-                let rows = bind_pg_params(sql, params)
-                    .map_err(|e| ExecError::Other(e.to_string()))?
-                    .fetch_all(pool)
-                    .await?;
-                pg_rows_to_columnar(&rows)
+            if fetch_rows {
+                let query =
+                    bind_pg_params(sql, params).map_err(|e| ExecError::Other(e.to_string()))?;
+                if let Some(cap) = row_cap {
+                    let (rows, overflow) = fetch_rows_capped!(query, pool, cap);
+                    let mut columnar = pg_rows_to_columnar(&rows)?;
+                    if overflow {
+                        columnar.meta.truncated = true;
+                    }
+                    Ok(columnar)
+                } else {
+                    let rows = query.fetch_all(pool).await?;
+                    pg_rows_to_columnar(&rows)
+                }
             } else {
                 let result = bind_pg_params(sql, params)
                     .map_err(|e| ExecError::Other(e.to_string()))?
@@ -228,12 +290,20 @@ async fn run_sql(
         }
         EngineKind::Mysql => {
             let pool = pool.mysql().map_err(|e| ExecError::Other(e.to_string()))?;
-            if is_select_like(sql) {
-                let rows = bind_mysql_params(sql, params)
-                    .map_err(|e| ExecError::Other(e.to_string()))?
-                    .fetch_all(pool)
-                    .await?;
-                mysql_rows_to_columnar(&rows)
+            if fetch_rows {
+                let query =
+                    bind_mysql_params(sql, params).map_err(|e| ExecError::Other(e.to_string()))?;
+                if let Some(cap) = row_cap {
+                    let (rows, overflow) = fetch_rows_capped!(query, pool, cap);
+                    let mut columnar = mysql_rows_to_columnar(&rows)?;
+                    if overflow {
+                        columnar.meta.truncated = true;
+                    }
+                    Ok(columnar)
+                } else {
+                    let rows = query.fetch_all(pool).await?;
+                    mysql_rows_to_columnar(&rows)
+                }
             } else {
                 let result = bind_mysql_params(sql, params)
                     .map_err(|e| ExecError::Other(e.to_string()))?
@@ -244,12 +314,20 @@ async fn run_sql(
         }
         EngineKind::Sqlite => {
             let pool = pool.sqlite().map_err(|e| ExecError::Other(e.to_string()))?;
-            if is_select_like(sql) {
-                let rows = bind_sqlite_params(sql, params)
-                    .map_err(|e| ExecError::Other(e.to_string()))?
-                    .fetch_all(pool)
-                    .await?;
-                sqlite_rows_to_columnar(&rows)
+            if fetch_rows {
+                let query =
+                    bind_sqlite_params(sql, params).map_err(|e| ExecError::Other(e.to_string()))?;
+                if let Some(cap) = row_cap {
+                    let (rows, overflow) = fetch_rows_capped!(query, pool, cap);
+                    let mut columnar = sqlite_rows_to_columnar(&rows)?;
+                    if overflow {
+                        columnar.meta.truncated = true;
+                    }
+                    Ok(columnar)
+                } else {
+                    let rows = query.fetch_all(pool).await?;
+                    sqlite_rows_to_columnar(&rows)
+                }
             } else {
                 let result = bind_sqlite_params(sql, params)
                     .map_err(|e| ExecError::Other(e.to_string()))?
@@ -259,15 +337,6 @@ async fn run_sql(
             }
         }
     }
-}
-
-fn is_select_like(sql: &str) -> bool {
-    let upper = sql.trim().to_uppercase();
-    upper.starts_with("SELECT")
-        || upper.starts_with("WITH")
-        || upper.starts_with("SHOW")
-        || upper.starts_with("EXPLAIN")
-        || upper.starts_with("DESCRIBE")
 }
 
 fn pg_rows_to_columnar(rows: &[PgRow]) -> Result<ColumnarResult, ExecError> {
@@ -407,6 +476,15 @@ fn empty_columnar() -> ColumnarResult {
 }
 
 /// Replace denied column cells with `"[redacted]"` and record names in meta.
+///
+/// SQL-SEC-16: this redaction is **name-based and best-effort only**. Matching
+/// uses the column names as returned by the database — i.e. the alias when
+/// the query supplies one (`SELECT password AS p` evades a `password` entry).
+/// sqlx 0.8's portable `Column` API exposes only the returned name, not a
+/// pre-alias origin name, so origin-based matching is not available here.
+/// Treat `deny_columns` as a seat-belt for accidental exposure, never as an
+/// access-control boundary; real protection is a read-only DB user and views
+/// that exclude sensitive columns.
 pub fn redact_denied_columns(
     mut result: ColumnarResult,
     deny_columns: &[String],
@@ -414,6 +492,10 @@ pub fn redact_denied_columns(
     if deny_columns.is_empty() || result.cols.is_empty() {
         return result;
     }
+    tracing::warn!(
+        deny_columns = deny_columns.len(),
+        "deny_columns redaction active: name-based best-effort (aliases can evade it)"
+    );
     let denied: Vec<(usize, String)> = result
         .cols
         .iter()
@@ -438,4 +520,43 @@ pub fn redact_denied_columns(
     }
     result.meta.redacted_columns = Some(denied.into_iter().map(|(_, name)| name).collect());
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::guard::validate_and_prepare;
+
+    fn class_of(sql: &str, engine: EngineKind, mode: WriteMode) -> StmtClass {
+        validate_and_prepare(sql, &[], engine, mode, 100)
+            .expect("guard accepts")
+            .class
+    }
+
+    #[test]
+    fn fetch_decision_comes_from_guard_class() {
+        // SELECT fetches rows.
+        assert!(class_fetches_rows(&class_of(
+            "SELECT 1",
+            EngineKind::Postgres,
+            WriteMode::ReadOnly
+        )));
+        // SHOW is Read-classed by the guard (label != SELECT) and returns rows.
+        assert!(class_fetches_rows(&class_of(
+            "SHOW PROCESSLIST",
+            EngineKind::Mysql,
+            WriteMode::ReadOnly
+        )));
+        // A plain SELECT-shaped prefix must NOT decide: DML executes.
+        assert!(!class_fetches_rows(&class_of(
+            "INSERT INTO t VALUES (1)",
+            EngineKind::Postgres,
+            WriteMode::AllowWrites
+        )));
+        assert!(!class_fetches_rows(&class_of(
+            "DROP TABLE t",
+            EngineKind::Postgres,
+            WriteMode::AllowDdl
+        )));
+    }
 }

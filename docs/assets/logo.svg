@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" role="img" aria-label="Strut Stack SQL logo">
+  <!-- Strut Stack SQL mark (for light backgrounds):
+       a diagonal structural strut beam (#E8590C steel orange) passes behind a
+       minimal database cylinder (dark slate). The beam tips stay visible at
+       the bottom-left and top-right, bolted at both ends. -->
+  <!-- strut beam -->
+  <line x1="12" y1="84" x2="84" y2="12" stroke="#E8590C" stroke-width="10" stroke-linecap="round"/>
+  <!-- database cylinder -->
+  <g>
+    <path d="M22 34 v30 a26 9 0 0 0 52 0 v-30 z" fill="#1E293B"/>
+    <path d="M22 49 a26 9 0 0 0 52 0" fill="none" stroke="#F59E0B" stroke-width="2.5"/>
+    <ellipse cx="48" cy="34" rx="26" ry="9" fill="#334155"/>
+    <ellipse cx="48" cy="34" rx="26" ry="9" fill="none" stroke="#F59E0B" stroke-width="2.5"/>
+  </g>
+  <!-- bolts on the exposed strut ends -->
+  <circle cx="12" cy="84" r="3.2" fill="#1E293B"/>
+  <circle cx="84" cy="12" r="3.2" fill="#1E293B"/>
+</svg>

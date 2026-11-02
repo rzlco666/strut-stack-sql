@@ -60,6 +60,11 @@ async fn sqlite_config(write_mode: WriteMode) -> AppConfig {
         sources,
         searched_paths: vec![],
         workspace: None,
+        http_tokens: vec![],
+        http_rate_limit_per_minute: 600,
+        allow_unauthenticated_http: false,
+        ephemeral: false,
+        hide_endpoints: None,
     }
 }
 
@@ -721,6 +726,11 @@ async fn postgres_config() -> Option<AppConfig> {
         sources,
         searched_paths: vec![],
         workspace: None,
+        http_tokens: vec![],
+        http_rate_limit_per_minute: 600,
+        allow_unauthenticated_http: false,
+        ephemeral: false,
+        hide_endpoints: None,
     })
 }
 
@@ -800,6 +810,11 @@ async fn mysql_config() -> Option<AppConfig> {
         sources,
         searched_paths: vec![],
         workspace: None,
+        http_tokens: vec![],
+        http_rate_limit_per_minute: 600,
+        allow_unauthenticated_http: false,
+        ephemeral: false,
+        hide_endpoints: None,
     })
 }
 
@@ -868,4 +883,254 @@ async fn mysql_describe_table_has_columns() {
         .expect("describe demo.users");
     let cols = object.columns.unwrap_or_default();
     assert!(!cols.is_empty(), "describe_table must return columns");
+}
+
+// --- HTTP bearer-token auth (SQL-SEC-05 / SQL-GAP-01 / SQL-GAP-04) ---
+
+use strut_stack_sql::config::HttpToken;
+
+async fn sqlite_config_with_tokens(
+    write_mode: WriteMode,
+    http_tokens: Vec<HttpToken>,
+) -> AppConfig {
+    let mut config = sqlite_config(write_mode).await;
+    config.http_tokens = http_tokens;
+    config
+}
+
+fn test_token(name: &str, secret: &str, mode: WriteMode) -> HttpToken {
+    HttpToken {
+        name: name.into(),
+        token: secret.into(),
+        mode,
+        sources: vec![],
+    }
+}
+
+fn mcp_tools_call_body(tool: &str, arguments: Value) -> String {
+    json!({
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "tools/call",
+        "params": { "name": tool, "arguments": arguments }
+    })
+    .to_string()
+}
+
+async fn post_mcp(app: axum::Router, token: Option<&str>, body: String) -> (StatusCode, String) {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream");
+    if let Some(t) = token {
+        builder = builder.header("authorization", format!("Bearer {t}"));
+    }
+    let response = app
+        .oneshot(builder.body(Body::from(body)).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    (status, String::from_utf8_lossy(&bytes).to_string())
+}
+
+#[tokio::test]
+async fn http_mcp_without_token_is_401() {
+    let config = sqlite_config_with_tokens(
+        WriteMode::AllowDdl,
+        vec![test_token("ro", "ro-secret", WriteMode::ReadOnly)],
+    )
+    .await;
+    let (app, _ct) = build_http_router(config);
+    let (status, _body) = post_mcp(
+        app,
+        None,
+        mcp_tools_call_body("execute_sql", json!({ "sql": "SELECT 1" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn http_readonly_token_cannot_call_ddl_tool() {
+    let config = sqlite_config_with_tokens(
+        WriteMode::AllowDdl,
+        vec![test_token("ro", "ro-secret", WriteMode::ReadOnly)],
+    )
+    .await;
+    let (app, _ct) = build_http_router(config);
+    let (status, body) = post_mcp(
+        app,
+        Some("ro-secret"),
+        mcp_tools_call_body(
+            "create_table",
+            json!({ "ddl": "CREATE TABLE t (id INTEGER)" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+    assert!(body.contains("may not call DDL tool"), "body: {body}");
+}
+
+#[tokio::test]
+async fn http_readonly_token_cannot_insert_via_execute_sql() {
+    let config = sqlite_config_with_tokens(
+        WriteMode::AllowDdl,
+        vec![test_token("ro", "ro-secret", WriteMode::ReadOnly)],
+    )
+    .await;
+    let (app, _ct) = build_http_router(config);
+    let (status, body) = post_mcp(
+        app,
+        Some("ro-secret"),
+        mcp_tools_call_body("execute_sql", json!({ "sql": "INSERT INTO t VALUES (1)" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+}
+
+#[tokio::test]
+async fn http_token_source_allowlist_enforced() {
+    let mut restricted = test_token("ro", "ro-secret", WriteMode::ReadOnly);
+    restricted.sources = vec!["other".into()];
+    let config = sqlite_config_with_tokens(WriteMode::AllowDdl, vec![restricted]).await;
+    let (app, _ct) = build_http_router(config);
+    // No `source` argument -> default source "default", not in allowlist.
+    let (status, body) = post_mcp(
+        app,
+        Some("ro-secret"),
+        mcp_tools_call_body("execute_sql", json!({ "sql": "SELECT 1" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+    assert!(body.contains("not allowed to use source"), "body: {body}");
+}
+
+/// Full MCP handshake with a DDL token: initialize -> initialized ->
+/// tools/call create_table must succeed end to end.
+#[tokio::test]
+async fn http_ddl_token_can_create_table_end_to_end() {
+    let config = sqlite_config_with_tokens(
+        WriteMode::AllowDdl,
+        vec![test_token("admin", "admin-secret", WriteMode::AllowDdl)],
+    )
+    .await;
+    let (app, _ct) = build_http_router(config);
+
+    let init_body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {},
+            "clientInfo": { "name": "auth-test", "version": "0" }
+        }
+    })
+    .to_string();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/mcp")
+                .header("content-type", "application/json")
+                .header("accept", "application/json, text/event-stream")
+                .header("authorization", "Bearer admin-secret")
+                .header("host", "localhost")
+                .body(Body::from(init_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    if response.status() != StatusCode::OK {
+        let st = response.status();
+        let b = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        panic!(
+            "initialize failed: {st} body: {}",
+            String::from_utf8_lossy(&b)
+        );
+    }
+    let session_id = response
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .expect("session id header")
+        .to_string();
+
+    // notifications/initialized (no response body expected)
+    let _ = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/mcp")
+                .header("content-type", "application/json")
+                .header("accept", "application/json, text/event-stream")
+                .header("authorization", "Bearer admin-secret")
+                .header("host", "localhost")
+                .header("mcp-session-id", session_id.clone())
+                .body(Body::from(
+                    json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/mcp")
+                .header("content-type", "application/json")
+                .header("accept", "application/json, text/event-stream")
+                .header("authorization", "Bearer admin-secret")
+                .header("host", "localhost")
+                .header("mcp-session-id", session_id)
+                .body(Body::from(mcp_tools_call_body(
+                    "create_table",
+                    json!({ "ddl": "CREATE TABLE auth_t (id INTEGER PRIMARY KEY, name TEXT)" }),
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(
+        text.contains("\"result\"") && !text.contains("\"error\""),
+        "create_table via DDL token should succeed, got: {text}"
+    );
+}
+
+#[tokio::test]
+async fn livez_is_ok_without_touching_pools() {
+    let config = sqlite_config(WriteMode::ReadOnly).await;
+    let (app, _ct) = build_http_router(config);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/livez")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&bytes);
+    // Liveness leaks nothing: no source names, no engine, no errors.
+    assert!(text.contains("\"ok\""), "body: {text}");
+    assert!(!text.contains("default"), "body: {text}");
 }

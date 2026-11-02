@@ -1,8 +1,118 @@
 use serde::{Deserialize, Serialize};
-use sqlx::{mysql::MySqlRow, postgres::PgRow, MySqlPool, Row};
+use sqlx::{mysql::MySqlRow, postgres::PgRow, MySqlPool, PgPool, Row, SqlitePool};
 
 use crate::db::value::{mysql_decode_text_by_index, mysql_decode_text_by_name};
 use crate::db::{EngineKind, EnginePool};
+
+/// SQL-BUG-07: pool-variant access used to `.expect()` and kill the whole MCP
+/// process on an engine mismatch. Map the mismatch into a structured
+/// `sqlx::Error` (the error type every caller here already propagates).
+fn pool_mismatch(e: anyhow::Error) -> sqlx::Error {
+    sqlx::Error::Configuration(format!("engine pool mismatch: {e}").into())
+}
+
+fn pg_pool(pool: &EnginePool) -> Result<&PgPool, sqlx::Error> {
+    pool.postgres().map_err(pool_mismatch)
+}
+
+fn mysql_pool(pool: &EnginePool) -> Result<&MySqlPool, sqlx::Error> {
+    pool.mysql().map_err(pool_mismatch)
+}
+
+fn sqlite_pool(pool: &EnginePool) -> Result<&SqlitePool, sqlx::Error> {
+    pool.sqlite().map_err(pool_mismatch)
+}
+
+// ---------------------------------------------------------------------------
+// Schema metadata cache (SQL-BUG-10)
+//
+// `list_tables` / `schema_overview` results are cached per source (engine +
+// connection URL + schema [+ keyword]) for a short TTL so repeated agent
+// introspection does not re-hit the catalogs every call. Freshness is
+// TTL-only: a DDL change becomes visible after the TTL lapses at the latest.
+// TTL comes from `MCP_SQL_SCHEMA_CACHE_TTL_SECS` (default 30; 0 disables).
+// ---------------------------------------------------------------------------
+
+use std::collections::HashMap as StdHashMap;
+use std::sync::{Mutex as StdMutex, OnceLock};
+use std::time::{Duration as StdDuration, Instant as StdInstant};
+
+fn schema_cache_ttl() -> StdDuration {
+    match std::env::var("MCP_SQL_SCHEMA_CACHE_TTL_SECS") {
+        Ok(v) => v
+            .trim()
+            .parse::<u64>()
+            .map(StdDuration::from_secs)
+            .unwrap_or(StdDuration::from_secs(30)),
+        Err(_) => StdDuration::from_secs(30),
+    }
+}
+
+/// One schema-cache map: lookup key -> (insertion instant, cached value).
+type CacheMap<V> = StdHashMap<String, (StdInstant, V)>;
+
+fn tables_cache() -> &'static StdMutex<CacheMap<Vec<SchemaObject>>> {
+    static CACHE: OnceLock<StdMutex<CacheMap<Vec<SchemaObject>>>> = OnceLock::new();
+    CACHE.get_or_init(|| StdMutex::new(StdHashMap::new()))
+}
+
+fn overview_cache() -> &'static StdMutex<CacheMap<SchemaOverview>> {
+    static CACHE: OnceLock<StdMutex<CacheMap<SchemaOverview>>> = OnceLock::new();
+    CACHE.get_or_init(|| StdMutex::new(StdHashMap::new()))
+}
+
+fn cache_lookup<V: Clone>(
+    map: &StdMutex<StdHashMap<String, (StdInstant, V)>>,
+    key: &str,
+    ttl: StdDuration,
+) -> Option<V> {
+    if ttl.is_zero() {
+        return None;
+    }
+    let mut guard = map.lock().ok()?;
+    match guard.get(key) {
+        Some((at, value)) if at.elapsed() < ttl => Some(value.clone()),
+        Some(_) => {
+            guard.remove(key);
+            None
+        }
+        None => None,
+    }
+}
+
+fn cache_store<V>(map: &StdMutex<StdHashMap<String, (StdInstant, V)>>, key: String, value: V) {
+    if let Ok(mut guard) = map.lock() {
+        guard.insert(key, (StdInstant::now(), value));
+    }
+}
+
+fn tables_cache_key(
+    pool: &EnginePool,
+    connection_url: Option<&str>,
+    schema: Option<&str>,
+    keyword: Option<&str>,
+) -> String {
+    format!(
+        "tables|{:?}|{}|{}|{}",
+        pool.engine(),
+        connection_url.unwrap_or(""),
+        schema.unwrap_or(""),
+        keyword.unwrap_or("")
+    )
+}
+
+fn overview_cache_key(
+    pool: &EnginePool,
+    connection_url: Option<&str>,
+    schema: Option<&str>,
+) -> String {
+    format!(
+        "overview|{:?}|{}|{}",
+        pool.engine(),
+        connection_url.unwrap_or(""),
+        schema.unwrap_or("")
+    )
+}
 
 /// MySQL column row layout: `table_schema, table_name, column_name, data_type, is_nullable`.
 const MYSQL_COL_NAME_IDX: usize = 2;
@@ -131,7 +241,7 @@ pub async fn search_objects(
     offset: usize,
     limit: usize,
 ) -> Result<SearchResult, sqlx::Error> {
-    let mut objects = match object_type {
+    let objects = match object_type {
         ObjectType::Schema => list_schemas(pool, keyword).await?,
         ObjectType::Table => list_tables(pool, connection_url, schema, keyword).await?,
         ObjectType::Column => list_columns(pool, connection_url, schema, keyword).await?,
@@ -139,9 +249,7 @@ pub async fn search_objects(
     };
 
     let total = objects.len();
-    let slice = objects
-        .drain(offset..total.min(offset + limit))
-        .collect::<Vec<_>>();
+    let slice = paginate_objects(objects, offset, limit);
 
     Ok(SearchResult {
         meta: SearchMeta {
@@ -154,13 +262,28 @@ pub async fn search_objects(
     })
 }
 
+/// Slice one page out of `objects` (SQL-BUG-01). The old code drained
+/// `offset..total.min(offset + limit)`, which panics when `offset > total`
+/// (invalid range). Clamp both bounds so an out-of-range offset simply
+/// yields an empty page.
+fn paginate_objects(
+    mut objects: Vec<SchemaObject>,
+    offset: usize,
+    limit: usize,
+) -> Vec<SchemaObject> {
+    let total = objects.len();
+    let start = offset.min(total);
+    let end = start.saturating_add(limit).min(total);
+    objects.drain(start..end).collect()
+}
+
 pub async fn list_schemas(
     pool: &EnginePool,
     keyword: Option<&str>,
 ) -> Result<Vec<SchemaObject>, sqlx::Error> {
     match pool.engine() {
         EngineKind::Postgres => {
-            let pool = pool.postgres().expect("postgres");
+            let pool = pg_pool(pool)?;
             let rows = sqlx::query(
                 "SELECT schema_name FROM information_schema.schemata \
                  WHERE schema_name NOT IN ('pg_catalog', 'information_schema', 'pg_toast') \
@@ -188,7 +311,7 @@ pub async fn list_schemas(
             ))
         }
         EngineKind::Mysql => {
-            let pool = pool.mysql().expect("mysql");
+            let pool = mysql_pool(pool)?;
             let rows = sqlx::query("SHOW DATABASES").fetch_all(pool).await?;
             Ok(filter_objects(
                 rows.iter()
@@ -210,7 +333,7 @@ pub async fn list_schemas(
             ))
         }
         EngineKind::Sqlite => {
-            let pool = pool.sqlite().expect("sqlite");
+            let pool = sqlite_pool(pool)?;
             let rows = sqlx::query("PRAGMA database_list").fetch_all(pool).await?;
             Ok(filter_objects(
                 rows.iter()
@@ -240,9 +363,27 @@ pub async fn list_tables(
     schema: Option<&str>,
     keyword: Option<&str>,
 ) -> Result<Vec<SchemaObject>, sqlx::Error> {
+    let ttl = schema_cache_ttl();
+    let key = tables_cache_key(pool, connection_url, schema, keyword);
+    if let Some(hit) = cache_lookup(tables_cache(), &key, ttl) {
+        return Ok(hit);
+    }
+    let fresh = list_tables_uncached(pool, connection_url, schema, keyword).await?;
+    if !ttl.is_zero() {
+        cache_store(tables_cache(), key, fresh.clone());
+    }
+    Ok(fresh)
+}
+
+async fn list_tables_uncached(
+    pool: &EnginePool,
+    connection_url: Option<&str>,
+    schema: Option<&str>,
+    keyword: Option<&str>,
+) -> Result<Vec<SchemaObject>, sqlx::Error> {
     match pool.engine() {
         EngineKind::Postgres => {
-            let pool = pool.postgres().expect("postgres");
+            let pool = pg_pool(pool)?;
             let schema = schema.unwrap_or("public");
             let rows = sqlx::query(
                 "SELECT table_name FROM information_schema.tables \
@@ -272,7 +413,7 @@ pub async fn list_tables(
             ))
         }
         EngineKind::Mysql => {
-            let pool = pool.mysql().expect("mysql");
+            let pool = mysql_pool(pool)?;
             let scope = resolve_mysql_schema(pool, schema, connection_url).await?;
 
             let rows = match &scope {
@@ -316,7 +457,7 @@ pub async fn list_tables(
             ))
         }
         EngineKind::Sqlite => {
-            let pool = pool.sqlite().expect("sqlite");
+            let pool = sqlite_pool(pool)?;
             let schema_name = resolve_sqlite_schema(schema);
             let rows = sqlite_list_table_rows(pool, schema_name).await?;
             Ok(filter_objects(
@@ -349,7 +490,7 @@ async fn list_columns(
 ) -> Result<Vec<SchemaObject>, sqlx::Error> {
     match pool.engine() {
         EngineKind::Postgres => {
-            let pool = pool.postgres().expect("postgres");
+            let pool = pg_pool(pool)?;
             let schema = schema.unwrap_or("public");
             let rows = sqlx::query(
                 "SELECT table_name, column_name, \
@@ -384,7 +525,7 @@ async fn list_columns(
             ))
         }
         EngineKind::Mysql => {
-            let pool = pool.mysql().expect("mysql");
+            let pool = mysql_pool(pool)?;
             let scope = resolve_mysql_schema(pool, schema, connection_url).await?;
             let rows = match &scope {
                 MysqlSchemaScope::All => {
@@ -413,7 +554,7 @@ async fn list_columns(
             ))
         }
         EngineKind::Sqlite => {
-            let pool = pool.sqlite().expect("sqlite");
+            let pool = sqlite_pool(pool)?;
             let schema_name = resolve_sqlite_schema(schema);
             let rows = sqlx::query(
                 "SELECT m.name AS table_name, p.name, p.type, p.notnull \
@@ -459,7 +600,7 @@ pub async fn describe_table(
     let (schema, table_name) = match engine {
         EngineKind::Postgres => (schema.unwrap_or("public").to_string(), table.to_string()),
         EngineKind::Mysql => {
-            let pool = pool.mysql().expect("mysql");
+            let pool = mysql_pool(pool)?;
             let (schema_from_table, table_only) = split_mysql_table(table);
             let table_name = normalize_mysql_ident(table_only);
             let resolved = resolve_mysql_schema(pool, schema, connection_url).await?;
@@ -483,7 +624,7 @@ pub async fn describe_table(
 
     let columns = match engine {
         EngineKind::Postgres => {
-            let pool = pool.postgres().expect("postgres");
+            let pool = pg_pool(pool)?;
             let rows = sqlx::query(
                 "SELECT column_name, \
                  CASE WHEN data_type = 'USER-DEFINED' THEN udt_name ELSE data_type END, \
@@ -501,7 +642,7 @@ pub async fn describe_table(
                 .collect()
         }
         EngineKind::Mysql => {
-            let pool = pool.mysql().expect("mysql");
+            let pool = mysql_pool(pool)?;
             let mut columns = mysql_columns_from_show(pool, &schema, &table_name).await?;
             if columns.is_empty() {
                 columns = mysql_columns_from_information_schema(pool, &schema, &table_name).await?;
@@ -509,7 +650,7 @@ pub async fn describe_table(
             columns
         }
         EngineKind::Sqlite => {
-            let pool = pool.sqlite().expect("sqlite");
+            let pool = sqlite_pool(pool)?;
             sqlite_columns_from_pragma(pool, &table_name).await?
         }
     };
@@ -550,7 +691,7 @@ pub async fn list_indexes(
 ) -> Result<Vec<SchemaObject>, sqlx::Error> {
     match pool.engine() {
         EngineKind::Postgres => {
-            let pool = pool.postgres().expect("postgres");
+            let pool = pg_pool(pool)?;
             let schema = schema.unwrap_or("public");
             let rows = if let Some(table) = table {
                 sqlx::query(
@@ -599,15 +740,17 @@ pub async fn list_indexes(
             ))
         }
         EngineKind::Mysql => {
-            let pool = pool.mysql().expect("mysql");
+            let pool = mysql_pool(pool)?;
             let scope = resolve_mysql_schema(pool, schema, connection_url).await?;
+            // Uniform layout for every scope/table combination:
+            // table_schema, table_name, index_name, column_name, non_unique.
             let rows = match (&scope, table) {
                 (MysqlSchemaScope::One(schema_name), Some(table)) => {
                     sqlx::query(
-                        "SELECT index_name, column_name, non_unique \
+                        "SELECT table_schema, table_name, index_name, column_name, non_unique \
                          FROM information_schema.statistics \
                          WHERE table_schema = ? AND table_name = ? \
-                         ORDER BY index_name, seq_in_index",
+                         ORDER BY table_schema, table_name, index_name, seq_in_index",
                     )
                     .bind(schema_name)
                     .bind(table)
@@ -616,9 +759,10 @@ pub async fn list_indexes(
                 }
                 (MysqlSchemaScope::One(schema_name), None) => {
                     sqlx::query(
-                        "SELECT index_name, column_name, non_unique \
+                        "SELECT table_schema, table_name, index_name, column_name, non_unique \
                          FROM information_schema.statistics \
-                         WHERE table_schema = ? ORDER BY index_name, seq_in_index",
+                         WHERE table_schema = ? \
+                         ORDER BY table_schema, table_name, index_name, seq_in_index",
                     )
                     .bind(schema_name)
                     .fetch_all(pool)
@@ -626,10 +770,10 @@ pub async fn list_indexes(
                 }
                 (MysqlSchemaScope::All, Some(table)) => {
                     sqlx::query(
-                        "SELECT table_schema, index_name, column_name, non_unique \
+                        "SELECT table_schema, table_name, index_name, column_name, non_unique \
                          FROM information_schema.statistics \
                          WHERE table_name = ? \
-                         ORDER BY table_schema, index_name, seq_in_index",
+                         ORDER BY table_schema, table_name, index_name, seq_in_index",
                     )
                     .bind(table)
                     .fetch_all(pool)
@@ -637,67 +781,79 @@ pub async fn list_indexes(
                 }
                 (MysqlSchemaScope::All, None) => {
                     sqlx::query(
-                        "SELECT table_schema, index_name, column_name, non_unique \
+                        "SELECT table_schema, table_name, index_name, column_name, non_unique \
                          FROM information_schema.statistics \
-                         ORDER BY table_schema, index_name, seq_in_index",
+                         ORDER BY table_schema, table_name, index_name, seq_in_index",
                     )
                     .fetch_all(pool)
                     .await?
                 }
             };
 
-            // Group by index name
-            use std::collections::BTreeMap;
-            let mut map: BTreeMap<String, (Vec<String>, bool, Option<String>)> = BTreeMap::new();
-            for row in &rows {
-                if matches!(scope, MysqlSchemaScope::All) && table.is_none() {
-                    let sch: String = row.try_get(0).ok().unwrap_or_default();
-                    let name: String = row.try_get(1).ok().unwrap_or_default();
-                    let col: String = row.try_get(2).ok().unwrap_or_default();
-                    let non_unique: i32 = row.try_get(3).ok().unwrap_or(1);
-                    let key = format!("{sch}.{name}");
-                    let entry = map
-                        .entry(key)
-                        .or_insert((vec![], non_unique == 0, Some(sch)));
-                    entry.0.push(col);
-                } else {
-                    let name: String = row.try_get(0).ok().unwrap_or_default();
-                    let col: String = row.try_get(1).ok().unwrap_or_default();
-                    let non_unique: i32 = row.try_get(2).ok().unwrap_or(1);
-                    let entry = map.entry(name.clone()).or_insert((
-                        vec![],
-                        non_unique == 0,
-                        schema.map(str::to_string),
-                    ));
-                    entry.0.push(col);
-                }
-            }
-
-            let objects = map
-                .into_iter()
-                .map(|(name, (columns, unique, sch))| SchemaObject {
-                    object_type: ObjectType::Index,
-                    schema: sch,
-                    name: name.clone(),
-                    table: table.map(str::to_string),
-                    data_type: None,
-                    nullable: None,
-                    columns: None,
-                    indexes: Some(vec![IndexInfo {
-                        name,
-                        columns,
-                        unique,
-                    }]),
-                })
-                .collect();
+            let objects = group_mysql_index_rows(extract_mysql_index_rows(&rows));
             Ok(filter_objects(objects, keyword))
         }
         EngineKind::Sqlite => {
-            let pool = pool.sqlite().expect("sqlite");
+            let pool = sqlite_pool(pool)?;
             let objects = sqlite_list_index_objects(pool, schema, table).await?;
             Ok(filter_objects(objects, keyword))
         }
     }
+}
+
+/// One raw MySQL index row: (table_schema, table_name, index_name,
+/// column_name, non_unique) from `information_schema.statistics`.
+#[derive(Debug, Clone)]
+struct MysqlIndexRowData {
+    schema: String,
+    table: String,
+    name: String,
+    column: String,
+    unique: bool,
+}
+
+fn extract_mysql_index_rows(rows: &[MySqlRow]) -> Vec<MysqlIndexRowData> {
+    rows.iter()
+        .map(|row| MysqlIndexRowData {
+            schema: row.try_get(0).ok().unwrap_or_default(),
+            table: row.try_get(1).ok().unwrap_or_default(),
+            name: row.try_get(2).ok().unwrap_or_default(),
+            column: row.try_get(3).ok().unwrap_or_default(),
+            unique: row.try_get::<i32, _>(4).ok().unwrap_or(1) == 0,
+        })
+        .collect()
+}
+
+/// Group MySQL index rows into one `SchemaObject` per index.
+///
+/// SQL-BUG-03: grouping used to key on the index name alone (or
+/// `schema.name` in the all-databases path), merging `PRIMARY` / `idx_status`
+/// across tables into one ambiguous object. The key is now the composite
+/// (schema, table, index name), and each object carries its real table.
+fn group_mysql_index_rows(rows: Vec<MysqlIndexRowData>) -> Vec<SchemaObject> {
+    use std::collections::BTreeMap;
+    let mut map: BTreeMap<(String, String, String), (Vec<String>, bool)> = BTreeMap::new();
+    for row in rows {
+        let key = (row.schema.clone(), row.table.clone(), row.name.clone());
+        let entry = map.entry(key).or_insert((Vec::new(), row.unique));
+        entry.0.push(row.column);
+    }
+    map.into_iter()
+        .map(|((schema, table, name), (columns, unique))| SchemaObject {
+            object_type: ObjectType::Index,
+            schema: Some(schema),
+            name: name.clone(),
+            table: Some(table),
+            data_type: None,
+            nullable: None,
+            columns: None,
+            indexes: Some(vec![IndexInfo {
+                name,
+                columns,
+                unique,
+            }]),
+        })
+        .collect()
 }
 
 fn resolve_sqlite_schema(schema: Option<&str>) -> &str {
@@ -730,10 +886,13 @@ async fn sqlite_list_table_rows(
         .fetch_all(pool)
         .await
     } else {
+        // SQL-SEC-11: quote the schema identifier properly (double any
+        // embedded `"`) instead of interpolating the raw caller input.
         let sql = format!(
-            "SELECT name FROM \"{schema_name}\".sqlite_master \
+            "SELECT name FROM {}.sqlite_master \
              WHERE type = 'table' AND name NOT LIKE 'sqlite_%' \
-             ORDER BY name"
+             ORDER BY name",
+            sqlite_quote_ident(schema_name)
         );
         sqlx::query(&sql).fetch_all(pool).await
     }
@@ -741,6 +900,13 @@ async fn sqlite_list_table_rows(
 
 fn sqlite_quote_literal(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
+}
+
+/// Quote a SQLite identifier (schema/table/index name) for interpolation into
+/// a statement that cannot take bind parameters (e.g. `"<schema>".sqlite_master`).
+/// Embedded double quotes are doubled, per SQL identifier rules.
+fn sqlite_quote_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
 }
 
 async fn sqlite_columns_from_pragma(
@@ -777,19 +943,95 @@ async fn sqlite_list_index_objects(
     table: Option<&str>,
 ) -> Result<Vec<SchemaObject>, sqlx::Error> {
     let schema_name = resolve_sqlite_schema(schema).to_string();
-    let tables: Vec<String> = if let Some(table) = table {
-        vec![table.to_string()]
-    } else {
-        sqlite_list_table_rows(pool, &schema_name)
-            .await?
-            .into_iter()
-            .filter_map(|r| r.try_get(0).ok())
-            .collect()
-    };
+    if let Some(table) = table {
+        // Single table: per-table PRAGMAs touch exactly one table — no N+1.
+        return sqlite_list_index_objects_legacy(pool, &schema_name, &[table.to_string()]).await;
+    }
+    // SQL-BUG-10: the all-tables path used to run PRAGMA index_list +
+    // index_info per table/index (N+1 round-trips). The batched path uses a
+    // constant number of statements with table-valued PRAGMA functions.
+    // Table-valued PRAGMAs only address the main schema, so non-main
+    // schemas (and any batched failure) fall back to the legacy loop.
+    if schema_name == "main" {
+        match sqlite_list_index_objects_batched(pool, &schema_name).await {
+            Ok(objects) => return Ok(objects),
+            Err(e) => {
+                tracing::warn!(error = %e, "batched sqlite index listing failed; falling back to per-table pragmas");
+            }
+        }
+    }
+    let tables: Vec<String> = sqlite_list_table_rows(pool, &schema_name)
+        .await?
+        .into_iter()
+        .filter_map(|r| r.try_get(0).ok())
+        .collect();
+    sqlite_list_index_objects_legacy(pool, &schema_name, &tables).await
+}
 
+/// Batched SQLite index listing: 2 statements total for any table count.
+/// 1. (table, index, unique) for every table via `pragma_index_list` TVF.
+/// 2. (index, column) for every index via `pragma_index_info` TVF.
+async fn sqlite_list_index_objects_batched(
+    pool: &sqlx::SqlitePool,
+    schema_name: &str,
+) -> Result<Vec<SchemaObject>, sqlx::Error> {
+    let list_rows = sqlx::query(
+        "SELECT t.name, il.name, il.\"unique\" \
+         FROM sqlite_master AS t, pragma_index_list(t.name) AS il \
+         WHERE t.type = 'table' AND t.name NOT LIKE 'sqlite_%' \
+         ORDER BY t.name, il.seq",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let info_rows = sqlx::query(
+        "SELECT m.name, p.name \
+         FROM sqlite_master AS m, pragma_index_info(m.name) AS p \
+         WHERE m.type = 'index' AND m.name NOT LIKE 'sqlite_%' \
+         ORDER BY m.name, p.seqno",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut columns_by_index: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for row in &info_rows {
+        let idx: String = row.try_get(0)?;
+        let col: String = row.try_get(1)?;
+        columns_by_index.entry(idx).or_default().push(col);
+    }
+
+    let mut objects = Vec::with_capacity(list_rows.len());
+    for row in &list_rows {
+        let table_name: String = row.try_get(0)?;
+        let idx_name: String = row.try_get(1)?;
+        let unique: i64 = row.try_get(2)?;
+        objects.push(SchemaObject {
+            object_type: ObjectType::Index,
+            schema: Some(schema_name.to_string()),
+            name: idx_name.clone(),
+            table: Some(table_name),
+            data_type: None,
+            nullable: None,
+            columns: None,
+            indexes: Some(vec![IndexInfo {
+                columns: columns_by_index.remove(&idx_name).unwrap_or_default(),
+                name: idx_name,
+                unique: unique != 0,
+            }]),
+        });
+    }
+    Ok(objects)
+}
+
+async fn sqlite_list_index_objects_legacy(
+    pool: &sqlx::SqlitePool,
+    schema_name: &str,
+    tables: &[String],
+) -> Result<Vec<SchemaObject>, sqlx::Error> {
     let mut objects = Vec::new();
     for table_name in tables {
-        let index_sql = format!("PRAGMA index_list({})", sqlite_quote_literal(&table_name));
+        let index_sql = format!("PRAGMA index_list({})", sqlite_quote_literal(table_name));
         let index_rows = sqlx::query(&index_sql).fetch_all(pool).await?;
         for row in index_rows {
             let idx_name: String = row.try_get(1)?;
@@ -802,7 +1044,7 @@ async fn sqlite_list_index_objects(
                 .collect();
             objects.push(SchemaObject {
                 object_type: ObjectType::Index,
-                schema: Some(schema_name.clone()),
+                schema: Some(schema_name.to_string()),
                 name: idx_name.clone(),
                 table: Some(table_name.clone()),
                 data_type: None,
@@ -817,6 +1059,51 @@ async fn sqlite_list_index_objects(
         }
     }
     Ok(objects)
+}
+
+/// All foreign keys of all (overview) tables in ONE statement via the
+/// `pragma_foreign_key_list` table-valued function (SQL-BUG-10 — replaces a
+/// per-table PRAGMA loop in `schema_overview`). Main schema only, like the
+/// batched index path.
+async fn sqlite_all_foreign_keys_batched(
+    pool: &sqlx::SqlitePool,
+) -> Result<Vec<ForeignKeyInfo>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT m.name, fk.id, fk.\"table\", fk.\"from\", fk.\"to\", \
+                fk.on_delete, fk.on_update \
+         FROM sqlite_master AS m, pragma_foreign_key_list(m.name) AS fk \
+         WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%' \
+         ORDER BY m.name, fk.id, fk.seq",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    use std::collections::BTreeMap;
+    let mut map: BTreeMap<(String, i64), ForeignKeyInfo> = BTreeMap::new();
+    for row in &rows {
+        let table_name: String = row.try_get(0)?;
+        let id: i64 = row.try_get(1)?;
+        let ref_table: String = row.try_get(2)?;
+        let from_col: String = row.try_get(3)?;
+        let to_col: String = row.try_get(4)?;
+        let on_delete: String = row.try_get(5)?;
+        let on_update: String = row.try_get(6)?;
+        map.entry((table_name.clone(), id))
+            .and_modify(|fk| {
+                fk.columns.push(from_col.clone());
+                fk.ref_columns.push(to_col.clone());
+            })
+            .or_insert(ForeignKeyInfo {
+                name: format!("fk_{id}"),
+                table: table_name,
+                columns: vec![from_col],
+                ref_table,
+                ref_columns: vec![to_col],
+                on_delete: Some(on_delete),
+                on_update: Some(on_update),
+            });
+    }
+    Ok(map.into_values().collect())
 }
 
 fn index_info_from_schema_object(o: SchemaObject) -> IndexInfo {
@@ -1221,10 +1508,27 @@ pub async fn schema_overview(
     connection_url: Option<&str>,
     schema: Option<&str>,
 ) -> Result<SchemaOverview, sqlx::Error> {
+    let ttl = schema_cache_ttl();
+    let key = overview_cache_key(pool, connection_url, schema);
+    if let Some(hit) = cache_lookup(overview_cache(), &key, ttl) {
+        return Ok(hit);
+    }
+    let fresh = schema_overview_uncached(pool, connection_url, schema).await?;
+    if !ttl.is_zero() {
+        cache_store(overview_cache(), key, fresh.clone());
+    }
+    Ok(fresh)
+}
+
+async fn schema_overview_uncached(
+    pool: &EnginePool,
+    connection_url: Option<&str>,
+    schema: Option<&str>,
+) -> Result<SchemaOverview, sqlx::Error> {
     let schema_name = match pool.engine() {
         EngineKind::Postgres => schema.unwrap_or("public").to_string(),
         EngineKind::Mysql => {
-            let mysql = pool.mysql().expect("mysql");
+            let mysql = mysql_pool(pool)?;
             match resolve_mysql_schema(mysql, schema, connection_url).await? {
                 MysqlSchemaScope::One(name) => name,
                 MysqlSchemaScope::All => {
@@ -1240,7 +1544,7 @@ pub async fn schema_overview(
 
     let mut tables = match pool.engine() {
         EngineKind::Postgres => {
-            let pg = pool.postgres().expect("postgres");
+            let pg = pg_pool(pool)?;
             // Cast reltuples to float8 for sqlx; also decode f32 because native type is `real`.
             let rows = sqlx::query(
                 "SELECT c.relname, s.n_live_tup, c.reltuples::float8 \
@@ -1268,7 +1572,7 @@ pub async fn schema_overview(
                 .collect::<Vec<_>>()
         }
         EngineKind::Mysql => {
-            let mysql = pool.mysql().expect("mysql");
+            let mysql = mysql_pool(pool)?;
             let rows = sqlx::query(
                 "SELECT table_name, table_rows \
                  FROM information_schema.tables \
@@ -1324,15 +1628,41 @@ pub async fn schema_overview(
 
     let foreign_keys = match pool.engine() {
         EngineKind::Sqlite => {
-            // SQLite PRAGMA requires a table; aggregate across overview tables.
-            let mut all = Vec::new();
-            for t in &tables {
-                let fks =
-                    list_foreign_keys(pool, connection_url, Some(&schema_name), Some(&t.name))
+            // SQL-BUG-10: one batched statement for all tables (main schema);
+            // fall back to the per-table PRAGMA loop when unavailable.
+            let batched = if schema_name == "main" {
+                let sqlite = sqlite_pool(pool)?;
+                match sqlite_all_foreign_keys_batched(sqlite).await {
+                    Ok(all) => Some(
+                        all.into_iter()
+                            .filter(|fk| tables.iter().any(|t| t.name == fk.table))
+                            .collect::<Vec<_>>(),
+                    ),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "batched sqlite FK listing failed; falling back to per-table pragmas");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            match batched {
+                Some(fks) => fks,
+                None => {
+                    let mut all = Vec::new();
+                    for t in &tables {
+                        let fks = list_foreign_keys(
+                            pool,
+                            connection_url,
+                            Some(&schema_name),
+                            Some(&t.name),
+                        )
                         .await?;
-                all.extend(fks);
+                        all.extend(fks);
+                    }
+                    all
+                }
             }
-            all
         }
         _ => list_foreign_keys(pool, connection_url, Some(&schema_name), None).await?,
     };
@@ -1360,7 +1690,7 @@ pub async fn list_foreign_keys(
 ) -> Result<Vec<ForeignKeyInfo>, sqlx::Error> {
     match pool.engine() {
         EngineKind::Postgres => {
-            let pool = pool.postgres().expect("postgres");
+            let pool = pg_pool(pool)?;
             let schema_name = schema.unwrap_or("public");
             let rows = if let Some(table) = table {
                 sqlx::query(
@@ -1407,10 +1737,10 @@ pub async fn list_foreign_keys(
                 .fetch_all(pool)
                 .await?
             };
-            Ok(group_foreign_key_rows_pg(&rows))
+            Ok(group_fk_rows(extract_fk_rows_pg(&rows), schema_name))
         }
         EngineKind::Mysql => {
-            let pool = pool.mysql().expect("mysql");
+            let pool = mysql_pool(pool)?;
             let scope = resolve_mysql_schema(pool, schema, connection_url).await?;
             let schema_name =
                 match scope {
@@ -1453,10 +1783,10 @@ pub async fn list_foreign_keys(
                 .fetch_all(pool)
                 .await?
             };
-            Ok(group_foreign_key_rows_mysql(&rows))
+            Ok(group_fk_rows(extract_fk_rows_mysql(&rows), &schema_name))
         }
         EngineKind::Sqlite => {
-            let pool = pool.sqlite().expect("sqlite");
+            let pool = sqlite_pool(pool)?;
             let table_name = table.ok_or_else(|| {
                 sqlx::Error::Configuration("list_foreign_keys on SQLite requires table".into())
             })?;
@@ -1489,59 +1819,72 @@ pub async fn list_foreign_keys(
     }
 }
 
-fn group_foreign_key_rows_mysql(rows: &[MySqlRow]) -> Vec<ForeignKeyInfo> {
-    use std::collections::BTreeMap;
-    let mut map: BTreeMap<String, ForeignKeyInfo> = BTreeMap::new();
-    for row in rows {
-        let name: String = row.try_get(0).ok().unwrap_or_default();
-        let table: String = row.try_get(1).ok().unwrap_or_default();
-        let col: String = row.try_get(2).ok().unwrap_or_default();
-        let ref_table: String = row.try_get(3).ok().unwrap_or_default();
-        let ref_col: String = row.try_get(4).ok().unwrap_or_default();
-        let on_delete: String = row.try_get(5).ok().unwrap_or_default();
-        let on_update: String = row.try_get(6).ok().unwrap_or_default();
-        map.entry(name.clone())
-            .and_modify(|fk| {
-                fk.columns.push(col.clone());
-                fk.ref_columns.push(ref_col.clone());
-            })
-            .or_insert(ForeignKeyInfo {
-                name,
-                table,
-                columns: vec![col],
-                ref_table,
-                ref_columns: vec![ref_col],
-                on_delete: Some(on_delete),
-                on_update: Some(on_update),
-            });
-    }
-    map.into_values().collect()
+/// One raw foreign-key row as selected from information_schema (PG & MySQL
+/// share the column layout: constraint, table, column, ref_table, ref_column,
+/// delete_rule, update_rule).
+#[derive(Debug, Clone)]
+struct FkRowData {
+    name: String,
+    table: String,
+    column: String,
+    ref_table: String,
+    ref_column: String,
+    on_delete: String,
+    on_update: String,
 }
 
-fn group_foreign_key_rows_pg(rows: &[PgRow]) -> Vec<ForeignKeyInfo> {
+fn extract_fk_rows_pg(rows: &[PgRow]) -> Vec<FkRowData> {
+    rows.iter()
+        .map(|row| FkRowData {
+            name: row.try_get(0).ok().unwrap_or_default(),
+            table: row.try_get(1).ok().unwrap_or_default(),
+            column: row.try_get(2).ok().unwrap_or_default(),
+            ref_table: row.try_get(3).ok().unwrap_or_default(),
+            ref_column: row.try_get(4).ok().unwrap_or_default(),
+            on_delete: row.try_get(5).ok().unwrap_or_default(),
+            on_update: row.try_get(6).ok().unwrap_or_default(),
+        })
+        .collect()
+}
+
+fn extract_fk_rows_mysql(rows: &[MySqlRow]) -> Vec<FkRowData> {
+    rows.iter()
+        .map(|row| FkRowData {
+            name: row.try_get(0).ok().unwrap_or_default(),
+            table: row.try_get(1).ok().unwrap_or_default(),
+            column: row.try_get(2).ok().unwrap_or_default(),
+            ref_table: row.try_get(3).ok().unwrap_or_default(),
+            ref_column: row.try_get(4).ok().unwrap_or_default(),
+            on_delete: row.try_get(5).ok().unwrap_or_default(),
+            on_update: row.try_get(6).ok().unwrap_or_default(),
+        })
+        .collect()
+}
+
+/// Group FK rows into one `ForeignKeyInfo` per constraint.
+///
+/// SQL-BUG-02: the grouping key used to be the constraint name alone, so two
+/// same-named FKs on different tables (very common with generated names)
+/// merged into one factually wrong object with mixed columns. The key is
+/// now the composite (schema, table, constraint name).
+fn group_fk_rows(rows: Vec<FkRowData>, schema: &str) -> Vec<ForeignKeyInfo> {
     use std::collections::BTreeMap;
-    let mut map: BTreeMap<String, ForeignKeyInfo> = BTreeMap::new();
+    let mut map: BTreeMap<(String, String, String), ForeignKeyInfo> = BTreeMap::new();
     for row in rows {
-        let name: String = row.try_get(0).ok().unwrap_or_default();
-        let table: String = row.try_get(1).ok().unwrap_or_default();
-        let col: String = row.try_get(2).ok().unwrap_or_default();
-        let ref_table: String = row.try_get(3).ok().unwrap_or_default();
-        let ref_col: String = row.try_get(4).ok().unwrap_or_default();
-        let on_delete: String = row.try_get(5).ok().unwrap_or_default();
-        let on_update: String = row.try_get(6).ok().unwrap_or_default();
-        map.entry(name.clone())
+        let key = (schema.to_string(), row.table.clone(), row.name.clone());
+        map.entry(key)
             .and_modify(|fk| {
-                fk.columns.push(col.clone());
-                fk.ref_columns.push(ref_col.clone());
+                fk.columns.push(row.column.clone());
+                fk.ref_columns.push(row.ref_column.clone());
             })
             .or_insert(ForeignKeyInfo {
-                name,
-                table,
-                columns: vec![col],
-                ref_table,
-                ref_columns: vec![ref_col],
-                on_delete: Some(on_delete),
-                on_update: Some(on_update),
+                name: row.name,
+                table: row.table,
+                columns: vec![row.column],
+                ref_table: row.ref_table,
+                ref_columns: vec![row.ref_column],
+                on_delete: Some(row.on_delete),
+                on_update: Some(row.on_update),
             });
     }
     map.into_values().collect()
@@ -1689,6 +2032,112 @@ mod tests {
             pg_decode_reltuples(None, Some(42.0_f64)),
             Some(42.0),
             "float8 cast path"
+        );
+    }
+
+    fn obj(name: &str) -> SchemaObject {
+        SchemaObject {
+            object_type: ObjectType::Table,
+            schema: Some("public".into()),
+            name: name.into(),
+            table: None,
+            data_type: None,
+            nullable: None,
+            columns: None,
+            indexes: None,
+        }
+    }
+
+    #[test]
+    fn paginate_objects_offset_beyond_total_is_empty_not_panic() {
+        // SQL-BUG-01 regression: offset > total used to panic in drain().
+        let objects = vec![obj("a"), obj("b")];
+        let page = paginate_objects(objects, 10, 5);
+        assert!(page.is_empty());
+    }
+
+    #[test]
+    fn paginate_objects_normal_and_partial_pages() {
+        let objects = (0..5).map(|i| obj(&format!("t{i}"))).collect::<Vec<_>>();
+        let page = paginate_objects(objects, 1, 2);
+        assert_eq!(page.len(), 2);
+        assert_eq!(page[0].name, "t1");
+        let objects = (0..5).map(|i| obj(&format!("t{i}"))).collect::<Vec<_>>();
+        let page = paginate_objects(objects, 4, 10);
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].name, "t4");
+        let objects = vec![obj("x")];
+        assert!(paginate_objects(objects, 0, 0).is_empty());
+    }
+
+    #[test]
+    fn sqlite_quote_ident_doubles_embedded_quotes() {
+        assert_eq!(sqlite_quote_ident("main"), "\"main\"");
+        assert_eq!(sqlite_quote_ident("we\"ird"), "\"we\"\"ird\"");
+    }
+
+    fn fk_row(table: &str, name: &str, col: &str) -> FkRowData {
+        FkRowData {
+            name: name.into(),
+            table: table.into(),
+            column: col.into(),
+            ref_table: "parents".into(),
+            ref_column: "id".into(),
+            on_delete: "CASCADE".into(),
+            on_update: "NO ACTION".into(),
+        }
+    }
+
+    #[test]
+    fn group_fk_rows_same_name_different_tables_stay_separate() {
+        // SQL-BUG-02 regression.
+        let rows = vec![
+            fk_row("orders", "fk_parent", "parent_id"),
+            fk_row("invoices", "fk_parent", "parent_id"),
+            fk_row("orders", "fk_parent", "parent2_id"),
+        ];
+        let grouped = group_fk_rows(rows, "public");
+        assert_eq!(grouped.len(), 2, "same constraint name on 2 tables = 2 FKs");
+        let orders = grouped.iter().find(|f| f.table == "orders").unwrap();
+        assert_eq!(orders.columns.len(), 2, "composite FK columns merge");
+    }
+
+    #[test]
+    fn group_mysql_index_rows_same_name_different_tables_stay_separate() {
+        // SQL-BUG-03 regression.
+        let mk = |table: &str, col: &str| MysqlIndexRowData {
+            schema: "app".into(),
+            table: table.into(),
+            name: "PRIMARY".into(),
+            column: col.into(),
+            unique: true,
+        };
+        let grouped = group_mysql_index_rows(vec![mk("a", "id"), mk("b", "id"), mk("a", "tenant")]);
+        assert_eq!(grouped.len(), 2);
+        let a = grouped
+            .iter()
+            .find(|o| o.table.as_deref() == Some("a"))
+            .unwrap();
+        assert_eq!(a.indexes.as_ref().unwrap()[0].columns.len(), 2);
+    }
+
+    #[test]
+    fn schema_cache_roundtrip_and_expiry() {
+        use std::time::Duration;
+        let map: StdMutex<StdHashMap<String, (StdInstant, Vec<SchemaObject>)>> =
+            StdMutex::new(StdHashMap::new());
+        cache_store(&map, "k".into(), vec![obj("cached")]);
+        let hit = cache_lookup(&map, "k", Duration::from_secs(30)).expect("fresh hit");
+        assert_eq!(hit[0].name, "cached");
+        assert!(
+            cache_lookup(&map, "k", Duration::ZERO).is_none(),
+            "TTL 0 disables the cache"
+        );
+        // Expired entries are misses: age the entry past a tiny TTL.
+        std::thread::sleep(Duration::from_millis(3));
+        assert!(
+            cache_lookup(&map, "k", Duration::from_millis(1)).is_none(),
+            "entry older than TTL must miss"
         );
     }
 
