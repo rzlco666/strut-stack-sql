@@ -16,6 +16,7 @@ use strut_sql_driver_mysql::MySqlDriver;
 use strut_sql_driver_postgres::PostgresDriver;
 use strut_sql_driver_sqlite::SqliteDriver;
 use strut_stack_sql::config::{AppConfig, ResolvedSource, WriteMode};
+use strut_stack_sql::core::auth::{Grant, GrantSource, Policy, Tier};
 use strut_stack_sql::guard::validate_and_prepare;
 use strut_stack_sql::server::build_http_router;
 use strut_stack_sql::tools::core::{
@@ -27,6 +28,26 @@ use tower::ServiceExt;
 
 fn force_columnar_test_format() {
     std::env::set_var("MCP_SQL_FORMAT", "columnar");
+}
+
+/// Mirror of the config-side policy builder for hand-built test configs.
+fn test_policy(write_mode: WriteMode, full_tools: bool, tokens: &[HttpToken]) -> Policy {
+    let mut policy = Policy::new(Tier::from_write_mode(write_mode), full_tools, false);
+    for token in tokens {
+        let tier = Tier::from_write_mode(token.mode);
+        if token.sources.is_empty() {
+            policy.add_grant(Grant::new(token.name.clone(), GrantSource::Any, tier));
+        } else {
+            for source in &token.sources {
+                policy.add_grant(Grant::new(
+                    token.name.clone(),
+                    GrantSource::Name(source.clone()),
+                    tier,
+                ));
+            }
+        }
+    }
+    policy.with_local_default()
 }
 
 async fn sqlite_config(write_mode: WriteMode) -> AppConfig {
@@ -68,6 +89,9 @@ async fn sqlite_config(write_mode: WriteMode) -> AppConfig {
         http_tokens: vec![],
         http_rate_limit_per_minute: 600,
         allow_unauthenticated_http: false,
+        allow_grants: false,
+        oauth: None,
+        policy: test_policy(write_mode, true, &[]),
         ephemeral: false,
         hide_endpoints: None,
     }
@@ -739,6 +763,9 @@ async fn postgres_config() -> Option<AppConfig> {
         http_tokens: vec![],
         http_rate_limit_per_minute: 600,
         allow_unauthenticated_http: false,
+        allow_grants: false,
+        oauth: None,
+        policy: test_policy(WriteMode::ReadOnly, true, &[]),
         ephemeral: false,
         hide_endpoints: None,
     })
@@ -828,6 +855,9 @@ async fn mysql_config() -> Option<AppConfig> {
         http_tokens: vec![],
         http_rate_limit_per_minute: 600,
         allow_unauthenticated_http: false,
+        allow_grants: false,
+        oauth: None,
+        policy: test_policy(WriteMode::ReadOnly, true, &[]),
         ephemeral: false,
         hide_endpoints: None,
     })
@@ -898,7 +928,7 @@ async fn mysql_describe_table_has_columns() {
 
 // --- HTTP bearer-token auth (SQL-SEC-05 / SQL-GAP-01 / SQL-GAP-04) ---
 
-use strut_stack_sql::config::HttpToken;
+use strut_stack_sql::config::{hash_token, HttpToken};
 
 async fn sqlite_config_with_tokens(
     write_mode: WriteMode,
@@ -906,6 +936,7 @@ async fn sqlite_config_with_tokens(
 ) -> AppConfig {
     let mut config = sqlite_config(write_mode).await;
     config.http_tokens = http_tokens;
+    config.policy = test_policy(write_mode, true, &config.http_tokens);
     config
 }
 
@@ -946,6 +977,108 @@ async fn post_mcp(app: axum::Router, token: Option<&str>, body: String) -> (Stat
         .await
         .unwrap();
     (status, String::from_utf8_lossy(&bytes).to_string())
+}
+
+/// Full MCP handshake then one JSON-RPC request, returning the final status
+/// and body. Exercises the dispatch-level authorization gate.
+async fn mcp_roundtrip(
+    app: axum::Router,
+    token: Option<&str>,
+    payload: Value,
+) -> (StatusCode, String) {
+    let init_body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {},
+            "clientInfo": { "name": "b3-test", "version": "0" }
+        }
+    })
+    .to_string();
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .header("host", "localhost");
+    if let Some(t) = token {
+        builder = builder.header("authorization", format!("Bearer {t}"));
+    }
+    let response = app
+        .clone()
+        .oneshot(builder.body(Body::from(init_body)).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "initialize must succeed");
+    let session_id = response
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .expect("session id header")
+        .to_string();
+
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .header("host", "localhost")
+        .header("mcp-session-id", session_id.clone());
+    if let Some(t) = token {
+        builder = builder.header("authorization", format!("Bearer {t}"));
+    }
+    let _ = app
+        .clone()
+        .oneshot(
+            builder
+                .body(Body::from(
+                    json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .header("host", "localhost")
+        .header("mcp-session-id", session_id);
+    if let Some(t) = token {
+        builder = builder.header("authorization", format!("Bearer {t}"));
+    }
+    let response = app
+        .oneshot(builder.body(Body::from(payload.to_string())).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    (status, String::from_utf8_lossy(&bytes).to_string())
+}
+
+async fn mcp_call(
+    app: axum::Router,
+    token: Option<&str>,
+    tool: &str,
+    arguments: Value,
+) -> (StatusCode, String) {
+    mcp_roundtrip(
+        app,
+        token,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": { "name": tool, "arguments": arguments }
+        }),
+    )
+    .await
 }
 
 #[tokio::test]
@@ -1144,4 +1277,161 @@ async fn livez_is_ok_without_touching_pools() {
     // Liveness leaks nothing: no source names, no engine, no errors.
     assert!(text.contains("\"ok\""), "body: {text}");
     assert!(!text.contains("default"), "body: {text}");
+}
+
+// --- B3: Principal/Policy invocation enforcement, API-key hashing,
+// --- Admin gate (PRD-F1-08..F1-10)
+
+#[tokio::test]
+async fn hashed_api_key_authenticates() {
+    let token = HttpToken {
+        name: "ro".into(),
+        token: hash_token("s3cr3t"),
+        mode: WriteMode::ReadOnly,
+        sources: vec![],
+    };
+    let config = sqlite_config_with_tokens(WriteMode::AllowDdl, vec![token]).await;
+    let (app, _ct) = build_http_router(config);
+    let (status, body) = mcp_call(
+        app.clone(),
+        Some("s3cr3t"),
+        "execute_sql",
+        json!({ "sql": "SELECT 1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!body.contains("unauthorized"), "{body}");
+
+    let (status, _) = post_mcp(
+        app,
+        Some("wrong-secret"),
+        mcp_tools_call_body("execute_sql", json!({ "sql": "SELECT 1" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn hidden_ddl_tool_called_directly_is_denied() {
+    let mut config = sqlite_config(WriteMode::AllowDdl).await;
+    config.full_tools = false;
+    config.policy = test_policy(WriteMode::AllowDdl, false, &[]);
+    let (app, _ct) = build_http_router(config);
+    let (status, body) = mcp_call(
+        app,
+        None,
+        "create_table",
+        json!({ "ddl": "CREATE TABLE hidden_t (id INTEGER)" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("authorization denied"), "{body}");
+    assert!(!body.contains("\"result\""), "{body}");
+}
+
+#[tokio::test]
+async fn hidden_introspection_tool_called_directly_is_denied() {
+    // v1 leak: introspection handlers ran even when --full-tools hid them.
+    let mut config = sqlite_config(WriteMode::ReadOnly).await;
+    config.full_tools = false;
+    config.policy = test_policy(WriteMode::ReadOnly, false, &[]);
+    let (app, _ct) = build_http_router(config);
+    let (status, body) = mcp_call(app, None, "describe_table", json!({ "table": "users" })).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("authorization denied"), "{body}");
+}
+
+#[tokio::test]
+async fn list_tools_hides_tools_the_principal_cannot_call() {
+    let mut config = sqlite_config(WriteMode::ReadOnly).await;
+    config.full_tools = true;
+    config.policy = test_policy(WriteMode::ReadOnly, true, &[]);
+    let (app, _ct) = build_http_router(config);
+    let (status, body) = mcp_roundtrip(
+        app,
+        None,
+        json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {} }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("execute_sql"), "{body}");
+    // Process ceiling ReadOnly => DDL tools are not listed...
+    assert!(!body.contains("create_table"), "{body}");
+    // ...and listing agrees with invocation.
+}
+
+#[tokio::test]
+async fn two_principals_get_different_invocation_results() {
+    let config = sqlite_config_with_tokens(
+        WriteMode::AllowDdl,
+        vec![
+            test_token("ro", "ro-secret", WriteMode::ReadOnly),
+            test_token("rw", "rw-secret", WriteMode::AllowWrites),
+        ],
+    )
+    .await;
+    let (app, _ct) = build_http_router(config);
+
+    let insert = json!({ "sql": "INSERT INTO users VALUES (1)" });
+    let (ro_status, ro_body) = mcp_call(
+        app.clone(),
+        Some("ro-secret"),
+        "execute_sql",
+        insert.clone(),
+    )
+    .await;
+    assert_eq!(ro_status, StatusCode::FORBIDDEN, "{ro_body}");
+
+    let (rw_status, rw_body) = mcp_call(app, Some("rw-secret"), "execute_sql", insert).await;
+    assert_ne!(rw_status, StatusCode::FORBIDDEN, "{rw_body}");
+}
+
+fn admin_policy(gate_open: bool) -> Policy {
+    let mut policy = Policy::new(Tier::Ddl, true, gate_open);
+    policy.add_grant(Grant::new("root", GrantSource::Any, Tier::Admin));
+    policy.with_local_default()
+}
+
+#[tokio::test]
+async fn admin_gate_denies_grant_by_default() {
+    let mut config = sqlite_config_with_tokens(
+        WriteMode::AllowDdl,
+        vec![test_token("root", "root-secret", WriteMode::AllowDdl)],
+    )
+    .await;
+    config.allow_grants = false;
+    config.policy = admin_policy(false);
+    let (app, _ct) = build_http_router(config);
+    let (status, body) = mcp_call(
+        app,
+        Some("root-secret"),
+        "execute_sql",
+        json!({ "sql": "GRANT SELECT ON users TO bob" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(body.contains("--allow-grants"), "{body}");
+}
+
+#[tokio::test]
+async fn admin_gate_allows_grant_with_flag_and_admin_grant() {
+    let mut config = sqlite_config_with_tokens(
+        WriteMode::AllowDdl,
+        vec![test_token("root", "root-secret", WriteMode::AllowDdl)],
+    )
+    .await;
+    config.allow_grants = true;
+    config.policy = admin_policy(true);
+    let (app, _ct) = build_http_router(config);
+    let (status, body) = mcp_call(
+        app,
+        Some("root-secret"),
+        "execute_sql",
+        json!({ "sql": "GRANT SELECT ON users TO bob" }),
+    )
+    .await;
+    // Authorization passes; SQLite still rejects GRANT at execution, which
+    // proves the gate is open without needing a real GRANT.
+    assert_ne!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(!body.contains("--allow-grants"), "{body}");
 }

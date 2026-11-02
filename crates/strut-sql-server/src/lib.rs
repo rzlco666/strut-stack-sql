@@ -12,8 +12,12 @@ use axum::{
     routing::get,
     Router,
 };
+use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, ListToolsResult, ServerCapabilities, ServerInfo, Tool};
+use rmcp::model::{
+    CallToolResult, JsonObject, ListToolsResult, ServerCapabilities, ServerInfo, Tool,
+};
+use rmcp::service::RequestContext;
 use rmcp::transport::stdio;
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
@@ -23,10 +27,12 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
-use strut_sql_core::config::{AppConfig, HttpToken, WriteMode};
+use strut_sql_core::auth::{
+    sql_required_tier, tool_tier, AuthMethod, Decision, Denial, Principal, Tier, DDL_TOOLS,
+};
+use strut_sql_core::config::{AppConfig, WriteMode};
 use strut_sql_core::redact::redact_url;
 use strut_sql_driver_api::EngineKind;
-use strut_sql_guard::validate_and_prepare;
 use strut_sql_tools::audit::{audit_call, sql_fingerprint};
 use strut_sql_tools::core::{
     handle_analyze_query, handle_execute_sql, handle_search_objects, AnalyzeQueryParams,
@@ -44,34 +50,21 @@ use strut_sql_tools::full::{
     ListForeignKeysParams, ListIndexesParams, ListTablesParams, SchemaOverviewParams, SourceParams,
 };
 
+pub mod oauth;
+
+pub use oauth::{OAuthValidator, ProtectedResourceMetadata};
+
 /// Default tracing filter. The `sqlx` target directive only sets that log
 /// target's level (no sqlx dependency outside the driver crates); audit
 /// events are info-level so the default filter shows them.
 pub const DEFAULT_LOG_FILTER: &str = "info,sqlx=warn,audit=info";
 
-const CORE_TOOLS: &[&str] = &["search_objects", "execute_sql", "analyze_query_performance"];
-
-/// Introspection tools exposed with `--full-tools` (always, including read-only).
-const FULL_INTROSPECT_TOOLS: &[&str] = &[
-    "list_sources",
-    "list_schemas",
-    "list_tables",
-    "describe_table",
-    "list_indexes",
-    "list_foreign_keys",
-    "schema_overview",
-];
-
-/// DDL tools — only listed when `--full-tools` and `--allow-ddl`.
-const DDL_TOOLS: &[&str] = &[
-    "schema_mutate",
-    "create_table",
-    "drop_table",
-    "add_column",
-    "alter_column",
-    "drop_column",
-    "truncate_table",
-];
+/// Principal attached to an HTTP request by the auth middleware. The MCP
+/// service copies HTTP request extensions into the per-call
+/// [`RequestContext`], so the tool dispatch reads the same identity the
+/// middleware authenticated.
+#[derive(Clone, Debug)]
+pub struct CallerPrincipal(pub Principal);
 
 #[derive(Clone)]
 pub struct McpSqlServer {
@@ -100,6 +93,72 @@ impl McpSqlServer {
             ))
         }
     }
+}
+
+/// Identity for this call: the middleware-authenticated principal when the
+/// transport supplied one, otherwise the synthesized local stdio operator.
+/// Both paths go through the same [`Policy::authorize`] check.
+fn principal_from_context(config: &AppConfig, ctx: &RequestContext<rmcp::RoleServer>) -> Principal {
+    ctx.extensions
+        .get::<CallerPrincipal>()
+        .map(|caller| caller.0.clone())
+        .unwrap_or_else(|| config.policy.local_principal())
+}
+
+fn request_source(config: &AppConfig, arguments: &JsonObject) -> String {
+    arguments
+        .get("source")
+        .and_then(Value::as_str)
+        .unwrap_or(&config.default_source)
+        .to_string()
+}
+
+/// SQL statements carried by an `execute_sql` / `analyze_query_performance`
+/// arguments object (single `sql` or a `queries[]` batch).
+fn request_statements(arguments: &JsonObject) -> Vec<String> {
+    let mut statements = Vec::new();
+    if let Some(sql) = arguments.get("sql").and_then(Value::as_str) {
+        statements.push(sql.to_string());
+    }
+    if let Some(queries) = arguments.get("queries").and_then(Value::as_array) {
+        for item in queries {
+            match item {
+                Value::String(sql) => statements.push(sql.clone()),
+                Value::Object(obj) => {
+                    if let Some(sql) = obj.get("sql").and_then(Value::as_str) {
+                        statements.push(sql.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    statements
+}
+
+/// Tier required by this invocation: the tool's static tier raised to the
+/// heaviest classified SQL statement it carries.
+fn required_tier_for_call(
+    config: &AppConfig,
+    tool: &str,
+    arguments: &JsonObject,
+    source: &str,
+) -> Tier {
+    let mut required = tool_tier(tool, config.full_tools).unwrap_or(Tier::Read);
+    if matches!(tool, "execute_sql" | "analyze_query_performance") {
+        if let Ok(source_config) = config.source(Some(source)) {
+            for sql in request_statements(arguments) {
+                if let Some(tier) = sql_required_tier(&sql, source_config.engine) {
+                    required = required.max(tier);
+                }
+            }
+        }
+    }
+    required
+}
+
+fn authorization_error(denial: &Denial) -> McpError {
+    McpError::invalid_params(format!("authorization denied: {denial}"), None)
 }
 
 #[tool_router]
@@ -410,23 +469,89 @@ impl ServerHandler for McpSqlServer {
             .with_instructions(instructions)
     }
 
+    /// Single invocation-time authorization gate (PRD-F1-10). Runs before
+    /// every tool handler, including tools hidden from `list_tools`; the
+    /// same [`Policy::authorize`] call backs the listing below.
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: RequestContext<rmcp::RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let principal = principal_from_context(&self.config, &context);
+        let tool = request.name.to_string();
+        let arguments = request.arguments.clone().unwrap_or_default();
+        let source = request_source(&self.config, &arguments);
+        let required = required_tier_for_call(&self.config, &tool, &arguments, &source);
+
+        match self
+            .config
+            .policy
+            .authorize(&principal, &tool, &source, required)
+        {
+            Decision::Allow(authz) => {
+                if authz.tier == Tier::Admin {
+                    tracing::info!(
+                        target: "audit",
+                        event = "authorization",
+                        decision = "allow",
+                        principal_id = %principal.id,
+                        auth_method = principal.auth_method.as_str(),
+                        tool = %tool,
+                        source_name = %source,
+                        sql_class = "admin",
+                        tier = "admin",
+                        "admin_gate"
+                    );
+                }
+                // The handlers read their limits from AppConfig; hand them a
+                // scoped view carrying the grant's ceiling and effective mode.
+                let scoped = McpSqlServer {
+                    config: Arc::new(self.config.scoped_for(&authz)),
+                    tool_router: self.tool_router.clone(),
+                };
+                let call = ToolCallContext::new(&scoped, request, context);
+                self.tool_router.call(call).await
+            }
+            Decision::Deny(denial) => {
+                tracing::warn!(
+                    target: "audit",
+                    event = "authorization",
+                    decision = "deny",
+                    principal_id = %principal.id,
+                    auth_method = principal.auth_method.as_str(),
+                    tool = %tool,
+                    source_name = %source,
+                    required_tier = required.as_str(),
+                    admin_class = (required == Tier::Admin),
+                    reason = %denial,
+                    "tool_call_denied"
+                );
+                Err(authorization_error(&denial))
+            }
+        }
+    }
+
     async fn list_tools(
         &self,
         _request: Option<rmcp::model::PaginatedRequestParams>,
-        _ctx: rmcp::service::RequestContext<rmcp::RoleServer>,
+        ctx: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
+        let principal = principal_from_context(&self.config, &ctx);
         let all = self.tool_router.list_all();
-        let mut allowed: Vec<&str> = CORE_TOOLS.to_vec();
-        if self.config.full_tools {
-            allowed.extend(FULL_INTROSPECT_TOOLS.iter().copied());
-            if self.config.write_mode.allows_ddl() {
-                allowed.extend(DDL_TOOLS.iter().copied());
-            }
-        }
 
+        // Same authorize() as invocation: a tool is listed only when at
+        // least one configured source would allow it for this principal.
         let tools: Vec<Tool> = all
             .into_iter()
-            .filter(|t| allowed.iter().any(|name| *name == t.name))
+            .filter(|tool| match tool_tier(&tool.name, self.config.full_tools) {
+                Some(tier) => self.config.sources.keys().any(|source| {
+                    self.config
+                        .policy
+                        .authorize(&principal, &tool.name, source, tier)
+                        .is_allowed()
+                }),
+                None => false,
+            })
             .collect();
 
         Ok(ListToolsResult {
@@ -449,6 +574,9 @@ pub async fn run_stdio(config: AppConfig) -> Result<()> {
 #[derive(Clone)]
 pub struct HttpState {
     config: Arc<AppConfig>,
+    /// Present when OAuth is configured; served at
+    /// `/.well-known/oauth-protected-resource`.
+    protected_resource: Option<Arc<ProtectedResourceMetadata>>,
 }
 
 #[derive(Serialize)]
@@ -548,20 +676,19 @@ async fn readyz(State(state): State<HttpState>) -> impl IntoResponse {
 }
 
 // ---------------------------------------------------------------------------
-// HTTP auth + per-token authorization + rate limiting
-// (SQL-SEC-05, SQL-GAP-01 pragmatic form, SQL-GAP-04 light form)
+// HTTP auth (API keys + OAuth 2.1 bearer JWTs) + Policy enforcement
+// (SQL-SEC-05, F1-07..F1-10)
 //
-// When tokens are configured, every /mcp request needs
-// `Authorization: Bearer <token>`. For JSON-RPC `tools/call` POSTs the
-// middleware additionally enforces, BEFORE the request reaches the MCP
-// service:
-//   * the requested source must be inside the token's allowlist;
-//   * DDL tools require the token's effective mode (token mode capped by
-//     the process mode) to allow DDL;
-//   * execute_sql / analyze_query_performance SQL is run through the SQL
-//     guard with the token's effective mode, so a read-only token cannot
-//     smuggle an INSERT past a writes-enabled process.
-// Non-loopback binds without any token are refused in `run_http` unless
+// Every /mcp request must present a Bearer credential when auth is
+// configured. The credential resolves to a Principal:
+//   * a configured API key (`STRUT_STACK_SQL_HTTP_TOKENS` / `--http-token`,
+//     raw or `sha256:<hex>`), or
+//   * an RS256 JWT validated against the configured issuer/JWKS (OAuth).
+// The middleware inserts the principal into the request extensions, where
+// the MCP dispatch reads it for its own `authorize()` call. Middleware
+// additionally rejects JSON-RPC `tools/call` requests early with HTTP 403
+// using the SAME `authorize()` function the dispatch uses.
+// Non-loopback binds without auth are refused in `run_http` unless
 // --allow-unauthenticated-http was given.
 // ---------------------------------------------------------------------------
 
@@ -570,19 +697,20 @@ const MAX_MCP_BODY_BYTES: usize = 4 * 1024 * 1024;
 #[derive(Clone)]
 pub struct HttpAuthState {
     config: Arc<AppConfig>,
-    /// Per-token-name fixed-window counters: name -> (window start, count).
+    oauth: Option<Arc<OAuthValidator>>,
+    /// Per-principal fixed-window counters: id -> (window start, count).
     rate: Arc<Mutex<HashMap<String, (Instant, u64)>>>,
 }
 
 impl HttpAuthState {
-    fn rate_limited(&self, token_name: &str) -> bool {
+    fn rate_limited(&self, principal_id: &str) -> bool {
         let limit = self.config.http_rate_limit_per_minute;
         if limit == 0 {
             return false;
         }
         let now = Instant::now();
         let mut map = self.rate.lock().unwrap_or_else(|p| p.into_inner());
-        let entry = map.entry(token_name.to_string()).or_insert((now, 0));
+        let entry = map.entry(principal_id.to_string()).or_insert((now, 0));
         if now.duration_since(entry.0) >= Duration::from_secs(60) {
             *entry = (now, 0);
         }
@@ -591,16 +719,18 @@ impl HttpAuthState {
     }
 }
 
-fn unauthorized_response() -> Response {
+fn unauthorized_response(oauth: Option<&OAuthValidator>, invalid_token: bool) -> Response {
     let mut resp = (
         StatusCode::UNAUTHORIZED,
         Json(json!({ "error": "unauthorized: missing or invalid bearer token" })),
     )
         .into_response();
-    resp.headers_mut().insert(
-        header::WWW_AUTHENTICATE,
-        header::HeaderValue::from_static("Bearer"),
-    );
+    let challenge = oauth
+        .map(|validator| validator.www_authenticate(invalid_token))
+        .unwrap_or_else(|| "Bearer".to_string());
+    if let Ok(value) = header::HeaderValue::from_str(&challenge) {
+        resp.headers_mut().insert(header::WWW_AUTHENTICATE, value);
+    }
     resp
 }
 
@@ -616,122 +746,143 @@ fn jsonrpc_denied(id: &Value, message: &str) -> Response {
         .into_response()
 }
 
-fn authenticate(config: &AppConfig, req: &Request<Body>) -> Option<HttpToken> {
+/// Resolve the bearer credential to a principal. API keys are checked
+/// first (constant-time), then the OAuth validator when configured.
+fn authenticate(
+    config: &AppConfig,
+    oauth: Option<&OAuthValidator>,
+    req: &Request<Body>,
+) -> Option<Principal> {
     let value = req.headers().get(header::AUTHORIZATION)?.to_str().ok()?;
     let (scheme, presented) = value.split_once(' ')?;
     if !scheme.eq_ignore_ascii_case("bearer") {
         return None;
     }
     let presented = presented.trim();
-    config
-        .http_tokens
-        .iter()
-        .find(|t| t.token == presented)
-        .cloned()
+    if presented.is_empty() {
+        return None;
+    }
+
+    if let Some(token) = config.http_tokens.iter().find(|t| t.verify(presented)) {
+        return Some(
+            config
+                .policy
+                .resolve_principal(&token.name, AuthMethod::ApiKey),
+        );
+    }
+
+    let validator = oauth?;
+    match validator.validate(presented) {
+        Ok(mut principal) => {
+            principal.display_name = config
+                .policy
+                .resolve_principal(&principal.id, AuthMethod::OAuth)
+                .display_name;
+            Some(principal)
+        }
+        Err(err) => {
+            // Never log the token itself.
+            tracing::warn!(error = %err, "OAuth bearer token rejected");
+            None
+        }
+    }
+}
+
+/// Message for an early HTTP denial. Text keeps the v1 contract for legacy
+/// token callers (source allowlist / DDL tool wording) while covering the
+/// new tier and Admin-gate denials.
+fn denial_message(principal: &Principal, tool: &str, source: &str, denial: &Denial) -> String {
+    match denial {
+        Denial::NoGrant { .. } => format!(
+            "token '{}' is not allowed to use source '{source}'",
+            principal.id
+        ),
+        Denial::ToolNotExposed { .. } => {
+            format!("token '{}' may not call tool '{tool}' (not exposed)", principal.id)
+        }
+        Denial::TierTooLow { effective, required, .. } => {
+            if DDL_TOOLS.contains(&tool) {
+                format!(
+                    "token '{}' (mode {:?}) may not call DDL tool '{tool}'",
+                    principal.id,
+                    effective.write_mode()
+                )
+            } else {
+                format!(
+                    "token '{}' (mode {:?}) may not run this SQL: tier '{}' is below required '{}' on source '{source}'",
+                    principal.id,
+                    effective.write_mode(),
+                    effective.as_str(),
+                    required.as_str()
+                )
+            }
+        }
+        Denial::AdminGateDisabled => format!(
+            "token '{}' may not run this SQL: GRANT/REVOKE require an Admin grant and --allow-grants",
+            principal.id
+        ),
+    }
 }
 
 /// Returns `Some(denial message)` when this single JSON-RPC request must
-/// not proceed under the token's grant.
-fn check_jsonrpc_request(config: &AppConfig, token: &HttpToken, value: &Value) -> Option<String> {
+/// not proceed under the principal's policy.
+fn check_jsonrpc_request(
+    config: &AppConfig,
+    principal: &Principal,
+    value: &Value,
+) -> Option<String> {
     if value.get("method").and_then(Value::as_str) != Some("tools/call") {
         return None;
     }
     let params = value.get("params")?;
     let tool = params.get("name").and_then(Value::as_str)?;
-    let empty = Value::Object(serde_json::Map::new());
-    let args = params.get("arguments").unwrap_or(&empty);
-    let source_name = args
-        .get("source")
-        .and_then(Value::as_str)
-        .unwrap_or(&config.default_source)
-        .to_string();
+    let empty = JsonObject::new();
+    let args = params
+        .get("arguments")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    let source = request_source(config, args);
+    let required = required_tier_for_call(config, tool, args, &source);
 
-    if !token.allows_source(&source_name) {
-        return Some(format!(
-            "token '{}' is not allowed to use source '{source_name}'",
-            token.name
-        ));
+    match config.policy.authorize(principal, tool, &source, required) {
+        Decision::Allow(_) => None,
+        Decision::Deny(denial) => Some(denial_message(principal, tool, &source, &denial)),
     }
-
-    let effective = token.effective_mode(config.write_mode);
-
-    if DDL_TOOLS.contains(&tool) {
-        if !effective.allows_ddl() {
-            return Some(format!(
-                "token '{}' (mode {:?}) may not call DDL tool '{tool}'",
-                token.name, effective
-            ));
-        }
-        return None;
-    }
-
-    if tool == "execute_sql" || tool == "analyze_query_performance" {
-        let Ok(source) = config.source(Some(&source_name)) else {
-            return None; // unknown source: the handler produces the error
-        };
-        let mut statements: Vec<(String, Vec<Value>)> = Vec::new();
-        if let Some(sql) = args.get("sql").and_then(Value::as_str) {
-            let p = args
-                .get("params")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            statements.push((sql.to_string(), p));
-        }
-        if let Some(queries) = args.get("queries").and_then(Value::as_array) {
-            for item in queries {
-                match item {
-                    Value::String(sql) => statements.push((sql.clone(), Vec::new())),
-                    Value::Object(obj) => {
-                        if let Some(sql) = obj.get("sql").and_then(Value::as_str) {
-                            let p = obj
-                                .get("params")
-                                .and_then(Value::as_array)
-                                .cloned()
-                                .unwrap_or_default();
-                            statements.push((sql.to_string(), p));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        for (sql, p) in &statements {
-            if let Err(e) = validate_and_prepare(sql, p, source.engine, effective, config.max_rows)
-            {
-                return Some(format!(
-                    "token '{}' (mode {:?}) may not run this SQL: {e}",
-                    token.name, effective
-                ));
-            }
-        }
-    }
-
-    None
 }
 
 async fn http_auth_middleware(
     State(auth): State<HttpAuthState>,
-    req: Request<Body>,
+    mut req: Request<Body>,
     next: Next,
 ) -> Response {
-    // No tokens configured: local/loopback mode (run_http refuses
-    // unauthenticated non-loopback binds before we ever get here).
-    if !auth.config.http_auth_enabled() {
+    // No credentials configured: local/loopback mode (run_http refuses
+    // unauthenticated non-loopback binds before we ever get here). The
+    // dispatch still authorizes the synthesized local principal.
+    //
+    // `config.oauth.is_some()` keeps the gate closed even when startup
+    // discovery failed (validator None): OAuth stays fail-closed and API
+    // keys, if any, still work.
+    if !auth.config.http_auth_enabled() && auth.oauth.is_none() {
+        req.extensions_mut()
+            .insert(CallerPrincipal(auth.config.policy.local_principal()));
         return next.run(req).await;
     }
 
-    let Some(token) = authenticate(&auth.config, &req) else {
-        return unauthorized_response();
+    let presented = req.headers().contains_key(header::AUTHORIZATION);
+    let Some(principal) = authenticate(&auth.config, auth.oauth.as_deref(), &req) else {
+        return unauthorized_response(auth.oauth.as_deref(), presented);
     };
 
-    if auth.rate_limited(&token.name) {
+    if auth.rate_limited(&principal.id) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
-            Json(json!({ "error": "rate limit exceeded for this token" })),
+            Json(json!({ "error": "rate limit exceeded for this principal" })),
         )
             .into_response();
     }
+
+    req.extensions_mut()
+        .insert(CallerPrincipal(principal.clone()));
 
     // Session GET (SSE stream) / DELETE carry no JSON-RPC body to inspect.
     if req.method() != Method::POST {
@@ -756,11 +907,14 @@ async fn http_auth_middleware(
             single => vec![single],
         };
         for item in items {
-            if let Some(message) = check_jsonrpc_request(&auth.config, &token, item) {
+            if let Some(message) = check_jsonrpc_request(&auth.config, &principal, item) {
                 tracing::warn!(
                     target: "audit",
-                    token = %token.name,
-                    "http tools/call denied by token policy"
+                    event = "authorization",
+                    decision = "deny",
+                    principal_id = %principal.id,
+                    auth_method = principal.auth_method.as_str(),
+                    "http tools/call denied by policy"
                 );
                 let id = item.get("id").cloned().unwrap_or(Value::Null);
                 return jsonrpc_denied(&id, &message);
@@ -775,14 +929,36 @@ async fn http_auth_middleware(
     next.run(req).await
 }
 
+/// RFC 9728 discovery document. 404 when OAuth is not configured.
+async fn protected_resource(State(state): State<HttpState>) -> Response {
+    match &state.protected_resource {
+        Some(metadata) => Json(metadata.as_ref()).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// Build the HTTP router without OAuth (API keys only).
 pub fn build_http_router(config: AppConfig) -> (Router, CancellationToken) {
+    build_http_router_with_auth(config, None)
+}
+
+/// Build the HTTP router with an optional OAuth resource-server validator.
+pub fn build_http_router_with_auth(
+    config: AppConfig,
+    oauth: Option<Arc<OAuthValidator>>,
+) -> (Router, CancellationToken) {
     let ct = CancellationToken::new();
     let factory_config = config.clone();
+    let protected_metadata = oauth
+        .as_ref()
+        .map(|validator| Arc::new(validator.protected_resource_metadata()));
     let http_state = HttpState {
         config: Arc::new(config.clone()),
+        protected_resource: protected_metadata,
     };
     let auth_state = HttpAuthState {
         config: Arc::new(config),
+        oauth,
         rate: Arc::new(Mutex::new(HashMap::new())),
     };
 
@@ -804,6 +980,14 @@ pub fn build_http_router(config: AppConfig) -> (Router, CancellationToken) {
         .route("/livez", get(livez))
         .route("/readyz", get(readyz))
         .route("/healthz", get(readyz))
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(protected_resource),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource/{*path}",
+            get(protected_resource),
+        )
         .with_state(http_state)
         .merge(mcp_router);
 
@@ -865,7 +1049,24 @@ pub async fn run_http(config: AppConfig, addr: &str) -> Result<()> {
         }
     }
 
-    let (router, ct) = build_http_router(config);
+    let oauth = match config.oauth.as_ref() {
+        Some(settings) => match OAuthValidator::discover(settings).await {
+            Ok(validator) => Some(Arc::new(validator)),
+            Err(err) => {
+                // Fail closed: OAuth bearer tokens are rejected, API keys
+                // keep working. Never fall back to accepting unverified JWT.
+                tracing::error!(
+                    error = %err,
+                    "OAuth discovery/JWKS fetch failed; OAuth bearer tokens will be REJECTED \
+                     (fail closed). API keys still work."
+                );
+                None
+            }
+        },
+        None => None,
+    };
+
+    let (router, ct) = build_http_router_with_auth(config, oauth);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(
         "strut-stack-sql HTTP listening on http://{addr}/mcp (liveness: /livez, readiness: /readyz)"

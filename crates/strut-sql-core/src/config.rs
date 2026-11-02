@@ -5,12 +5,15 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 
 use std::sync::Arc;
 
 use strut_sql_driver_api::{EngineDriver, EngineKind};
 pub use strut_sql_guard::WriteMode;
 
+use crate::auth::{Authorization, Grant, GrantSource, Policy, Tier};
 use crate::registry::{
     detect_engine_from_url, parse_host_port, LazyDriver, DEFAULT_CONNECT_TIMEOUT_SECS,
 };
@@ -25,7 +28,13 @@ pub const DEFAULT_BATCH_CONCURRENCY: usize = 8;
 /// SQL-GAP-01, pragmatic v1.1 form): a name, the secret, the max
 /// [`WriteMode`] it may exercise, and an optional source allowlist
 /// (empty = all sources).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `token` may be a raw secret or a SHA-256 digest written as
+/// `sha256:<64 lowercase hex chars>`. Hashed entries are compared in
+/// constant time; raw entries are hashed on both sides so the comparison is
+/// fixed-length. Secrets starting with the literal prefix `sha256:` are
+/// therefore always interpreted as digests.
+#[derive(Clone, PartialEq, Eq)]
 pub struct HttpToken {
     pub name: String,
     pub token: String,
@@ -42,12 +51,96 @@ impl HttpToken {
     pub fn effective_mode(&self, process_mode: WriteMode) -> WriteMode {
         self.mode.capped(process_mode)
     }
+
+    /// True when the stored credential is a `sha256:<hex>` digest.
+    pub fn is_hashed(&self) -> bool {
+        self.token.starts_with(SHA256_PREFIX)
+    }
+
+    /// Constant-time verification of a presented bearer token.
+    pub fn verify(&self, presented: &str) -> bool {
+        verify_token_secret(&self.token, presented)
+    }
+}
+
+/// Never print token material — only whether it is hashed.
+impl std::fmt::Debug for HttpToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpToken")
+            .field("name", &self.name)
+            .field(
+                "token",
+                &if self.is_hashed() {
+                    "<sha256-digest>"
+                } else {
+                    "<redacted>"
+                },
+            )
+            .field("mode", &self.mode)
+            .field("sources", &self.sources)
+            .finish()
+    }
+}
+
+const SHA256_PREFIX: &str = "sha256:";
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+/// Encode a raw API key for storage in configuration:
+/// `sha256:<64 hex chars>`.
+pub fn hash_token(secret: &str) -> String {
+    format!("{SHA256_PREFIX}{}", sha256_hex(secret.as_bytes()))
+}
+
+fn decode_sha256_hex(raw: &str) -> Option<[u8; 32]> {
+    if raw.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, chunk) in raw.as_bytes().chunks_exact(2).enumerate() {
+        let hi = (chunk[0] as char).to_digit(16)?;
+        let lo = (chunk[1] as char).to_digit(16)?;
+        out[i] = ((hi << 4) | lo) as u8;
+    }
+    Some(out)
+}
+
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && bool::from(a.ct_eq(b))
+}
+
+/// Constant-time credential comparison supporting raw and hashed storage.
+pub fn verify_token_secret(stored: &str, presented: &str) -> bool {
+    if let Some(hex) = stored.strip_prefix(SHA256_PREFIX) {
+        let Some(expected) = decode_sha256_hex(hex) else {
+            // A malformed digest must never match anything.
+            return false;
+        };
+        let actual = Sha256::digest(presented.as_bytes());
+        ct_eq(actual.as_slice(), &expected)
+    } else {
+        // Hash both sides: fixed-length, constant-time even for raw secrets.
+        let stored_digest = Sha256::digest(stored.as_bytes());
+        let presented_digest = Sha256::digest(presented.as_bytes());
+        ct_eq(stored_digest.as_slice(), presented_digest.as_slice())
+    }
 }
 
 /// Parse the `STRUT_STACK_SQL_HTTP_TOKENS` format: comma-separated entries
 /// of `name:token:mode[:source1|source2|...]`, e.g.
 /// `alice:s3cr3t:writes:main|reporting,bob:tok123:readonly`.
-/// Token secrets must not contain `:` or `,`.
+///
+/// A token may be given as a `sha256:<hex>` digest (F1-08), e.g.
+/// `alice:sha256:<64 hex>:writes:main|reporting`. Token secrets must not
+/// contain `:` or `,` other than in the `sha256:` digest prefix.
 pub fn parse_http_tokens(spec: &str) -> Result<Vec<HttpToken>> {
     let mut out: Vec<HttpToken> = Vec::new();
     for entry in spec.split(',') {
@@ -56,29 +149,18 @@ pub fn parse_http_tokens(spec: &str) -> Result<Vec<HttpToken>> {
             continue;
         }
         let parts: Vec<&str> = entry.split(':').collect();
-        if parts.len() < 3 || parts.len() > 4 {
-            bail!("invalid HTTP token entry '{entry}': expected name:token:mode[:source1|source2]");
-        }
-        let name = parts[0].trim().to_string();
-        let token = parts[1].trim().to_string();
+        let (name, token, mode, sources) = parse_token_parts(&parts)
+            .with_context(|| format!("invalid HTTP token entry '{entry}'"))?;
+        let name = name.trim().to_string();
+        let token = token.trim().to_string();
         if name.is_empty() || token.is_empty() {
             bail!("invalid HTTP token entry '{entry}': name and token must be non-empty");
         }
         if out.iter().any(|t: &HttpToken| t.name == name) {
             bail!("duplicate HTTP token name '{name}'");
         }
-        let mode = WriteMode::parse_mode(parts[2])
-            .with_context(|| format!("in HTTP token entry '{name}'"))?;
-        let sources = if parts.len() == 4 {
-            parts[3]
-                .split('|')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let mode =
+            WriteMode::parse_mode(mode).with_context(|| format!("in HTTP token entry '{name}'"))?;
         out.push(HttpToken {
             name,
             token,
@@ -87,6 +169,51 @@ pub fn parse_http_tokens(spec: &str) -> Result<Vec<HttpToken>> {
         });
     }
     Ok(out)
+}
+
+type ParsedTokenEntry<'a> = (&'a str, String, &'a str, Vec<String>);
+
+fn parse_token_parts<'a>(parts: &[&'a str]) -> Result<ParsedTokenEntry<'a>> {
+    let sources = |raw: Option<&str>| -> Vec<String> {
+        raw.map(|raw| {
+            raw.split('|')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+    };
+
+    // `name:sha256:<hex>:mode[:sources]` — the digest prefix adds one
+    // colon to the legacy shape.
+    if parts.len() >= 4 && parts[1].trim() == "sha256" {
+        let hex = parts[2].trim();
+        if decode_sha256_hex(hex).is_none() {
+            bail!("invalid sha256 digest '{hex}' (expected 64 hex characters)");
+        }
+        return match parts.len() {
+            4 => Ok((parts[0], format!("sha256:{hex}"), parts[3], Vec::new())),
+            5 => Ok((
+                parts[0],
+                format!("sha256:{hex}"),
+                parts[3],
+                sources(Some(parts[4])),
+            )),
+            _ => bail!("expected name:sha256:<hex>:mode[:source1|source2]"),
+        };
+    }
+
+    match parts.len() {
+        3 => Ok((parts[0], parts[1].to_string(), parts[2], Vec::new())),
+        4 => Ok((
+            parts[0],
+            parts[1].to_string(),
+            parts[2],
+            sources(Some(parts[3])),
+        )),
+        _ => bail!("expected name:token:mode[:source1|source2]"),
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -142,6 +269,12 @@ pub struct Cli {
     /// required to start in that combination, loudly warned).
     #[arg(long)]
     pub allow_unauthenticated_http: bool,
+
+    /// Enable Admin-class SQL (GRANT/REVOKE) for principals whose grant has
+    /// max_tier = "admin". Requires --allow-ddl as well. Also:
+    /// STRUT_STACK_SQL_ALLOW_GRANTS=1. Default: denied even for Admin grants.
+    #[arg(long)]
+    pub allow_grants: bool,
 
     /// Per-token HTTP rate limit, requests per minute (0 = off).
     #[arg(long, default_value_t = 600)]
@@ -200,6 +333,12 @@ pub struct TomlConfig {
     pub sources: Vec<SourceConfig>,
     #[serde(default)]
     pub deny_columns: Vec<String>,
+    /// Principal declarations (id -> optional display name).
+    #[serde(default)]
+    pub principals: Vec<PrincipalConfig>,
+    /// Authorization grants (principal x source x tier [+ ceilings]).
+    #[serde(default)]
+    pub grants: Vec<GrantConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -212,6 +351,37 @@ pub struct SourceConfig {
     pub url_env: Option<String>,
     #[serde(default)]
     pub engine: Option<String>,
+}
+
+/// `[[principals]]` table: `id` plus an optional display name.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrincipalConfig {
+    pub id: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+}
+
+/// `[[grants]]` table. `source` defaults to `*` (every source); `max_tier`
+/// accepts `read`, `writes`, `ddl`, or `admin`; the ceilings are optional.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrantConfig {
+    pub principal: String,
+    #[serde(default = "default_grant_source")]
+    pub source: String,
+    pub max_tier: String,
+    #[serde(default)]
+    pub max_rows: Option<u32>,
+    #[serde(default)]
+    pub max_bytes: Option<usize>,
+    /// Per-call query timeout in seconds.
+    #[serde(default)]
+    pub query_timeout: Option<u64>,
+}
+
+fn default_grant_source() -> String {
+    "*".to_string()
 }
 
 /// One configured source: its metadata plus the lazily connected driver.
@@ -265,6 +435,12 @@ pub struct AppConfig {
     pub http_rate_limit_per_minute: u32,
     /// Operator explicitly accepted unauthenticated non-loopback HTTP.
     pub allow_unauthenticated_http: bool,
+    /// Explicit `--allow-grants` opt-in for Admin-class SQL.
+    pub allow_grants: bool,
+    /// OAuth 2.1 resource-server settings (None = OAuth path disabled).
+    pub oauth: Option<OAuthSettings>,
+    /// Authorization policy derived from tokens + TOML principals/grants.
+    pub policy: Policy,
     /// True when running on the ephemeral `sqlite::memory:` fallback.
     pub ephemeral: bool,
     /// Explicit endpoint-hiding override; `None` = automatic default
@@ -287,9 +463,29 @@ impl AppConfig {
         Ok(())
     }
 
-    /// Whether any HTTP bearer token is configured.
+    /// Whether any HTTP authentication (bearer token or OAuth) is
+    /// configured.
     pub fn http_auth_enabled(&self) -> bool {
-        !self.http_tokens.is_empty()
+        !self.http_tokens.is_empty() || self.oauth.is_some()
+    }
+
+    /// Derive a per-invocation config view with the authorized write mode
+    /// and the grant's per-call ceilings. Used by the tool dispatch so
+    /// every handler sees the caller's effective limits, not the process
+    /// defaults.
+    pub fn scoped_for(&self, authz: &Authorization) -> AppConfig {
+        let mut scoped = self.clone();
+        scoped.write_mode = authz.write_mode();
+        if let Some(max_rows) = authz.max_rows {
+            scoped.max_rows = scoped.max_rows.min(max_rows);
+        }
+        if let Some(max_bytes) = authz.max_bytes {
+            scoped.max_bytes = scoped.max_bytes.min(max_bytes);
+        }
+        if let Some(timeout) = authz.query_timeout {
+            scoped.query_timeout = scoped.query_timeout.min(timeout);
+        }
+        scoped
     }
 
     /// Effective endpoint visibility for `list_sources` (SQL-SEC-15).
@@ -301,6 +497,82 @@ impl AppConfig {
         // host/port map — unless the process itself runs in DDL mode,
         // where the operator is fully trusted.
         self.http_auth_enabled() && !self.write_mode.allows_ddl()
+    }
+}
+
+/// OAuth 2.1 resource-server settings (F1-07). The server validates
+/// Bearer JWTs issued by `issuer` for `audience`; it never issues tokens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthSettings {
+    /// Authorization server issuer (`STRUT_STACK_SQL_OAUTH_ISSUER`).
+    pub issuer: String,
+    /// Expected `aud` (`STRUT_STACK_SQL_OAUTH_AUDIENCE`).
+    pub audience: String,
+    /// Claim carrying the principal id (`STRUT_STACK_SQL_OAUTH_SUBJECT_CLAIM`,
+    /// default `sub`).
+    pub subject_claim: String,
+}
+
+fn env_truthy(key: &str) -> bool {
+    std::env::var(key)
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
+/// Resolve `--allow-grants` / `STRUT_STACK_SQL_ALLOW_GRANTS=1`.
+fn resolve_allow_grants(cli: &Cli) -> bool {
+    cli.allow_grants || env_truthy("STRUT_STACK_SQL_ALLOW_GRANTS")
+}
+
+/// Resolve the optional OAuth resource-server settings.
+fn resolve_oauth_settings() -> Result<Option<OAuthSettings>> {
+    let read = |key: &str| {
+        std::env::var(key)
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    parse_oauth_settings(
+        read("STRUT_STACK_SQL_OAUTH_ISSUER"),
+        read("STRUT_STACK_SQL_OAUTH_AUDIENCE"),
+        read("STRUT_STACK_SQL_OAUTH_SUBJECT_CLAIM"),
+    )
+}
+
+fn parse_oauth_settings(
+    issuer: Option<String>,
+    audience: Option<String>,
+    subject_claim: Option<String>,
+) -> Result<Option<OAuthSettings>> {
+    let subject_claim = subject_claim.unwrap_or_else(|| "sub".to_string());
+    match (issuer, audience) {
+        (None, None) => Ok(None),
+        (Some(_), None) => {
+            bail!("STRUT_STACK_SQL_OAUTH_ISSUER is set but STRUT_STACK_SQL_OAUTH_AUDIENCE is not")
+        }
+        (None, Some(_)) => {
+            bail!("STRUT_STACK_SQL_OAUTH_AUDIENCE is set but STRUT_STACK_SQL_OAUTH_ISSUER is not")
+        }
+        (Some(issuer), Some(audience)) => {
+            if !(issuer.starts_with("https://") || issuer.starts_with("http://")) {
+                bail!(
+                    "STRUT_STACK_SQL_OAUTH_ISSUER must be an absolute http(s) URL (got '{issuer}')"
+                );
+            }
+            let issuer = issuer.trim_end_matches('/').to_string();
+            if issuer
+                .split_once("://")
+                .map(|(_, rest)| rest.is_empty())
+                .unwrap_or(true)
+            {
+                bail!("STRUT_STACK_SQL_OAUTH_ISSUER must include a host (got '{issuer}')");
+            }
+            Ok(Some(OAuthSettings {
+                issuer,
+                audience,
+                subject_claim,
+            }))
+        }
     }
 }
 
@@ -380,6 +652,129 @@ fn resolve_hide_endpoints(cli: &Cli) -> Option<bool> {
     None
 }
 
+/// Map one legacy HTTP token onto grants: token name -> principal id,
+/// token mode -> max tier, source allowlist -> per-source grants (any
+/// source when the allowlist is empty).
+fn token_grants(token: &HttpToken) -> Vec<Grant> {
+    let tier = Tier::from_write_mode(token.mode);
+    if token.sources.is_empty() {
+        vec![Grant::new(token.name.clone(), GrantSource::Any, tier)]
+    } else {
+        token
+            .sources
+            .iter()
+            .map(|source| Grant::new(token.name.clone(), GrantSource::Name(source.clone()), tier))
+            .collect()
+    }
+}
+
+/// Build the single authorization policy from the process mode, legacy
+/// HTTP tokens, and the optional TOML `[[principals]]` / `[[grants]]`
+/// tables. Validation is fail-closed: unknown sources, duplicate grants,
+/// out-of-range ceilings, and bad tier names are configuration errors.
+fn build_policy(
+    write_mode: WriteMode,
+    full_tools: bool,
+    allow_grants: bool,
+    tokens: &[HttpToken],
+    principals: &[PrincipalConfig],
+    grants: &[GrantConfig],
+    source_names: &[String],
+) -> Result<Policy> {
+    let mut policy = Policy::new(Tier::from_write_mode(write_mode), full_tools, allow_grants);
+
+    let mut seen_principals: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for principal in principals {
+        let id = principal.id.trim();
+        if id.is_empty() {
+            bail!("[[principals]] entry with empty id");
+        }
+        if !seen_principals.insert(id.to_string()) {
+            bail!("duplicate principal id '{id}'");
+        }
+        if let Some(name) = &principal.display_name {
+            if !name.trim().is_empty() {
+                policy.set_display_name(id, name.trim());
+            }
+        }
+    }
+
+    let mut seen_grants: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
+    for token in tokens {
+        policy.set_display_name(&token.name, token.name.clone());
+        for grant in token_grants(token) {
+            let key = (grant.principal.clone(), grant.source.as_str().to_string());
+            if !seen_grants.insert(key) {
+                bail!(
+                    "duplicate grant for principal '{}' on source '{}'",
+                    grant.principal,
+                    grant.source.as_str()
+                );
+            }
+            policy.add_grant(grant);
+        }
+    }
+
+    let mut seen_toml_grants: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
+    for grant in grants {
+        let principal = grant.principal.trim();
+        if principal.is_empty() {
+            bail!("[[grants]] entry with empty principal");
+        }
+        let max_tier = Tier::parse(&grant.max_tier)
+            .with_context(|| format!("[[grants]] for principal '{principal}'"))?;
+        let source = GrantSource::parse(&grant.source)
+            .with_context(|| format!("[[grants]] for principal '{principal}'"))?;
+        if let GrantSource::Name(name) = &source {
+            if !source_names.iter().any(|known| known == name) {
+                bail!("[[grants]] for principal '{principal}' references unknown source '{name}'");
+            }
+        }
+        if let Some(rows) = grant.max_rows {
+            if !(1..=100_000).contains(&rows) {
+                bail!(
+                    "[[grants]] for principal '{principal}': max_rows must be between 1 and 100000 (got {rows})"
+                );
+            }
+        }
+        if grant.max_bytes == Some(0) {
+            bail!("[[grants]] for principal '{principal}': max_bytes must be > 0");
+        }
+        if grant.query_timeout == Some(0) {
+            bail!("[[grants]] for principal '{principal}': query_timeout must be > 0 seconds");
+        }
+        let key = (principal.to_string(), source.as_str().to_string());
+        if !seen_toml_grants.insert(key) {
+            bail!(
+                "duplicate grant for principal '{principal}' on source '{}' in [[grants]]",
+                source.as_str()
+            );
+        }
+        // Explicit config wins over the implicit grant derived from a
+        // legacy HTTP token entry with the same principal/source.
+        policy.set_grant(Grant {
+            principal: principal.to_string(),
+            source,
+            max_tier,
+            max_rows: grant.max_rows,
+            max_bytes: grant.max_bytes,
+            query_timeout: grant.query_timeout.map(Duration::from_secs),
+        });
+    }
+
+    if allow_grants && !write_mode.allows_ddl() {
+        tracing::warn!(
+            "--allow-grants is set without --allow-ddl: Admin-class statements stay denied"
+        );
+    }
+
+    // The synthesized local stdio principal defaults to the process
+    // ceiling on all sources unless config declared its own grants.
+    Ok(policy.with_local_default())
+}
+
 pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
     validate_cli_numbers(cli)?;
     let workspace = cli.workspace.clone();
@@ -398,6 +793,8 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
     };
     let http_tokens = resolve_http_tokens(cli, write_mode)?;
     let hide_endpoints = resolve_hide_endpoints(cli);
+    let allow_grants = resolve_allow_grants(cli);
+    let oauth = resolve_oauth_settings()?;
 
     let read_only = !write_mode.allows_dml();
     let pool_size = cli.pool_size;
@@ -463,6 +860,16 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
                 name
             }
         };
+        let source_names: Vec<String> = sources.keys().cloned().collect();
+        let policy = build_policy(
+            write_mode,
+            cli.full_tools,
+            allow_grants,
+            &http_tokens,
+            &toml_cfg.principals,
+            &toml_cfg.grants,
+            &source_names,
+        )?;
         return Ok(AppConfig {
             write_mode,
             full_tools: cli.full_tools,
@@ -479,6 +886,9 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
             http_tokens,
             http_rate_limit_per_minute: cli.http_rate_limit_per_minute,
             allow_unauthenticated_http: cli.allow_unauthenticated_http,
+            allow_grants,
+            oauth,
+            policy,
             ephemeral: false,
             hide_endpoints,
         });
@@ -550,6 +960,16 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
         },
     );
 
+    let policy = build_policy(
+        write_mode,
+        cli.full_tools,
+        allow_grants,
+        &http_tokens,
+        &[],
+        &[],
+        &["default".to_string()],
+    )?;
+
     Ok(AppConfig {
         write_mode,
         full_tools: cli.full_tools,
@@ -566,6 +986,9 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
         http_tokens,
         http_rate_limit_per_minute: cli.http_rate_limit_per_minute,
         allow_unauthenticated_http: cli.allow_unauthenticated_http,
+        allow_grants,
+        oauth,
+        policy,
         ephemeral,
         hide_endpoints,
     })
@@ -841,6 +1264,7 @@ fn database_from_url(url: &str, engine: EngineKind) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::{AuthMethod, Principal};
 
     #[test]
     fn write_mode_tiers() {
@@ -930,6 +1354,335 @@ mod tests {
     }
 
     #[test]
+    fn hashed_token_entry_parses_and_verifies() {
+        let digest = hash_token("s3cr3t");
+        let spec = format!("alice:{digest}:writes:main|reporting");
+        let tokens = parse_http_tokens(&spec).unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].name, "alice");
+        assert_eq!(tokens[0].token, digest);
+        assert!(tokens[0].is_hashed());
+        assert_eq!(tokens[0].mode, WriteMode::AllowWrites);
+        assert_eq!(
+            tokens[0].sources,
+            vec!["main".to_string(), "reporting".to_string()]
+        );
+        assert!(tokens[0].verify("s3cr3t"));
+        assert!(!tokens[0].verify("wrong"));
+        assert!(!tokens[0].verify(""));
+    }
+
+    #[test]
+    fn raw_token_still_verifies() {
+        let token = HttpToken {
+            name: "a".into(),
+            token: "raw-secret".into(),
+            mode: WriteMode::ReadOnly,
+            sources: vec![],
+        };
+        assert!(!token.is_hashed());
+        assert!(token.verify("raw-secret"));
+        assert!(!token.verify("raw-secre"));
+    }
+
+    #[test]
+    fn malformed_hash_never_matches() {
+        assert!(!verify_token_secret("sha256:nothex", "nothex"));
+        assert!(!verify_token_secret(
+            &format!("sha256:{}", "0".repeat(63)),
+            "x"
+        ));
+        assert!(verify_token_secret(&hash_token("abc"), "abc"));
+    }
+
+    #[test]
+    fn debug_does_not_leak_token_material() {
+        let raw = HttpToken {
+            name: "a".into(),
+            token: "super-secret-value".into(),
+            mode: WriteMode::ReadOnly,
+            sources: vec![],
+        };
+        let rendered = format!("{raw:?}");
+        assert!(!rendered.contains("super-secret-value"), "{rendered}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+
+        let hashed = HttpToken {
+            token: hash_token("another-secret"),
+            ..raw
+        };
+        let rendered = format!("{hashed:?}");
+        assert!(
+            !rendered.contains(&hash_token("another-secret")),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("another-secret"), "{rendered}");
+        assert!(rendered.contains("<sha256-digest>"), "{rendered}");
+    }
+
+    #[test]
+    fn parse_hashed_token_rejects_short_digest() {
+        assert!(parse_http_tokens("a:sha256:deadbeef:writes").is_err());
+    }
+
+    #[test]
+    fn build_policy_maps_legacy_tokens() {
+        let tokens = parse_http_tokens("alice:tok:writes:main,bob:tok2:readonly").unwrap();
+        let policy = build_policy(
+            WriteMode::AllowDdl,
+            true,
+            false,
+            &tokens,
+            &[],
+            &[],
+            &["main".to_string(), "reporting".to_string()],
+        )
+        .unwrap();
+
+        // Legacy token name -> principal id; mode -> tier; sources -> grants.
+        let alice = policy.resolve_principal("alice", AuthMethod::ApiKey);
+        let allowed = policy.authorize(&alice, "execute_sql", "main", Tier::Write);
+        assert!(allowed.is_allowed(), "{allowed:?}");
+        let denied = policy.authorize(&alice, "execute_sql", "reporting", Tier::Read);
+        assert!(!denied.is_allowed(), "{denied:?}");
+
+        let bob = policy.resolve_principal("bob", AuthMethod::ApiKey);
+        assert!(policy
+            .authorize(&bob, "execute_sql", "reporting", Tier::Read)
+            .is_allowed());
+        // Local stdio principal still gets the process ceiling.
+        let local = policy.local_principal();
+        assert!(policy
+            .authorize(&local, "execute_sql", "reporting", Tier::Ddl)
+            .is_allowed());
+    }
+
+    #[test]
+    fn build_policy_toml_grant_overrides_legacy_token_grant() {
+        let tokens = parse_http_tokens("root:tok:ddl").unwrap();
+        let grants = vec![GrantConfig {
+            principal: "root".into(),
+            source: "*".into(),
+            max_tier: "admin".into(),
+            max_rows: None,
+            max_bytes: None,
+            query_timeout: None,
+        }];
+        let policy = build_policy(
+            WriteMode::AllowDdl,
+            true,
+            true,
+            &tokens,
+            &[],
+            &grants,
+            &["main".to_string()],
+        )
+        .unwrap();
+        let root = policy.resolve_principal("root", AuthMethod::ApiKey);
+        match policy.authorize(&root, "execute_sql", "main", Tier::Admin) {
+            crate::auth::Decision::Allow(authz) => assert_eq!(authz.tier, Tier::Admin),
+            other => panic!("expected admin allow: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_policy_honours_toml_grants_and_local_restriction() {
+        let principals = vec![PrincipalConfig {
+            id: "alice".into(),
+            display_name: Some("Alice".into()),
+        }];
+        let grants = vec![
+            GrantConfig {
+                principal: "alice".into(),
+                source: "main".into(),
+                max_tier: "writes".into(),
+                max_rows: Some(5),
+                max_bytes: Some(2048),
+                query_timeout: Some(3),
+            },
+            GrantConfig {
+                principal: Principal::LOCAL_ID.into(),
+                source: "main".into(),
+                max_tier: "read".into(),
+                max_rows: None,
+                max_bytes: None,
+                query_timeout: None,
+            },
+        ];
+        let policy = build_policy(
+            WriteMode::AllowDdl,
+            true,
+            false,
+            &[],
+            &principals,
+            &grants,
+            &["main".to_string()],
+        )
+        .unwrap();
+
+        let alice = policy.resolve_principal("alice", AuthMethod::OAuth);
+        assert_eq!(alice.display_name.as_deref(), Some("Alice"));
+        match policy.authorize(&alice, "execute_sql", "main", Tier::Write) {
+            crate::auth::Decision::Allow(a) => {
+                assert_eq!(a.max_rows, Some(5));
+                assert_eq!(a.max_bytes, Some(2048));
+                assert_eq!(a.query_timeout, Some(Duration::from_secs(3)));
+            }
+            other => panic!("expected allow: {other:?}"),
+        }
+        // Config restricted the local principal: no wildcard fallback.
+        let local = policy.local_principal();
+        assert!(!policy
+            .authorize(&local, "execute_sql", "other", Tier::Read)
+            .is_allowed());
+    }
+
+    #[test]
+    fn build_policy_rejects_unknown_grant_source() {
+        let grants = vec![GrantConfig {
+            principal: "alice".into(),
+            source: "nope".into(),
+            max_tier: "read".into(),
+            max_rows: None,
+            max_bytes: None,
+            query_timeout: None,
+        }];
+        let err = build_policy(
+            WriteMode::ReadOnly,
+            true,
+            false,
+            &[],
+            &[],
+            &grants,
+            &["main".to_string()],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown source 'nope'"), "{err}");
+    }
+
+    #[test]
+    fn build_policy_rejects_duplicate_and_invalid_grants() {
+        let duplicate = vec![
+            GrantConfig {
+                principal: "alice".into(),
+                source: "*".into(),
+                max_tier: "read".into(),
+                max_rows: None,
+                max_bytes: None,
+                query_timeout: None,
+            },
+            GrantConfig {
+                principal: "alice".into(),
+                source: "*".into(),
+                max_tier: "writes".into(),
+                max_rows: None,
+                max_bytes: None,
+                query_timeout: None,
+            },
+        ];
+        assert!(build_policy(
+            WriteMode::ReadOnly,
+            true,
+            false,
+            &[],
+            &[],
+            &duplicate,
+            &["main".to_string()]
+        )
+        .is_err());
+
+        let zero_rows = vec![GrantConfig {
+            principal: "alice".into(),
+            source: "*".into(),
+            max_tier: "read".into(),
+            max_rows: Some(0),
+            max_bytes: None,
+            query_timeout: None,
+        }];
+        assert!(build_policy(
+            WriteMode::ReadOnly,
+            true,
+            false,
+            &[],
+            &[],
+            &zero_rows,
+            &["main".to_string()]
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn toml_principals_and_grants_load() {
+        let path = write_temp_toml(
+            "auth",
+            r#"
+[[sources]]
+name = "main"
+url = "sqlite::memory:"
+
+[[principals]]
+id = "alice"
+display_name = "Alice"
+
+[[grants]]
+principal = "alice"
+source = "main"
+max_tier = "writes"
+max_rows = 7
+"#,
+        );
+        let mut cli = test_cli(Some(path));
+        cli.allow_writes = true;
+        let cfg = load_config(&cli).await.unwrap();
+        let alice = cfg.policy.resolve_principal("alice", AuthMethod::ApiKey);
+        match cfg
+            .policy
+            .authorize(&alice, "execute_sql", "main", Tier::Write)
+        {
+            crate::auth::Decision::Allow(authz) => assert_eq!(authz.max_rows, Some(7)),
+            other => panic!("expected allow: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn toml_bad_grant_tier_is_error() {
+        let path = write_temp_toml(
+            "badtier",
+            "[[sources]]\nname = \"main\"\nurl = \"sqlite::memory:\"\n[[grants]]\nprincipal = \"alice\"\nmax_tier = \"root\"\n",
+        );
+        let err = load_config(&test_cli(Some(path))).await.unwrap_err();
+        assert!(format!("{err:#}").contains("invalid tier"), "{err:#}");
+    }
+
+    #[test]
+    fn oauth_settings_require_issuer_and_audience_together() {
+        assert_eq!(parse_oauth_settings(None, None, None).unwrap(), None);
+        assert!(parse_oauth_settings(Some("https://as.example.com".into()), None, None).is_err());
+        assert!(parse_oauth_settings(None, Some("aud".into()), None).is_err());
+        let settings = parse_oauth_settings(
+            Some("https://as.example.com".into()),
+            Some("https://mcp.example.com/mcp".into()),
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(settings.issuer, "https://as.example.com");
+        assert_eq!(settings.audience, "https://mcp.example.com/mcp");
+        assert_eq!(settings.subject_claim, "sub");
+        let custom = parse_oauth_settings(
+            Some("https://as.example.com".into()),
+            Some("aud".into()),
+            Some("preferred_username".into()),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(custom.subject_claim, "preferred_username");
+        assert!(
+            parse_oauth_settings(Some("as.example.com".into()), Some("aud".into()), None).is_err()
+        );
+    }
+
+    #[test]
     fn toml_unknown_fields_rejected() {
         // SQL-BUG-09: typos in TOML keys must not be silently ignored.
         let bad = "default_source = \"x\"\n[[sources]]\nname = \"x\"\nurl = \"sqlite::memory:\"\nurlenv = \"TYPO\"\n";
@@ -951,6 +1704,7 @@ mod tests {
             http: None,
             http_token: None,
             allow_unauthenticated_http: false,
+            allow_grants: false,
             http_rate_limit_per_minute: 600,
             ephemeral: false,
             hide_source_endpoints: false,

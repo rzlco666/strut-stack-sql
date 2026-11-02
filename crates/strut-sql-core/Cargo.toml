@@ -20,3 +20,8 @@ toml = "0.8"
 dotenvy = "0.15"
 tracing = "0.1"
 tokio = { version = "1", features = ["net", "sync", "time"] }
+sha2 = "0.10"
+subtle = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
