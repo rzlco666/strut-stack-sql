@@ -439,8 +439,12 @@ async fn list_tables_uncached(
             Ok(filter_objects(
                 rows.iter()
                     .filter_map(|r| {
-                        let sch: String = r.try_get(0).ok()?;
-                        let name: String = r.try_get(1).ok()?;
+                        // MySQL 8 returns information_schema name columns
+                        // with a binary charset under prepared statements, so
+                        // a typed String decode fails for every row; use the
+                        // tolerant text decoder (String -> &str -> bytes).
+                        let sch = mysql_decode_text_by_index(r, 0)?;
+                        let name = mysql_decode_text_by_index(r, 1)?;
                         Some(SchemaObject {
                             object_type: ObjectType::Table,
                             schema: Some(sch),
@@ -815,10 +819,13 @@ struct MysqlIndexRowData {
 fn extract_mysql_index_rows(rows: &[MySqlRow]) -> Vec<MysqlIndexRowData> {
     rows.iter()
         .map(|row| MysqlIndexRowData {
-            schema: row.try_get(0).ok().unwrap_or_default(),
-            table: row.try_get(1).ok().unwrap_or_default(),
-            name: row.try_get(2).ok().unwrap_or_default(),
-            column: row.try_get(3).ok().unwrap_or_default(),
+            // information_schema.statistics text columns arrive as
+            // VARBINARY on MySQL 8 (see list_tables) — decode tolerantly
+            // instead of silently defaulting every name to "".
+            schema: mysql_decode_text_by_index(row, 0).unwrap_or_default(),
+            table: mysql_decode_text_by_index(row, 1).unwrap_or_default(),
+            name: mysql_decode_text_by_index(row, 2).unwrap_or_default(),
+            column: mysql_decode_text_by_index(row, 3).unwrap_or_default(),
             unique: row.try_get::<i32, _>(4).ok().unwrap_or(1) == 0,
         })
         .collect()
@@ -1850,13 +1857,16 @@ fn extract_fk_rows_pg(rows: &[PgRow]) -> Vec<FkRowData> {
 fn extract_fk_rows_mysql(rows: &[MySqlRow]) -> Vec<FkRowData> {
     rows.iter()
         .map(|row| FkRowData {
-            name: row.try_get(0).ok().unwrap_or_default(),
-            table: row.try_get(1).ok().unwrap_or_default(),
-            column: row.try_get(2).ok().unwrap_or_default(),
-            ref_table: row.try_get(3).ok().unwrap_or_default(),
-            ref_column: row.try_get(4).ok().unwrap_or_default(),
-            on_delete: row.try_get(5).ok().unwrap_or_default(),
-            on_update: row.try_get(6).ok().unwrap_or_default(),
+            // KEY_COLUMN_USAGE / REFERENTIAL_CONSTRAINTS text columns are
+            // VARBINARY-typed on MySQL 8 (see list_tables) — decode
+            // tolerantly instead of silently defaulting every field to "".
+            name: mysql_decode_text_by_index(row, 0).unwrap_or_default(),
+            table: mysql_decode_text_by_index(row, 1).unwrap_or_default(),
+            column: mysql_decode_text_by_index(row, 2).unwrap_or_default(),
+            ref_table: mysql_decode_text_by_index(row, 3).unwrap_or_default(),
+            ref_column: mysql_decode_text_by_index(row, 4).unwrap_or_default(),
+            on_delete: mysql_decode_text_by_index(row, 5).unwrap_or_default(),
+            on_update: mysql_decode_text_by_index(row, 6).unwrap_or_default(),
         })
         .collect()
 }

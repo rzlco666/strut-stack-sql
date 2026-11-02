@@ -8,7 +8,10 @@ use sqlx::mysql::MySqlPoolOptions;
 use sqlx::Row;
 use strut_stack_sql::config::WriteMode;
 use strut_stack_sql::db::EngineKind;
-use strut_stack_sql::db::{describe_table, execute_query, EnginePool, ExecOptions};
+use strut_stack_sql::db::{
+    describe_table, execute_query, list_foreign_keys, list_indexes, list_tables, EnginePool,
+    ExecOptions,
+};
 use strut_stack_sql::guard::validate_and_prepare;
 
 async fn mysql_pool() -> Option<EnginePool> {
@@ -53,8 +56,11 @@ async fn mysql_describe_table_returns_columns() {
         .expect("DATABASE()");
     let schema: String = row.try_get(0).expect("schema name");
 
+    // CAST to CHAR: on MySQL 8, information_schema name columns are
+    // reported with a binary charset under prepared statements, so a typed
+    // String decode of the raw column fails with a VARBINARY mismatch.
     let tables = sqlx::query(
-        "SELECT table_name FROM information_schema.tables \
+        "SELECT CAST(table_name AS CHAR) FROM information_schema.tables \
          WHERE table_schema = ? AND table_type = 'BASE TABLE' LIMIT 1",
     )
     .bind(&schema)
@@ -326,4 +332,73 @@ async fn mysql_binary_values_stay_hex_encoded() {
     let row = &result.rows[0];
     assert_eq!(row[0].as_str(), Some("7879"));
     assert_eq!(row[1].as_str(), Some("65646f63"));
+}
+
+/// Regression: on MySQL 8, information_schema name columns are reported
+/// with a binary charset under prepared statements, so typed String
+/// decoding fails. The product schema listing must decode them tolerantly
+/// (bytes -> UTF-8) — a typed decode used to make list_tables return an
+/// empty list and index/FK extraction return empty names, silently.
+#[tokio::test]
+#[ignore = "requires MYSQL_DATABASE_URL"]
+async fn mysql_schema_names_decode_from_information_schema() {
+    let pool = mysql_pool()
+        .await
+        .expect("set MYSQL_DATABASE_URL to a mysql:// URL");
+    let mysql = pool.mysql().unwrap();
+
+    let row = sqlx::query("SELECT DATABASE()")
+        .fetch_one(mysql)
+        .await
+        .expect("DATABASE()");
+    let schema: String = row.try_get(0).expect("schema name");
+
+    let tables = list_tables(&pool, None, Some(&schema), None)
+        .await
+        .expect("list_tables");
+    assert!(
+        tables.len() >= 3,
+        "seed defines users/products/orders, got {} tables",
+        tables.len()
+    );
+    assert!(
+        tables.iter().all(|t| !t.name.is_empty()),
+        "table names must decode, not come back empty: {tables:?}"
+    );
+    assert!(
+        tables.iter().any(|t| t.name == "orders"),
+        "orders table must be listed: {tables:?}"
+    );
+
+    let indexes = list_indexes(&pool, None, Some(&schema), Some("orders"), None)
+        .await
+        .expect("list_indexes");
+    assert!(
+        !indexes.is_empty(),
+        "orders has a PRIMARY key and two named indexes"
+    );
+    assert!(
+        indexes.iter().all(|i| !i.name.is_empty()),
+        "index names must decode, not come back empty: {indexes:?}"
+    );
+    assert!(
+        indexes
+            .iter()
+            .any(|i| i.name.eq_ignore_ascii_case("idx_orders_user_id")),
+        "named index must be listed: {indexes:?}"
+    );
+
+    let fks = list_foreign_keys(&pool, None, Some(&schema), Some("orders"))
+        .await
+        .expect("list_foreign_keys");
+    assert_eq!(fks.len(), 2, "orders has two foreign keys: {fks:?}");
+    assert!(
+        fks.iter()
+            .all(|fk| !fk.name.is_empty() && !fk.columns.iter().any(|c| c.is_empty())),
+        "FK names/columns must decode, not come back empty: {fks:?}"
+    );
+    assert!(
+        fks.iter().any(|fk| fk.ref_table == "users"),
+        "orders.user_id must reference users: {fks:?}"
+    );
 }
