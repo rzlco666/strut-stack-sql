@@ -132,7 +132,13 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       # Dependency vulnerability scan (RustSec advisory DB).
-      - name: cargo audit
-        uses: rustsec/audit-check@v2
+      # Plain `cargo audit` (not the audit-check action) so the run does not
+      # depend on check-run creation permissions; ignores live in
+      # .cargo/audit.toml with per-advisory justifications.
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          tool: cargo-audit
+
+      - name: cargo audit
+        run: cargo audit

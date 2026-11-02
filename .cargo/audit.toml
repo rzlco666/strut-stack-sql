@@ -1,0 +1,16 @@
+# cargo-audit configuration.
+#
+# Ignored advisories (each with justification; reviewed at every release):
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071 — rsa 0.9.10, "Marvin Attack" timing sidechannel.
+    # No patched release exists upstream (latest stable 0.9.10 is still
+    # affected; the advisory itself lists patched = []). The crate is a
+    # transitive dependency of sqlx-mysql, used only for the MySQL RSA
+    # password-exchange during authentication. strut-stack-sql is a client
+    # that connects to operator-configured databases; it never operates an
+    # RSA private-key decryption oracle exposed to untrusted attackers, so
+    # the network timing sidechannel is not exploitable in this usage.
+    # Remove this ignore as soon as RustCrypto publishes a fixed rsa.
+    "RUSTSEC-2023-0071",
+]
