@@ -102,6 +102,20 @@ pub enum ObjectType {
     Routine,
 }
 
+/// One page of schema objects plus whether more rows exist after it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaPage {
+    pub objects: Vec<SchemaObject>,
+    pub has_more: bool,
+}
+
+/// One page of indexes plus whether more indexes exist after it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexPage {
+    pub indexes: Vec<IndexInfo>,
+    pub has_more: bool,
+}
+
 /// Column information from schema introspection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ColumnInfo {
@@ -167,6 +181,82 @@ pub struct TableRowCount {
     pub approx_rows: Option<i64>,
 }
 
+/// Case-insensitive substring match over name/table/schema, matching the
+/// historical in-memory filter semantics.
+pub fn schema_object_matches(object: &SchemaObject, keyword: &str) -> bool {
+    let kw = keyword.to_lowercase();
+    object.name.to_lowercase().contains(&kw)
+        || object
+            .table
+            .as_ref()
+            .is_some_and(|t| t.to_lowercase().contains(&kw))
+        || object
+            .schema
+            .as_ref()
+            .is_some_and(|s| s.to_lowercase().contains(&kw))
+}
+
+/// Filter, then slice one page (offset clamped; never panics).
+pub fn filter_and_page_schema_objects(
+    objects: Vec<SchemaObject>,
+    keyword: Option<&str>,
+    offset: usize,
+    limit: usize,
+) -> SchemaPage {
+    let objects: Vec<SchemaObject> = match keyword {
+        Some(kw) => objects
+            .into_iter()
+            .filter(|o| schema_object_matches(o, kw))
+            .collect(),
+        None => objects,
+    };
+    page_schema_objects(objects, offset, limit)
+}
+
+/// Slice one page out of already-filtered objects.
+pub fn page_schema_objects(objects: Vec<SchemaObject>, offset: usize, limit: usize) -> SchemaPage {
+    let total = objects.len();
+    let start = offset.min(total);
+    let end = start.saturating_add(limit).min(total);
+    SchemaPage {
+        objects: objects[start..end].to_vec(),
+        has_more: end < total,
+    }
+}
+
+pub fn index_matches(index: &IndexInfo, keyword: &str) -> bool {
+    let kw = keyword.to_lowercase();
+    index.name.to_lowercase().contains(&kw)
+        || index.table.to_lowercase().contains(&kw)
+        || index
+            .schema
+            .as_ref()
+            .is_some_and(|s| s.to_lowercase().contains(&kw))
+}
+
+/// Filter, then slice one page of indexes (offset clamped; never panics).
+pub fn filter_and_page_indexes(
+    indexes: Vec<IndexInfo>,
+    keyword: Option<&str>,
+    offset: usize,
+    limit: usize,
+) -> IndexPage {
+    let indexes: Vec<IndexInfo> = match keyword {
+        Some(kw) => indexes
+            .into_iter()
+            .filter(|i| index_matches(i, kw))
+            .collect(),
+        None => indexes,
+    };
+    let total = indexes.len();
+    let start = offset.min(total);
+    let end = start.saturating_add(limit).min(total);
+    IndexPage {
+        indexes: indexes[start..end].to_vec(),
+        has_more: end < total,
+    }
+}
+
 /// Bound query with SQL and parameters.
 #[derive(Debug, Clone)]
 pub struct BoundQuery {
@@ -202,11 +292,26 @@ pub enum DriverError {
     Closed,
 }
 
+/// Non-fatal driver capability degradation (e.g. a server-side statement
+/// timeout could not be installed). Surfaced in diagnostic logs and result
+/// meta so callers never silently assume a capability they do not have.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityNote {
+    pub code: String,
+    pub message: String,
+}
+
 /// Engine driver trait - engine-neutral database operations.
 #[async_trait]
 pub trait EngineDriver: Send + Sync {
     /// Return the engine kind.
     fn kind(&self) -> EngineKind;
+
+    /// Capabilities that could not be established for this session.
+    /// Empty when everything requested is effective.
+    fn capability_notes(&self) -> Vec<CapabilityNote> {
+        Vec::new()
+    }
 
     /// Create a driver instance from a connection string with pool options.
     ///
@@ -238,6 +343,62 @@ pub trait EngineDriver: Send + Sync {
 
     /// List columns, optionally scoped to a schema/database.
     async fn list_columns(&self, schema: Option<&str>) -> Result<Vec<SchemaObject>, DriverError>;
+
+    /// One page of schemas/databases after keyword filtering (PRD-F2-05).
+    /// Drivers that can push both down override this; the default keeps the
+    /// old fetch-all-then-filter behaviour only as a fallback.
+    async fn list_schemas_page(
+        &self,
+        keyword: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<SchemaPage, DriverError> {
+        let objects = self.list_schemas().await?;
+        Ok(filter_and_page_schema_objects(
+            objects, keyword, offset, limit,
+        ))
+    }
+
+    /// One page of tables after keyword filtering (PRD-F2-05).
+    async fn list_tables_page(
+        &self,
+        schema: Option<&str>,
+        keyword: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<SchemaPage, DriverError> {
+        let objects = self.list_tables(schema).await?;
+        Ok(filter_and_page_schema_objects(
+            objects, keyword, offset, limit,
+        ))
+    }
+
+    /// One page of columns after keyword filtering (PRD-F2-05).
+    async fn list_columns_page(
+        &self,
+        schema: Option<&str>,
+        keyword: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<SchemaPage, DriverError> {
+        let objects = self.list_columns(schema).await?;
+        Ok(filter_and_page_schema_objects(
+            objects, keyword, offset, limit,
+        ))
+    }
+
+    /// One page of indexes after keyword filtering (PRD-F2-05).
+    async fn list_indexes_page(
+        &self,
+        schema: Option<&str>,
+        table: Option<&str>,
+        keyword: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<IndexPage, DriverError> {
+        let indexes = self.list_indexes(schema, table).await?;
+        Ok(filter_and_page_indexes(indexes, keyword, offset, limit))
+    }
 
     /// Describe a table's schema.
     async fn describe_table(
@@ -319,4 +480,81 @@ pub trait EngineDriver: Send + Sync {
 
     /// Ping the database to check connectivity.
     async fn ping(&self) -> Result<(), DriverError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn obj(name: &str, table: Option<&str>) -> SchemaObject {
+        SchemaObject {
+            object_type: ObjectType::Table,
+            schema: Some("public".into()),
+            name: name.into(),
+            table: table.map(str::to_string),
+            data_type: None,
+            nullable: None,
+        }
+    }
+
+    #[test]
+    fn page_clamps_offset_and_reports_has_more() {
+        let objects = (0..5).map(|i| obj(&format!("t{i}"), None)).collect();
+        let page = page_schema_objects(objects, 1, 2);
+        assert_eq!(page.objects.len(), 2);
+        assert_eq!(page.objects[0].name, "t1");
+        assert!(page.has_more);
+
+        let objects = (0..5).map(|i| obj(&format!("t{i}"), None)).collect();
+        let page = page_schema_objects(objects, 4, 10);
+        assert_eq!(page.objects.len(), 1);
+        assert!(!page.has_more);
+
+        let page = page_schema_objects(vec![obj("x", None)], 99, 10);
+        assert!(page.objects.is_empty());
+        assert!(!page.has_more);
+    }
+
+    #[test]
+    fn filter_matches_name_table_and_schema() {
+        let objects = vec![obj("users", Some("accounts"))];
+        assert_eq!(
+            filter_and_page_schema_objects(objects.clone(), Some("user"), 0, 10)
+                .objects
+                .len(),
+            1
+        );
+        assert_eq!(
+            filter_and_page_schema_objects(objects.clone(), Some("acc"), 0, 10)
+                .objects
+                .len(),
+            1
+        );
+        assert_eq!(
+            filter_and_page_schema_objects(objects.clone(), Some("pub"), 0, 10)
+                .objects
+                .len(),
+            1
+        );
+        assert!(filter_and_page_schema_objects(objects, Some("nope"), 0, 10)
+            .objects
+            .is_empty());
+    }
+
+    #[test]
+    fn index_page_filters_and_limits() {
+        let index = |name: &str| IndexInfo {
+            schema: Some("public".into()),
+            table: "users".into(),
+            name: name.into(),
+            columns: vec!["id".into()],
+            unique: false,
+            primary: false,
+        };
+        let indexes = vec![index("idx_a"), index("idx_b"), index("other")];
+        let page = filter_and_page_indexes(indexes, Some("idx"), 1, 1);
+        assert_eq!(page.indexes.len(), 1);
+        assert_eq!(page.indexes[0].name, "idx_b");
+        assert!(!page.has_more);
+    }
 }

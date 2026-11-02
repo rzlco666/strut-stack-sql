@@ -23,6 +23,10 @@ pub const DEFAULT_MAX_BYTES: usize = 64 * 1024;
 pub const DEFAULT_POOL_SIZE: u32 = 10;
 pub const DEFAULT_QUERY_TIMEOUT_SECS: u64 = 10;
 pub const DEFAULT_BATCH_CONCURRENCY: usize = 8;
+/// PRD-F2-10 batch governance defaults.
+pub const DEFAULT_BATCH_MAX_STATEMENTS: usize = 50;
+pub const DEFAULT_BATCH_TIMEOUT_SECS: u64 = 60;
+pub const DEFAULT_BATCH_MAX_BYTES: usize = 1024 * 1024;
 
 /// One HTTP bearer token with its own authorization grant (SQL-SEC-05 /
 /// SQL-GAP-01, pragmatic v1.1 form): a name, the secret, the max
@@ -315,6 +319,18 @@ pub struct Cli {
     #[arg(long, default_value_t = DEFAULT_BATCH_CONCURRENCY)]
     pub batch_concurrency: usize,
 
+    /// Max statements accepted in one execute_sql batch (PRD-F2-10).
+    #[arg(long, default_value_t = DEFAULT_BATCH_MAX_STATEMENTS)]
+    pub batch_max_statements: usize,
+
+    /// Total wall-clock deadline for one batch, in seconds (PRD-F2-10).
+    #[arg(long, default_value_t = DEFAULT_BATCH_TIMEOUT_SECS)]
+    pub batch_timeout: u64,
+
+    /// Total result-byte ceiling across all batch items (PRD-F2-10).
+    #[arg(long, default_value_t = DEFAULT_BATCH_MAX_BYTES)]
+    pub batch_max_bytes: usize,
+
     /// Stop batch on first error.
     #[arg(long)]
     pub fail_fast: bool,
@@ -423,6 +439,9 @@ pub struct AppConfig {
     pub max_bytes: usize,
     pub query_timeout: Duration,
     pub batch_concurrency: usize,
+    pub batch_max_statements: usize,
+    pub batch_timeout: Duration,
+    pub batch_max_bytes: usize,
     pub fail_fast: bool,
     pub deny_columns: Vec<String>,
     pub default_source: String,
@@ -601,6 +620,18 @@ fn validate_cli_numbers(cli: &Cli) -> Result<()> {
     }
     if cli.batch_concurrency == 0 {
         bail!("--batch-concurrency must be >= 1");
+    }
+    if !(1..=10_000).contains(&cli.batch_max_statements) {
+        bail!(
+            "--batch-max-statements must be between 1 and 10000 (got {})",
+            cli.batch_max_statements
+        );
+    }
+    if cli.batch_timeout == 0 {
+        bail!("--batch-timeout must be > 0 seconds");
+    }
+    if cli.batch_max_bytes == 0 {
+        bail!("--batch-max-bytes must be > 0");
     }
     Ok(())
 }
@@ -877,6 +908,9 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
             max_bytes: cli.max_bytes,
             query_timeout: Duration::from_secs(cli.query_timeout),
             batch_concurrency: cli.batch_concurrency,
+            batch_max_statements: cli.batch_max_statements,
+            batch_timeout: Duration::from_secs(cli.batch_timeout),
+            batch_max_bytes: cli.batch_max_bytes,
             fail_fast: cli.fail_fast,
             deny_columns,
             default_source,
@@ -977,6 +1011,9 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
         max_bytes: cli.max_bytes,
         query_timeout: Duration::from_secs(cli.query_timeout),
         batch_concurrency: cli.batch_concurrency,
+        batch_max_statements: cli.batch_max_statements,
+        batch_timeout: Duration::from_secs(cli.batch_timeout),
+        batch_max_bytes: cli.batch_max_bytes,
         fail_fast: cli.fail_fast,
         deny_columns,
         default_source: "default".into(),
@@ -1714,6 +1751,9 @@ max_rows = 7
             query_timeout: DEFAULT_QUERY_TIMEOUT_SECS,
             connect_timeout: DEFAULT_CONNECT_TIMEOUT_SECS,
             batch_concurrency: DEFAULT_BATCH_CONCURRENCY,
+            batch_max_statements: DEFAULT_BATCH_MAX_STATEMENTS,
+            batch_timeout: DEFAULT_BATCH_TIMEOUT_SECS,
+            batch_max_bytes: DEFAULT_BATCH_MAX_BYTES,
             fail_fast: false,
             deny_columns: vec![],
         }

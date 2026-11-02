@@ -1,0 +1,179 @@
+{
+  "meta": {
+    "release": "2.0.0",
+    "generated_at": "2026-11-02T12:49:46Z",
+    "binary": "/home/rizal/projects/strut-stack-sql-push/target/release/mcp-sql-rust",
+    "binary_sha256": "046417466dd944429614da54e4850dace4fae2780e10086fdb9f342c43d3149b",
+    "database": "sqlite (temp file, seeded 1000 users + 100x8 table)",
+    "iterations": 120,
+    "warmup": 20,
+    "cold_start_runs": 20,
+    "protocol_version": "2025-03-26",
+    "machine": {
+      "hostname": "LAPTOP-OC7HTPEU",
+      "kernel": "6.6.114.1-microsoft-standard-WSL2",
+      "os": "Ubuntu 24.04.4 LTS",
+      "cpu_model": "13th Gen Intel(R) Core(TM) i5-13420H",
+      "cpu_count": 6,
+      "mem_total_kb": 6068856,
+      "mem_total_gb": 5.79,
+      "python": "3.12.3",
+      "reference_machine": "documented WSL2 reference: 6 vCPU, ~5 GB RAM",
+      "is_wsl": true
+    },
+    "notes": [
+      "execute_sql latency includes local SQLite execution and JSON-RPC framing; the PRD target is tool overhead outside DB time, which this harness cannot separate on an in-process SQLite file.",
+      "cold start = process spawn + MCP initialize response (HTTP includes listening socket readiness).",
+      "tools/list bytes = JSON-RPC result payload in core tool mode.",
+      "result_100x8_bytes = tools/call text payload before truncation (--max-bytes raised to 20 MB)."
+    ]
+  },
+  "cold_start_samples_ms": {
+    "stdio": {
+      "n": 20,
+      "p50": 3.407,
+      "p95": 6.249,
+      "p99": 6.795,
+      "mean": 3.966,
+      "min": 2.4,
+      "max": 6.795
+    },
+    "http": {
+      "n": 20,
+      "p50": 29.693,
+      "p95": 54.061,
+      "p99": 58.306,
+      "mean": 34.798,
+      "min": 25.759,
+      "max": 58.306
+    }
+  },
+  "results": {
+    "stdio": {
+      "transport": "stdio",
+      "cold_start_single_ms": 2.479,
+      "tools_list_bytes": 2783,
+      "tools_list_tool_count": 3,
+      "result_100x8_bytes": 7526,
+      "result_100x8_rows": 100,
+      "result_100x8_cols": 8,
+      "result_100x8_truncated": false,
+      "execute_sql_select_by_pk_ms": {
+        "n": 120,
+        "p50": 0.828,
+        "p95": 1.363,
+        "p99": 1.477,
+        "mean": 0.904,
+        "min": 0.614,
+        "max": 1.67
+      },
+      "execute_sql_errors": 0,
+      "idle_rss_mb": 8.6,
+      "load_rss_mb": 14.83
+    },
+    "http": {
+      "transport": "http",
+      "cold_start_single_ms": 41.459,
+      "tools_list_bytes": 2783,
+      "tools_list_tool_count": 3,
+      "result_100x8_bytes": 7526,
+      "result_100x8_rows": 100,
+      "result_100x8_cols": 8,
+      "result_100x8_truncated": false,
+      "execute_sql_select_by_pk_ms": {
+        "n": 120,
+        "p50": 3.987,
+        "p95": 7.155,
+        "p99": 9.218,
+        "mean": 4.283,
+        "min": 1.912,
+        "max": 12.755
+      },
+      "execute_sql_errors": 0,
+      "idle_rss_mb": 9.8,
+      "load_rss_mb": 15.82
+    }
+  },
+  "targets": {
+    "idle_rss_mb": 15.0,
+    "cold_start_p95_ms": 25.0,
+    "tools_list_bytes": 3072,
+    "result_100x8_bytes": 71680,
+    "execute_sql_p50_ms": 1.0
+  },
+  "comparison": {
+    "stdio": {
+      "idle_rss_mb": {
+        "value": 8.6,
+        "target": 15.0,
+        "unit": "MB",
+        "status": "PASS"
+      },
+      "cold_start_p95_ms": {
+        "value": 6.249,
+        "target": 25.0,
+        "unit": "ms",
+        "status": "PASS"
+      },
+      "tools_list_bytes": {
+        "value": 2783,
+        "target": 3072,
+        "unit": "bytes",
+        "status": "PASS"
+      },
+      "result_100x8_bytes": {
+        "value": 7526,
+        "target": 71680,
+        "unit": "bytes",
+        "status": "PASS"
+      },
+      "execute_sql_p50_ms": {
+        "value": 0.828,
+        "target": 1.0,
+        "unit": "ms",
+        "status": "PASS"
+      }
+    },
+    "http": {
+      "idle_rss_mb": {
+        "value": 9.8,
+        "target": 15.0,
+        "unit": "MB",
+        "status": "PASS"
+      },
+      "cold_start_p95_ms": {
+        "value": 54.061,
+        "target": 25.0,
+        "unit": "ms",
+        "status": "MISS"
+      },
+      "tools_list_bytes": {
+        "value": 2783,
+        "target": 3072,
+        "unit": "bytes",
+        "status": "PASS"
+      },
+      "result_100x8_bytes": {
+        "value": 7526,
+        "target": 71680,
+        "unit": "bytes",
+        "status": "PASS"
+      },
+      "execute_sql_p50_ms": {
+        "value": 3.987,
+        "target": 1.0,
+        "unit": "ms",
+        "status": "MISS"
+      }
+    }
+  },
+  "engines": {
+    "sqlite": "measured (both transports)",
+    "postgres": "not_run: no live PostgreSQL server available on this machine",
+    "mysql": "not_run: no live MySQL server available on this machine"
+  },
+  "competitor": {
+    "status": "not_run",
+    "reason": "node/npx is not installed on this machine; the pinned competitor packages require npx and a live PostgreSQL server (none available). Not attempted."
+  }
+}

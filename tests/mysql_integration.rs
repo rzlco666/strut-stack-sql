@@ -353,7 +353,7 @@ async fn mysql_schema_names_decode_from_information_schema() {
         "orders table must be listed: {tables:?}"
     );
 
-    let indexes = list_indexes(&driver, Some(&schema), Some("orders"), None)
+    let indexes = list_indexes(&driver, None, Some(&schema), Some("orders"), None)
         .await
         .expect("list_indexes");
     assert!(

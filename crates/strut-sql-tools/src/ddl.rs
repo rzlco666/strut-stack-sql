@@ -279,6 +279,10 @@ pub async fn handle_schema_mutate(
 
     let rows_affected = result.data.as_ref().and_then(|d| d.meta.rows_affected);
 
+    // PRD-F2-04: a successful DDL through this server invalidates every
+    // cached introspection entry for the source.
+    crate::introspect::invalidate_source(&source.name);
+
     json_result(&SchemaMutateResult {
         ok: true,
         action: params.action,

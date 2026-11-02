@@ -153,6 +153,7 @@ mod format_tests {
                 has_more: None,
                 total_fetched: None,
                 redacted_columns: None,
+                warnings: None,
             },
         };
         let trimmed = truncate_to_bytes(result, 4096);
@@ -220,6 +221,7 @@ mod redact_tests {
                 has_more: None,
                 total_fetched: None,
                 redacted_columns: None,
+                warnings: None,
             },
         };
         let out = redact_denied_columns(result, &["Password_Hash".into()]);

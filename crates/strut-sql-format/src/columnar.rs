@@ -54,7 +54,17 @@ pub fn deduped_row_keys(cols: &[String]) -> Vec<String> {
         .collect()
 }
 
-pub fn format_columnar(format: ResultFormat, columnar: ColumnarResult) -> serde_json::Value {
+pub fn format_columnar(format: ResultFormat, mut columnar: ColumnarResult) -> serde_json::Value {
+    // PRD-F2-01: duplicate column names never overwrite silently; make the
+    // collision visible in meta as well as in the Rows-mode key suffix.
+    let duplicate_warnings = duplicate_column_warnings(&columnar.cols);
+    if !duplicate_warnings.is_empty() {
+        columnar
+            .meta
+            .warnings
+            .get_or_insert_with(Vec::new)
+            .extend(duplicate_warnings);
+    }
     // Default path is always columnar (token-efficient). Rows/Auto only when requested.
     let effective = match format {
         ResultFormat::Rows => ResultFormat::Rows,
@@ -85,6 +95,22 @@ pub fn format_columnar(format: ResultFormat, columnar: ColumnarResult) -> serde_
     }
 }
 
+fn duplicate_column_warnings(cols: &[String]) -> Vec<String> {
+    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for col in cols {
+        *counts.entry(col.as_str()).or_insert(0) += 1;
+    }
+    let mut warnings: Vec<String> = counts
+        .into_iter()
+        .filter(|(_, n)| *n > 1)
+        .map(|(name, n)| {
+            format!("duplicate column name '{name}' returned {n} times; values kept in position (rows mode suffixes '#2', '#3', …)")
+        })
+        .collect();
+    warnings.sort();
+    warnings
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ColumnarResult {
     pub cols: Vec<String>,
@@ -112,6 +138,10 @@ pub struct ColumnarMeta {
     pub total_fetched: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub redacted_columns: Option<Vec<String>>,
+    /// Non-fatal capability degradations for this session (PRD-F2-11).
+    /// Absent when every requested capability is effective.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warnings: Option<Vec<String>>,
 }
 
 impl ColumnarResult {
@@ -130,6 +160,7 @@ impl ColumnarResult {
                 has_more: None,
                 total_fetched: None,
                 redacted_columns: None,
+                warnings: None,
             },
         }
     }
@@ -163,87 +194,133 @@ fn truncate_str_cell(s: &str, max: usize) -> String {
     format!("{}{TRUNCATED_MARKER}", &s[..end])
 }
 
+fn serialized_len(result: &ColumnarResult) -> usize {
+    serde_json::to_string(result)
+        .map(|s| s.len())
+        .unwrap_or(usize::MAX)
+}
+
+/// Shrink string cells until the result fits, with a visible marker on every
+/// truncated cell. Guarantees that a single row cannot exceed `max_bytes`
+/// on its own (assuming the column-name skeleton fits).
+fn shrink_cells_to_fit(result: &mut ColumnarResult, max_bytes: usize) {
+    let ncols = result
+        .rows
+        .iter()
+        .map(|r| r.len())
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    let mut cap = max_bytes / ncols;
+    if cap <= TRUNCATED_MARKER.len() {
+        cap = TRUNCATED_MARKER.len() + 1;
+    }
+    for _ in 0..32 {
+        for row in &mut result.rows {
+            for cell in row.iter_mut() {
+                if let Value::String(s) = cell {
+                    if s.len() > cap {
+                        *s = truncate_str_cell(s, cap);
+                        result.meta.truncated = true;
+                    }
+                }
+            }
+        }
+        result.meta.n = result.rows.len();
+        if serialized_len(result) <= max_bytes {
+            return;
+        }
+        let next = cap / 2;
+        if next <= TRUNCATED_MARKER.len() {
+            // Everything truncatable is already minimal; drop the row(s)
+            // rather than return an over-budget payload.
+            result.rows.clear();
+            result.meta.n = 0;
+            result.meta.truncated = true;
+            return;
+        }
+        cap = next;
+    }
+}
+
 /// Shrink `result` so its serialized JSON fits `max_bytes`.
 ///
-/// SQL-BUG-11: the old implementation re-serialized the whole result after
-/// every dropped row — O(rows × size). This version serializes each row
-/// exactly once, tracks the running total, and drops whole rows from the end
-/// in O(1) per row. If a single remaining row (or a single giant cell) still
-/// overflows, string cells are truncated with a `…[truncated]` marker.
+/// PRD-F2-02: row counts are found with a binary search over per-row sizes
+/// (each row serialized exactly once → O(n log n), no repeated whole-result
+/// re-serialization). A single remaining row that still overflows gets
+/// per-cell truncation with a `…[truncated]` marker, so one cell cannot
+/// break the byte ceiling by itself.
 pub fn truncate_to_bytes(mut result: ColumnarResult, max_bytes: usize) -> ColumnarResult {
-    // Fixed overhead: serialize with rows emptied (cols + meta skeleton).
+    // Skeleton = result with zero rows (cols + meta).
     let skeleton_len = {
         let saved_n = result.meta.n;
         let rows = std::mem::take(&mut result.rows);
         result.meta.n = 0;
-        let len = serde_json::to_string(&result).map(|s| s.len()).unwrap_or(0);
+        let len = serialized_len(&result);
         result.rows = rows;
         result.meta.n = saved_n;
         len
     };
 
-    // Per-row serialized lengths, each computed once. +1 accounts for the
-    // comma separator between rows.
-    let row_lens: Vec<usize> = result
-        .rows
-        .iter()
-        .map(|r| serde_json::to_string(r).map(|s| s.len() + 1).unwrap_or(0))
-        .collect();
-    let mut total = skeleton_len + row_lens.iter().sum::<usize>();
-
-    if total <= max_bytes {
+    if serialized_len(&result) <= max_bytes {
         return result;
     }
 
-    // Drop rows from the end, subtracting their known sizes — no re-serialize.
-    while result.rows.len() > 1 && total > max_bytes {
-        let dropped = row_lens[result.rows.len() - 1];
-        result.rows.pop();
-        total -= dropped;
+    let row_lens: Vec<usize> = result
+        .rows
+        .iter()
+        .map(|r| serde_json::to_string(r).map(|s| s.len()).unwrap_or(0))
+        .collect();
+    let mut prefix = Vec::with_capacity(row_lens.len() + 1);
+    prefix.push(0usize);
+    for len in &row_lens {
+        prefix.push(prefix.last().copied().unwrap_or(0) + len);
+    }
+    // Serialized size with the first `k` rows: skeleton + row payloads +
+    // commas between them (`k - 1`); the skeleton already holds `[]`.
+    let size_for = |k: usize| -> usize {
+        skeleton_len
+            .saturating_add(prefix[k])
+            .saturating_add(k.saturating_sub(1))
+    };
+
+    let n = result.rows.len();
+    let mut lo = 0usize;
+    let mut hi = n;
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        if size_for(mid) <= max_bytes {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+
+    if lo == 0 {
+        // Not even one full row fits: keep the first row and truncate cells.
+        result.rows.truncate(1);
+        result.meta.truncated = true;
+        result.meta.n = result.rows.len();
+        shrink_cells_to_fit(&mut result, max_bytes);
+        result.meta.n = result.rows.len();
+        return result;
+    }
+
+    if lo < n {
+        result.rows.truncate(lo);
         result.meta.truncated = true;
     }
     result.meta.n = result.rows.len();
-
-    // One verification pass; digit-count drift in `meta.n` can nudge the size.
-    if serde_json::to_string(&result).map(|s| s.len()).unwrap_or(0) > max_bytes
-        && result.rows.len() > 1
-    {
+    // Exact verification; meta.n digit-count drift is at most a few bytes.
+    while result.rows.len() > 1 && serialized_len(&result) > max_bytes {
         result.rows.pop();
         result.meta.truncated = true;
         result.meta.n = result.rows.len();
     }
-
-    // Single-row (or zero-row) overflow: shrink the largest string cells.
-    // Each pass halves the biggest cell, so serialized size falls geometrically.
-    for _ in 0..24 {
-        let cur = serde_json::to_string(&result).map(|s| s.len()).unwrap_or(0);
-        if cur <= max_bytes {
-            break;
-        }
-        // Find the longest string cell across the remaining rows.
-        let mut longest: Option<(usize, usize, usize)> = None; // (row, col, len)
-        for (ri, row) in result.rows.iter().enumerate() {
-            for (ci, cell) in row.iter().enumerate() {
-                if let Value::String(s) = cell {
-                    if longest.map(|(_, _, l)| s.len() > l).unwrap_or(true) {
-                        longest = Some((ri, ci, s.len()));
-                    }
-                }
-            }
-        }
-        let Some((ri, ci, len)) = longest else {
-            break; // nothing truncatable left
-        };
-        if len <= TRUNCATED_MARKER.len() + 8 {
-            break;
-        }
-        let target = (len / 2).max(TRUNCATED_MARKER.len() + 8);
-        if let Value::String(s) = &mut result.rows[ri][ci] {
-            *s = truncate_str_cell(s, target);
-        }
-        result.meta.truncated = true;
+    if serialized_len(&result) > max_bytes {
+        shrink_cells_to_fit(&mut result, max_bytes);
+        result.meta.n = result.rows.len();
     }
-    result.meta.n = result.rows.len();
     result
 }
 
@@ -272,6 +349,7 @@ mod tests {
                 has_more: None,
                 total_fetched: None,
                 redacted_columns: None,
+                warnings: None,
             },
         };
         let json = serde_json::to_string(&result).unwrap();
@@ -290,6 +368,7 @@ mod tests {
             has_more: None,
             total_fetched: None,
             redacted_columns: None,
+            warnings: None,
         }
     }
 
@@ -310,6 +389,39 @@ mod tests {
         let row = &out["rows"][0];
         assert_eq!(row["v"], Value::from(1));
         assert_eq!(row["v#2"], Value::from(2));
+        let warnings = out["meta"]["warnings"].as_array().expect("warnings");
+        assert!(
+            warnings.iter().any(|w| w
+                .as_str()
+                .unwrap_or_default()
+                .contains("duplicate column name 'v'")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn columnar_format_warns_about_duplicate_columns() {
+        let result = ColumnarResult {
+            cols: vec!["id".into(), "id".into(), "name".into()],
+            rows: vec![vec![Value::from(1), Value::from(2), Value::from("a")]],
+            meta: meta(1),
+        };
+        let out = format_columnar(ResultFormat::Columnar, result);
+        assert_eq!(out["cols"].as_array().unwrap().len(), 3);
+        let warnings = out["meta"]["warnings"].as_array().expect("warnings");
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].as_str().unwrap().contains("'id'"));
+    }
+
+    #[test]
+    fn unique_columns_do_not_add_warnings() {
+        let result = ColumnarResult {
+            cols: vec!["a".into(), "b".into()],
+            rows: vec![vec![Value::from(1), Value::from(2)]],
+            meta: meta(1),
+        };
+        let out = format_columnar(ResultFormat::Columnar, result);
+        assert!(out["meta"].get("warnings").is_none());
     }
 
     #[test]
@@ -349,6 +461,62 @@ mod tests {
     }
 
     #[test]
+    fn truncate_wide_single_row_shrinks_every_cell() {
+        let giant = "y".repeat(5_000);
+        let result = ColumnarResult {
+            cols: (0..8).map(|i| format!("c{i}")).collect(),
+            rows: vec![vec![Value::String(giant); 8]],
+            meta: meta(1),
+        };
+        let out = truncate_to_bytes(result, 2_000);
+        let serialized = serde_json::to_string(&out).unwrap();
+        assert!(
+            serialized.len() <= 2_000,
+            "one wide row must fit the ceiling, got {} bytes",
+            serialized.len()
+        );
+        assert!(out.meta.truncated);
+        assert_eq!(out.meta.n, 1);
+        assert_eq!(out.rows[0].len(), 8, "no cell may be dropped");
+        for cell in &out.rows[0] {
+            assert!(
+                cell.as_str().unwrap().contains("[truncated]"),
+                "each oversized cell keeps a marker"
+            );
+        }
+    }
+
+    #[test]
+    fn truncate_row_count_is_the_largest_prefix_that_fits() {
+        // 40 identical rows. Verify the binary-search result is exactly the
+        // largest prefix that serializes under the ceiling.
+        let result = ColumnarResult {
+            cols: vec!["c".into()],
+            rows: (0..40)
+                .map(|i| vec![Value::String(format!("value-{i:03}-{}", "x".repeat(20)))])
+                .collect(),
+            meta: meta(40),
+        };
+        let max = 600;
+        let out = truncate_to_bytes(result, max);
+        assert!(serde_json::to_string(&out).unwrap().len() <= max);
+        assert!(out.rows.len() < 40);
+        // Adding the next row back must exceed the ceiling.
+        let mut probe = out.clone();
+        let omitted = vec![Value::String(format!(
+            "value-{:03}-{}",
+            out.rows.len(),
+            "x".repeat(20)
+        ))];
+        probe.rows.push(omitted);
+        probe.meta.n = probe.rows.len();
+        assert!(
+            serde_json::to_string(&probe).unwrap().len() > max,
+            "truncation must not stop short of the maximum fitting prefix"
+        );
+    }
+
+    #[test]
     fn truncate_str_cell_respects_char_boundary() {
         let s = "é".repeat(100); // 2 bytes each
         let out = truncate_str_cell(&s, 51);
@@ -372,6 +540,7 @@ mod tests {
                 has_more: None,
                 total_fetched: None,
                 redacted_columns: None,
+                warnings: None,
             },
         };
         result.apply_pagination(2, 2);

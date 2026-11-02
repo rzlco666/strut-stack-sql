@@ -2656,6 +2656,7 @@ dependencies = [
 name = "strut-sql-tools"
 version = "1.1.0"
 dependencies = [
+ "base64",
  "bigdecimal",
  "chrono",
  "futures",
@@ -2665,6 +2666,7 @@ dependencies = [
  "serde_json",
  "strut-sql-core",
  "strut-sql-driver-api",
+ "strut-sql-driver-sqlite",
  "strut-sql-format",
  "strut-sql-guard",
  "thiserror",

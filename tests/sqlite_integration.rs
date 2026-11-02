@@ -10,7 +10,9 @@ use strut_stack_sql::config::WriteMode;
 use strut_stack_sql::guard::validate_and_prepare;
 use strut_stack_sql::tools::exec::{execute_query, ExecOptions};
 use strut_stack_sql::tools::explain::analyze_query;
-use strut_stack_sql::tools::introspect::{describe_table, list_tables};
+use strut_stack_sql::tools::introspect::{
+    describe_table, invalidate_source, list_tables, schema_overview, search_objects, ObjectType,
+};
 
 async fn sqlite_pool() -> Arc<dyn EngineDriver> {
     let options = ConnectOptions {
@@ -150,6 +152,124 @@ async fn sqlite_describe_table_unique_index_flag() {
         .find(|i| i.name == "uniq_demo_name")
         .expect("non-unique index present");
     assert!(!name_idx.unique, "plain index must report unique: false");
+}
+
+#[tokio::test]
+async fn sqlite_schema_overview_collects_all_table_foreign_keys() {
+    let pool = sqlite_pool().await;
+    let ddl_opts = exec_opts(WriteMode::AllowDdl);
+    for sql in [
+        "CREATE TABLE parent (a INTEGER, b INTEGER, PRIMARY KEY (a, b))",
+        "CREATE TABLE child (x INTEGER, y INTEGER, \
+         FOREIGN KEY (x, y) REFERENCES parent (a, b))",
+        "CREATE TABLE grandchild (id INTEGER PRIMARY KEY, cx INTEGER, \
+         FOREIGN KEY (cx) REFERENCES child (x))",
+    ] {
+        execute_query(&pool, sql, &[], &ddl_opts)
+            .await
+            .expect("ddl");
+    }
+
+    let overview = schema_overview(&pool, Some("overview-src"), Some("main"))
+        .await
+        .expect("schema overview");
+    assert_eq!(overview.meta.n_tables, 3);
+    assert_eq!(overview.meta.n_foreign_keys, 2, "{overview:?}");
+    let composite = overview
+        .foreign_keys
+        .iter()
+        .find(|fk| fk.table == "child")
+        .expect("child FK");
+    assert_eq!(composite.columns, vec!["x", "y"]);
+    assert_eq!(composite.ref_columns, vec!["a", "b"]);
+}
+
+#[tokio::test]
+async fn sqlite_search_objects_pushes_pagination_and_keyword() {
+    let pool = sqlite_pool().await;
+    let ddl_opts = exec_opts(WriteMode::AllowDdl);
+    for name in ["alpha", "alpine", "beta"] {
+        execute_query(
+            &pool,
+            &format!("CREATE TABLE {name} (id INTEGER)"),
+            &[],
+            &ddl_opts,
+        )
+        .await
+        .expect("ddl");
+    }
+
+    let page = search_objects(
+        &pool,
+        Some("search-src"),
+        ObjectType::Table,
+        Some("alp"),
+        Some("main"),
+        0,
+        1,
+    )
+    .await
+    .expect("search");
+    assert_eq!(page.meta.n, 1);
+    assert!(page.meta.has_more);
+    assert_eq!(page.objects[0].name, "alpha");
+
+    let page = search_objects(
+        &pool,
+        Some("search-src"),
+        ObjectType::Table,
+        Some("alp"),
+        Some("main"),
+        1,
+        1,
+    )
+    .await
+    .expect("second page");
+    assert_eq!(page.objects[0].name, "alpine");
+    assert!(!page.meta.has_more);
+
+    let beyond = search_objects(
+        &pool,
+        Some("search-src"),
+        ObjectType::Table,
+        Some("alp"),
+        Some("main"),
+        99,
+        10,
+    )
+    .await
+    .expect("offset past end");
+    assert!(beyond.objects.is_empty());
+    assert!(!beyond.meta.has_more);
+}
+
+#[tokio::test]
+async fn sqlite_schema_cache_invalidation_reveals_new_table() {
+    let pool = sqlite_pool().await;
+    let ddl_opts = exec_opts(WriteMode::AllowDdl);
+    execute_query(&pool, "CREATE TABLE first (id INTEGER)", &[], &ddl_opts)
+        .await
+        .expect("first");
+
+    let before = schema_overview(&pool, Some("cache-src"), Some("main"))
+        .await
+        .expect("overview before");
+    assert_eq!(before.meta.n_tables, 1);
+
+    execute_query(&pool, "CREATE TABLE second (id INTEGER)", &[], &ddl_opts)
+        .await
+        .expect("second");
+    // Without invalidation the cached overview is still served (TTL > 0).
+    let cached = schema_overview(&pool, Some("cache-src"), Some("main"))
+        .await
+        .expect("cached overview");
+    assert_eq!(cached.meta.n_tables, 1);
+
+    invalidate_source("cache-src");
+    let after = schema_overview(&pool, Some("cache-src"), Some("main"))
+        .await
+        .expect("overview after");
+    assert_eq!(after.meta.n_tables, 2);
 }
 
 #[tokio::test]

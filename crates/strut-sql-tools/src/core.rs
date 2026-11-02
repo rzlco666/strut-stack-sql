@@ -7,9 +7,13 @@ use serde::Deserialize;
 use serde_json::Value;
 use strut_sql_core::config::AppConfig;
 use strut_sql_core::redact::redact_url;
+use strut_sql_driver_api::EngineKind;
 use strut_sql_format::{format_columnar, resolve_result_format, to_json_text, ResultFormat};
+use strut_sql_guard::{classify_sql, SqlClass};
 
-use crate::exec::{execute_batch, execute_query, BatchResult, ExecError, ExecOptions, QueryResult};
+use crate::exec::{
+    execute_batch, execute_query, BatchLimits, BatchResult, ExecError, ExecOptions, QueryResult,
+};
 use crate::introspect::{search_objects, ObjectType};
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -129,7 +133,7 @@ pub fn tool_error_code(msg: impl Into<String>, kind: ToolErrorKind) -> McpError 
 /// Map an execution-layer error to its tool error kind.
 fn exec_error_kind(err: &ExecError) -> ToolErrorKind {
     match err {
-        ExecError::Guard(_) => ToolErrorKind::Validation,
+        ExecError::Guard(_) | ExecError::Limit(_) => ToolErrorKind::Validation,
         ExecError::Database(_) | ExecError::Other(_) => ToolErrorKind::Db,
     }
 }
@@ -138,6 +142,19 @@ pub fn json_result<T: serde::Serialize>(value: &T) -> Result<CallToolResult, Mcp
     Ok(CallToolResult::success(vec![ContentBlock::text(
         to_json_text(value),
     )]))
+}
+
+/// A successful DDL statement changes the catalog: drop cached introspection
+/// for that source so the next schema call sees the new shape immediately.
+fn invalidate_after_sql(source_name: &str, engine: EngineKind, sql: &str, ok: bool) {
+    if !ok {
+        return;
+    }
+    if let Ok(class) = classify_sql(sql, engine) {
+        if class.sql_class() == SqlClass::Ddl {
+            crate::introspect::invalidate_source(source_name);
+        }
+    }
 }
 
 fn format_query_result(result: &QueryResult, format: ResultFormat) -> serde_json::Value {
@@ -177,7 +194,7 @@ pub async fn handle_search_objects(
 
     let result = search_objects(
         &driver,
-        Some(&source.url),
+        Some(&source.name),
         params.object_type,
         params.keyword.as_deref(),
         params.schema.as_deref(),
@@ -223,14 +240,26 @@ pub async fn handle_execute_sql(
             .map_err(|e| tool_error_code(e.to_string(), ToolErrorKind::Db))?;
         let batch_items: Vec<(String, Vec<Value>)> =
             queries.into_iter().map(|q| q.into_sql_params()).collect();
+        let batch_sqls: Vec<String> = batch_items.iter().map(|(sql, _)| sql.clone()).collect();
+        let engine = driver.kind();
+        let limits = BatchLimits {
+            max_statements: config.batch_max_statements,
+            deadline: config.batch_timeout,
+            max_bytes: config.batch_max_bytes,
+        };
         let batch = execute_batch(
             &driver,
             batch_items,
             &opts,
             config.batch_concurrency,
             config.fail_fast,
+            &limits,
         )
-        .await;
+        .await
+        .map_err(|e| tool_error_code(e.to_string(), exec_error_kind(&e)))?;
+        for (sql, result) in batch_sqls.iter().zip(batch.results.iter()) {
+            invalidate_after_sql(&source.name, engine, sql, result.ok);
+        }
         return Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string(&format_batch_result(&batch, format)).unwrap_or_default(),
         )]));
@@ -251,6 +280,7 @@ pub async fn handle_execute_sql(
     let result = execute_query(&driver, &sql, &query_params, &opts)
         .await
         .map_err(|e| tool_error_code(e.to_string(), exec_error_kind(&e)))?;
+    invalidate_after_sql(&source.name, driver.kind(), &sql, result.ok);
     Ok(CallToolResult::success(vec![ContentBlock::text(
         serde_json::to_string(&format_query_result(&result, format)).unwrap_or_default(),
     )]))

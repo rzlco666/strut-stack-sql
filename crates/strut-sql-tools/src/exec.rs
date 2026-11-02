@@ -31,6 +31,8 @@ pub enum ExecError {
     Database(String),
     #[error("{0}")]
     Other(String),
+    #[error("{0}")]
+    Limit(String),
 }
 
 impl From<DriverError> for ExecError {
@@ -64,6 +66,16 @@ pub struct ExecOptions {
     pub page_size: Option<usize>,
     /// Case-insensitive column names to redact in result cells (opt-in).
     pub deny_columns: Vec<String>,
+}
+
+/// Hard governance limits for one `execute_batch` call (PRD-F2-10).
+#[derive(Debug, Clone, Copy)]
+pub struct BatchLimits {
+    pub max_statements: usize,
+    /// Total wall-clock budget for the whole batch.
+    pub deadline: Duration,
+    /// Total serialized result-byte ceiling across all items.
+    pub max_bytes: usize,
 }
 
 pub async fn execute_query(
@@ -206,18 +218,43 @@ pub async fn execute_batch(
     opts: &ExecOptions,
     concurrency: usize,
     fail_fast: bool,
-) -> BatchResult {
+    limits: &BatchLimits,
+) -> Result<BatchResult, ExecError> {
+    // PRD-F2-10: reject oversized batches before any statement runs.
+    if queries.len() > limits.max_statements {
+        return Err(ExecError::Limit(format!(
+            "batch has {} statements; limit is {} (--batch-max-statements)",
+            queries.len(),
+            limits.max_statements
+        )));
+    }
+
+    // Total batch deadline. Each item observes the same absolute deadline, so
+    // in-flight work cannot extend the batch beyond it. Items that do not
+    // finish produce a structured per-item failure (fail-soft), unless
+    // fail_fast collapses the batch.
+    let deadline = tokio::time::Instant::now() + limits.deadline;
     let results = stream::iter(queries)
         .map(|(sql, params)| {
             let driver = driver.clone();
             let opts = opts.clone();
             async move {
-                match execute_query(&driver, &sql, &params, &opts).await {
-                    Ok(r) => r,
-                    Err(e) => QueryResult {
+                match tokio::time::timeout_at(
+                    deadline,
+                    execute_query(&driver, &sql, &params, &opts),
+                )
+                .await
+                {
+                    Ok(Ok(r)) => r,
+                    Ok(Err(e)) => QueryResult {
                         ok: false,
                         data: None,
                         error: Some(e.to_string()),
+                    },
+                    Err(_) => QueryResult {
+                        ok: false,
+                        data: None,
+                        error: Some("batch deadline exceeded before this item completed".into()),
                     },
                 }
             }
@@ -228,13 +265,58 @@ pub async fn execute_batch(
 
     if fail_fast {
         if let Some(failed) = results.iter().find(|r| !r.ok) {
-            return BatchResult {
+            return Ok(BatchResult {
                 results: vec![failed.clone()],
-            };
+            });
         }
     }
 
-    BatchResult { results }
+    // Total byte ceiling across items. Results arrive in request order, so the
+    // first N items get the budget and later items are truncated to the
+    // remainder or fail with a structured per-item error.
+    const ITEM_OVERHEAD: usize = 96;
+    let mut used = 0usize;
+    let mut bounded = results;
+    for result in &mut bounded {
+        let data_len = result
+            .data
+            .as_ref()
+            .and_then(|d| serde_json::to_string(d).ok())
+            .map(|s| s.len())
+            .unwrap_or(0);
+        let need = data_len.saturating_add(ITEM_OVERHEAD);
+        let remaining = limits.max_bytes.saturating_sub(used);
+        if need <= remaining {
+            used += need;
+            continue;
+        }
+        let Some(data) = result.data.take() else {
+            // Error items have no payload; count only the wrapper.
+            if ITEM_OVERHEAD <= remaining {
+                used += ITEM_OVERHEAD;
+            }
+            continue;
+        };
+        let avail = remaining.saturating_sub(ITEM_OVERHEAD);
+        if avail < 128 {
+            result.ok = false;
+            result.error = Some(format!(
+                "batch byte ceiling ({} bytes) reached before this item",
+                limits.max_bytes
+            ));
+            used = limits.max_bytes;
+            continue;
+        }
+        let mut truncated = truncate_to_bytes(data, avail);
+        truncated.meta.truncated = true;
+        used += serde_json::to_string(&truncated)
+            .map(|s| s.len())
+            .unwrap_or(avail)
+            .saturating_add(ITEM_OVERHEAD);
+        result.data = Some(truncated);
+    }
+
+    Ok(BatchResult { results: bounded })
 }
 
 async fn run_sql(
@@ -252,11 +334,24 @@ async fn run_sql(
         fetch_rows,
     };
     let result = driver.execute(&bound).await?;
+    let warnings: Option<Vec<String>> = {
+        let notes = driver.capability_notes();
+        if notes.is_empty() {
+            None
+        } else {
+            let messages: Vec<String> = notes
+                .into_iter()
+                .map(|n| format!("{}: {}", n.code, n.message))
+                .collect();
+            tracing::warn!(engine = ?driver.kind(), warnings = ?messages, "driver capability degraded");
+            Some(messages)
+        }
+    };
 
     if !fetch_rows {
-        return Ok(ColumnarResult::empty_command(
-            result.meta.rows_affected.unwrap_or(0),
-        ));
+        let mut result = ColumnarResult::empty_command(result.meta.rows_affected.unwrap_or(0));
+        result.meta.warnings = warnings;
+        return Ok(result);
     }
 
     let cols = result.cols.into_iter().map(|c| c.name).collect();
@@ -284,6 +379,7 @@ async fn run_sql(
             has_more: None,
             total_fetched: None,
             redacted_columns: None,
+            warnings,
         },
     })
 }
@@ -469,5 +565,159 @@ mod tests {
             EngineKind::Postgres,
             WriteMode::AllowDdl
         )));
+    }
+
+    async fn sqlite() -> Arc<dyn EngineDriver> {
+        use strut_sql_driver_api::ConnectOptions;
+        use strut_sql_driver_sqlite::SqliteDriver;
+        let driver = SqliteDriver::from_connection_string_with_options(
+            "sqlite::memory:",
+            &ConnectOptions {
+                pool_size: 2,
+                ..ConnectOptions::default()
+            },
+        )
+        .await
+        .expect("sqlite driver");
+        Arc::new(*driver)
+    }
+
+    fn exec_opts() -> ExecOptions {
+        ExecOptions {
+            write_mode: WriteMode::ReadOnly,
+            max_rows: 100,
+            max_bytes: 64 * 1024,
+            timeout: Duration::from_secs(5),
+            limit_injected: false,
+            page_offset: 0,
+            page_size: None,
+            deny_columns: Vec::new(),
+        }
+    }
+
+    fn limits(max_statements: usize, deadline_ms: u64, max_bytes: usize) -> BatchLimits {
+        BatchLimits {
+            max_statements,
+            deadline: Duration::from_millis(deadline_ms),
+            max_bytes,
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_rejects_more_statements_than_limit() {
+        let driver = sqlite().await;
+        let queries = (0..3)
+            .map(|i| (format!("SELECT {i}"), Vec::new()))
+            .collect();
+        let err = execute_batch(
+            &driver,
+            queries,
+            &exec_opts(),
+            2,
+            false,
+            &limits(2, 5_000, 1024 * 1024),
+        )
+        .await
+        .expect_err("oversized batch must be rejected");
+        assert!(matches!(err, ExecError::Limit(_)), "{err}");
+        assert!(err.to_string().contains("limit is 2"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn batch_enforces_total_byte_ceiling_across_items() {
+        let driver = sqlite().await;
+        let queries = vec![
+            ("SELECT hex(zeroblob(800))".to_string(), Vec::new()),
+            ("SELECT hex(zeroblob(800))".to_string(), Vec::new()),
+            ("SELECT hex(zeroblob(800))".to_string(), Vec::new()),
+        ];
+        let ceiling = 1_500usize;
+        let batch = execute_batch(
+            &driver,
+            queries,
+            &exec_opts(),
+            2,
+            false,
+            &limits(10, 5_000, ceiling),
+        )
+        .await
+        .expect("batch");
+
+        let actual = serde_json::to_string(&batch).unwrap().len();
+        assert!(
+            actual <= ceiling,
+            "serialized batch {actual} must fit ceiling {ceiling}"
+        );
+        let mut used = 0usize;
+        for result in &batch.results {
+            used += 96;
+            if let Some(data) = &result.data {
+                used += serde_json::to_string(data).unwrap().len();
+            }
+        }
+        assert!(
+            used <= ceiling,
+            "batch payload {used} must fit ceiling {ceiling}"
+        );
+        assert!(
+            batch.results.iter().any(|r| !r.ok || r.data.is_none()),
+            "items past the ceiling must fail or be omitted"
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_deadline_fails_soft_per_item() {
+        let driver = sqlite().await;
+        let queries = vec![(
+            "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) \
+             SELECT count(*) FROM c"
+                .to_string(),
+            Vec::new(),
+        )];
+        let batch = execute_batch(
+            &driver,
+            queries,
+            &exec_opts(),
+            1,
+            false,
+            &limits(10, 40, 1024 * 1024),
+        )
+        .await
+        .expect("batch");
+        assert_eq!(batch.results.len(), 1);
+        assert!(!batch.results[0].ok);
+        assert!(
+            batch.results[0]
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("batch deadline"),
+            "{:?}",
+            batch.results[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_is_fail_soft_without_fail_fast() {
+        let driver = sqlite().await;
+        let queries = vec![
+            ("SELECT 1".to_string(), Vec::new()),
+            ("SELECT * FROM missing_table".to_string(), Vec::new()),
+            ("SELECT 3".to_string(), Vec::new()),
+        ];
+        let batch = execute_batch(
+            &driver,
+            queries,
+            &exec_opts(),
+            2,
+            false,
+            &limits(10, 5_000, 1024 * 1024),
+        )
+        .await
+        .expect("batch");
+        assert_eq!(batch.results.len(), 3);
+        assert!(batch.results[0].ok);
+        assert!(!batch.results[1].ok);
+        assert!(batch.results[2].ok);
     }
 }

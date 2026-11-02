@@ -4,7 +4,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use strut_sql_driver_api::{
     ColumnInfo as DriverColumnInfo, EngineDriver, EngineKind,
-    ForeignKeyInfo as DriverForeignKeyInfo, IndexInfo as DriverIndexInfo,
+    ForeignKeyInfo as DriverForeignKeyInfo, IndexInfo as DriverIndexInfo, IndexPage,
     ObjectType as DriverObjectType, SchemaObject as DriverSchemaObject,
 };
 
@@ -123,17 +123,20 @@ pub struct SearchMeta {
 }
 
 // ---------------------------------------------------------------------------
-// Schema metadata cache (SQL-BUG-10)
+// Schema metadata cache (SQL-BUG-10, PRD-F2-04)
 //
-// `list_tables` / `schema_overview` results are cached per source (engine +
-// connection URL + schema [+ keyword]) for a short TTL so repeated agent
-// introspection does not re-hit the catalogs every call. Freshness is
-// TTL-only: a DDL change becomes visible after the TTL lapses at the latest.
-// TTL comes from `MCP_SQL_SCHEMA_CACHE_TTL_SECS` (default 30; 0 disables).
+// Introspection results are cached per `(source, engine, schema)` — the key
+// never omits the source, so two sources with the same engine/schema cannot
+// share an entry. The TTL is configurable via
+// `MCP_SQL_SCHEMA_CACHE_TTL_SECS` (default 30; 0 disables). A successful DDL
+// statement routed through this server invalidates every entry for that
+// source immediately. Hit/miss counters are emitted in diagnostic logs.
 // ---------------------------------------------------------------------------
 
-use std::collections::HashMap as StdHashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex as StdMutex};
+
+use std::collections::HashMap as StdHashMap;
 use std::time::{Duration as StdDuration, Instant as StdInstant};
 
 fn schema_cache_ttl() -> StdDuration {
@@ -147,16 +150,35 @@ fn schema_cache_ttl() -> StdDuration {
     }
 }
 
+#[derive(Debug, Clone)]
+struct CachedObjects {
+    objects: Vec<SchemaObject>,
+    has_more: bool,
+}
+
+/// Cache key separator that cannot appear in a source name.
+const KEY_SEP: char = '\u{1f}';
+
 type CacheMap<V> = StdHashMap<String, (StdInstant, V)>;
 
-static TABLES_CACHE: LazyLock<StdMutex<CacheMap<Vec<SchemaObject>>>> =
+static OBJECTS_CACHE: LazyLock<StdMutex<CacheMap<CachedObjects>>> =
+    LazyLock::new(|| StdMutex::new(StdHashMap::new()));
+
+static INDEXES_CACHE: LazyLock<StdMutex<CacheMap<IndexPage>>> =
     LazyLock::new(|| StdMutex::new(StdHashMap::new()));
 
 static OVERVIEW_CACHE: LazyLock<StdMutex<CacheMap<SchemaOverview>>> =
     LazyLock::new(|| StdMutex::new(StdHashMap::new()));
 
-fn tables_cache() -> &'static StdMutex<CacheMap<Vec<SchemaObject>>> {
-    &TABLES_CACHE
+static CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+static CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
+
+fn objects_cache() -> &'static StdMutex<CacheMap<CachedObjects>> {
+    &OBJECTS_CACHE
+}
+
+fn indexes_cache() -> &'static StdMutex<CacheMap<IndexPage>> {
+    &INDEXES_CACHE
 }
 
 fn overview_cache() -> &'static StdMutex<CacheMap<SchemaOverview>> {
@@ -164,6 +186,7 @@ fn overview_cache() -> &'static StdMutex<CacheMap<SchemaOverview>> {
 }
 
 fn cache_lookup<V: Clone>(
+    map_name: &str,
     map: &StdMutex<StdHashMap<String, (StdInstant, V)>>,
     key: &str,
     ttl: StdDuration,
@@ -172,14 +195,29 @@ fn cache_lookup<V: Clone>(
         return None;
     }
     let mut guard = map.lock().ok()?;
-    match guard.get(key) {
+    let hit = match guard.get(key) {
         Some((at, value)) if at.elapsed() < ttl => Some(value.clone()),
         Some(_) => {
             guard.remove(key);
             None
         }
         None => None,
+    };
+    if hit.is_some() {
+        CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+    } else {
+        CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
     }
+    tracing::debug!(
+        cache = "schema",
+        map = map_name,
+        key,
+        hit = hit.is_some(),
+        hits = CACHE_HITS.load(Ordering::Relaxed),
+        misses = CACHE_MISSES.load(Ordering::Relaxed),
+        "schema cache lookup"
+    );
+    hit
 }
 
 fn cache_store<V>(map: &StdMutex<StdHashMap<String, (StdInstant, V)>>, key: String, value: V) {
@@ -188,32 +226,57 @@ fn cache_store<V>(map: &StdMutex<StdHashMap<String, (StdInstant, V)>>, key: Stri
     }
 }
 
-fn tables_cache_key(
-    engine: EngineKind,
-    connection_url: Option<&str>,
-    schema: Option<&str>,
-    keyword: Option<&str>,
-) -> String {
-    format!(
-        "tables|{:?}|{}|{}|{}",
-        engine,
-        connection_url.unwrap_or(""),
-        schema.unwrap_or(""),
-        keyword.unwrap_or("")
+/// Diagnostic hit/miss counters (tests and operators).
+pub fn cache_stats() -> (u64, u64) {
+    (
+        CACHE_HITS.load(Ordering::Relaxed),
+        CACHE_MISSES.load(Ordering::Relaxed),
     )
 }
 
-fn overview_cache_key(
+/// Drop every cached introspection entry for one source. Called after a
+/// successful DDL statement routed through this server (PRD-F2-04).
+pub fn invalidate_source(source: &str) {
+    let prefix = format!("{source}{KEY_SEP}");
+    let mut removed = 0usize;
+    if let Ok(mut guard) = objects_cache().lock() {
+        let before = guard.len();
+        guard.retain(|k, _| !k.starts_with(&prefix));
+        removed += before - guard.len();
+    }
+    if let Ok(mut guard) = indexes_cache().lock() {
+        let before = guard.len();
+        guard.retain(|k, _| !k.starts_with(&prefix));
+        removed += before - guard.len();
+    }
+    if let Ok(mut guard) = overview_cache().lock() {
+        let before = guard.len();
+        guard.retain(|k, _| !k.starts_with(&prefix));
+        removed += before - guard.len();
+    }
+    tracing::info!(
+        source,
+        invalidated = removed,
+        "schema cache invalidated after DDL"
+    );
+}
+
+fn schema_cache_key(
+    source: &str,
     engine: EngineKind,
-    connection_url: Option<&str>,
     schema: Option<&str>,
+    variant: &str,
+    rest: &[String],
 ) -> String {
-    format!(
-        "overview|{:?}|{}|{}",
-        engine,
-        connection_url.unwrap_or(""),
+    let mut key = format!(
+        "{source}{KEY_SEP}{engine:?}{KEY_SEP}{}{KEY_SEP}{variant}",
         schema.unwrap_or("")
-    )
+    );
+    for part in rest {
+        key.push(KEY_SEP);
+        key.push_str(part);
+    }
+    key
 }
 
 fn map_object_type(t: DriverObjectType) -> ObjectType {
@@ -306,113 +369,253 @@ pub fn paginate_objects(
     objects.drain(start..end).collect()
 }
 
-pub async fn list_schemas(
-    driver: &Arc<dyn EngineDriver>,
-    keyword: Option<&str>,
-) -> Result<Vec<SchemaObject>, String> {
-    let objects = driver
-        .list_schemas()
-        .await
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .map(map_schema_object)
-        .collect();
-    Ok(filter_objects(objects, keyword))
+const CATALOG_PAGE_MAX: usize = 100_000;
+
+fn page_rest(keyword: Option<&str>, offset: usize, limit: usize) -> Vec<String> {
+    vec![
+        keyword.unwrap_or("").to_string(),
+        offset.to_string(),
+        limit.to_string(),
+    ]
 }
 
-pub async fn list_tables(
+/// One page of schemas with keyword + LIMIT/OFFSET pushed to the driver
+/// (PRD-F2-05), cached per source/engine/schema (PRD-F2-04).
+pub async fn list_schemas_page(
     driver: &Arc<dyn EngineDriver>,
-    connection_url: Option<&str>,
+    source: Option<&str>,
+    keyword: Option<&str>,
+    offset: usize,
+    limit: usize,
+) -> Result<SearchResult, String> {
+    let source = source.unwrap_or("");
+    let ttl = schema_cache_ttl();
+    let rest = page_rest(keyword, offset, limit);
+    let key = schema_cache_key(source, driver.kind(), None, "schemas", &rest);
+    let page = match cache_lookup("schemas", objects_cache(), &key, ttl) {
+        Some(hit) => hit,
+        None => {
+            let fresh = driver
+                .list_schemas_page(keyword, offset, limit)
+                .await
+                .map_err(|e| e.to_string())?;
+            let fresh = CachedObjects {
+                objects: fresh.objects.into_iter().map(map_schema_object).collect(),
+                has_more: fresh.has_more,
+            };
+            if !ttl.is_zero() {
+                cache_store(objects_cache(), key, fresh.clone());
+            }
+            fresh
+        }
+    };
+    Ok(SearchResult {
+        meta: SearchMeta {
+            n: page.objects.len(),
+            offset,
+            limit,
+            has_more: page.has_more,
+        },
+        objects: page.objects,
+    })
+}
+
+/// One page of tables with keyword + LIMIT/OFFSET pushed to the driver
+/// (PRD-F2-05), cached per source/engine/schema (PRD-F2-04).
+pub async fn list_tables_page(
+    driver: &Arc<dyn EngineDriver>,
+    source: Option<&str>,
     schema: Option<&str>,
     keyword: Option<&str>,
-) -> Result<Vec<SchemaObject>, String> {
+    offset: usize,
+    limit: usize,
+) -> Result<SearchResult, String> {
+    let source = source.unwrap_or("");
     let ttl = schema_cache_ttl();
-    let key = tables_cache_key(driver.kind(), connection_url, schema, keyword);
-    if let Some(hit) = cache_lookup(tables_cache(), &key, ttl) {
+    let rest = page_rest(keyword, offset, limit);
+    let key = schema_cache_key(source, driver.kind(), schema, "tables", &rest);
+    let page = match cache_lookup("tables", objects_cache(), &key, ttl) {
+        Some(hit) => hit,
+        None => {
+            let fresh = driver
+                .list_tables_page(schema, keyword, offset, limit)
+                .await
+                .map_err(|e| e.to_string())?;
+            let fresh = CachedObjects {
+                objects: fresh.objects.into_iter().map(map_schema_object).collect(),
+                has_more: fresh.has_more,
+            };
+            if !ttl.is_zero() {
+                cache_store(objects_cache(), key, fresh.clone());
+            }
+            fresh
+        }
+    };
+    Ok(SearchResult {
+        meta: SearchMeta {
+            n: page.objects.len(),
+            offset,
+            limit,
+            has_more: page.has_more,
+        },
+        objects: page.objects,
+    })
+}
+
+/// One page of columns with keyword + LIMIT/OFFSET pushed to the driver
+/// (PRD-F2-05), cached per source/engine/schema (PRD-F2-04).
+pub async fn list_columns_page(
+    driver: &Arc<dyn EngineDriver>,
+    source: Option<&str>,
+    schema: Option<&str>,
+    keyword: Option<&str>,
+    offset: usize,
+    limit: usize,
+) -> Result<SearchResult, String> {
+    let source = source.unwrap_or("");
+    let ttl = schema_cache_ttl();
+    let rest = page_rest(keyword, offset, limit);
+    let key = schema_cache_key(source, driver.kind(), schema, "columns", &rest);
+    let page = match cache_lookup("columns", objects_cache(), &key, ttl) {
+        Some(hit) => hit,
+        None => {
+            let fresh = driver
+                .list_columns_page(schema, keyword, offset, limit)
+                .await
+                .map_err(|e| e.to_string())?;
+            let fresh = CachedObjects {
+                objects: fresh.objects.into_iter().map(map_schema_object).collect(),
+                has_more: fresh.has_more,
+            };
+            if !ttl.is_zero() {
+                cache_store(objects_cache(), key, fresh.clone());
+            }
+            fresh
+        }
+    };
+    Ok(SearchResult {
+        meta: SearchMeta {
+            n: page.objects.len(),
+            offset,
+            limit,
+            has_more: page.has_more,
+        },
+        objects: page.objects,
+    })
+}
+
+/// One page of indexes with keyword + LIMIT/OFFSET pushed to the driver
+/// (PRD-F2-05), cached per source/engine/schema (PRD-F2-04).
+async fn driver_indexes_page(
+    driver: &Arc<dyn EngineDriver>,
+    source: Option<&str>,
+    schema: Option<&str>,
+    table: Option<&str>,
+    keyword: Option<&str>,
+    offset: usize,
+    limit: usize,
+) -> Result<IndexPage, String> {
+    let source = source.unwrap_or("");
+    let ttl = schema_cache_ttl();
+    let mut rest = page_rest(keyword, offset, limit);
+    rest.push(table.unwrap_or("").to_string());
+    let key = schema_cache_key(source, driver.kind(), schema, "indexes", &rest);
+    if let Some(hit) = cache_lookup("indexes", indexes_cache(), &key, ttl) {
         return Ok(hit);
     }
-    let objects = driver
-        .list_tables(schema)
+    let fresh = driver
+        .list_indexes_page(schema, table, keyword, offset, limit)
         .await
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .map(map_schema_object)
-        .collect();
-    let fresh = filter_objects(objects, keyword);
+        .map_err(|e| e.to_string())?;
     if !ttl.is_zero() {
-        cache_store(tables_cache(), key, fresh.clone());
+        cache_store(indexes_cache(), key, fresh.clone());
     }
     Ok(fresh)
 }
 
+/// Backwards-compatible unpaginated schema listing.
+pub async fn list_schemas(
+    driver: &Arc<dyn EngineDriver>,
+    keyword: Option<&str>,
+) -> Result<Vec<SchemaObject>, String> {
+    Ok(
+        list_schemas_page(driver, None, keyword, 0, CATALOG_PAGE_MAX)
+            .await?
+            .objects,
+    )
+}
+
+/// Backwards-compatible unpaginated table listing. `source` is the configured
+/// source name (or `None` for callers that do not have one).
+pub async fn list_tables(
+    driver: &Arc<dyn EngineDriver>,
+    source: Option<&str>,
+    schema: Option<&str>,
+    keyword: Option<&str>,
+) -> Result<Vec<SchemaObject>, String> {
+    Ok(
+        list_tables_page(driver, source, schema, keyword, 0, CATALOG_PAGE_MAX)
+            .await?
+            .objects,
+    )
+}
+
+/// Backwards-compatible unpaginated column listing.
 pub async fn list_columns(
     driver: &Arc<dyn EngineDriver>,
     schema: Option<&str>,
     keyword: Option<&str>,
 ) -> Result<Vec<SchemaObject>, String> {
-    let objects = driver
-        .list_columns(schema)
-        .await
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .map(map_schema_object)
-        .collect();
-    Ok(filter_objects(objects, keyword))
-}
-
-async fn list_index_objects(
-    driver: &Arc<dyn EngineDriver>,
-    schema: Option<&str>,
-    table: Option<&str>,
-    keyword: Option<&str>,
-) -> Result<Vec<SchemaObject>, String> {
-    let objects = driver
-        .list_indexes(schema, table)
-        .await
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .map(|idx| SchemaObject {
-            object_type: ObjectType::Index,
-            schema: idx.schema.clone(),
-            name: idx.name.clone(),
-            table: Some(idx.table.clone()),
-            data_type: None,
-            nullable: None,
-            columns: None,
-            indexes: Some(vec![map_index(idx)]),
-        })
-        .collect();
-    Ok(filter_objects(objects, keyword))
+    Ok(
+        list_columns_page(driver, None, schema, keyword, 0, CATALOG_PAGE_MAX)
+            .await?
+            .objects,
+    )
 }
 
 pub async fn search_objects(
     driver: &Arc<dyn EngineDriver>,
-    connection_url: Option<&str>,
+    source: Option<&str>,
     object_type: ObjectType,
     keyword: Option<&str>,
     schema: Option<&str>,
     offset: usize,
     limit: usize,
 ) -> Result<SearchResult, String> {
-    let objects = match object_type {
-        ObjectType::Schema => list_schemas(driver, keyword).await?,
-        ObjectType::Table => list_tables(driver, connection_url, schema, keyword).await?,
-        ObjectType::Column => list_columns(driver, schema, keyword).await?,
-        ObjectType::Index => list_index_objects(driver, schema, None, keyword).await?,
-    };
-
-    let total = objects.len();
-    let slice = paginate_objects(objects, offset, limit);
-
-    Ok(SearchResult {
-        meta: SearchMeta {
-            n: slice.len(),
-            offset,
-            limit,
-            has_more: offset + slice.len() < total,
-        },
-        objects: slice,
-    })
+    match object_type {
+        ObjectType::Schema => list_schemas_page(driver, source, keyword, offset, limit).await,
+        ObjectType::Table => list_tables_page(driver, source, schema, keyword, offset, limit).await,
+        ObjectType::Column => {
+            list_columns_page(driver, source, schema, keyword, offset, limit).await
+        }
+        ObjectType::Index => {
+            let page =
+                driver_indexes_page(driver, source, schema, None, keyword, offset, limit).await?;
+            let objects = page
+                .indexes
+                .into_iter()
+                .map(|idx| SchemaObject {
+                    object_type: ObjectType::Index,
+                    schema: idx.schema.clone(),
+                    name: idx.name.clone(),
+                    table: Some(idx.table.clone()),
+                    data_type: None,
+                    nullable: None,
+                    columns: None,
+                    indexes: Some(vec![map_index(idx)]),
+                })
+                .collect::<Vec<_>>();
+            Ok(SearchResult {
+                meta: SearchMeta {
+                    n: objects.len(),
+                    offset,
+                    limit,
+                    has_more: page.has_more,
+                },
+                objects,
+            })
+        }
+    }
 }
 
 pub async fn describe_table(
@@ -452,14 +655,23 @@ pub async fn describe_table(
 
 pub async fn list_indexes(
     driver: &Arc<dyn EngineDriver>,
+    source: Option<&str>,
     schema: Option<&str>,
     table: Option<&str>,
     keyword: Option<&str>,
 ) -> Result<Vec<ListedIndex>, String> {
-    let objects = list_index_objects(driver, schema, table, keyword).await?;
-    Ok(objects
+    let page =
+        driver_indexes_page(driver, source, schema, table, keyword, 0, CATALOG_PAGE_MAX).await?;
+    Ok(page
+        .indexes
         .into_iter()
-        .map(listed_index_from_schema_object)
+        .map(|idx| ListedIndex {
+            schema: idx.schema,
+            table: Some(idx.table),
+            name: idx.name,
+            columns: idx.columns,
+            unique: idx.unique,
+        })
         .collect())
 }
 
@@ -495,12 +707,12 @@ pub async fn list_foreign_keys(
 /// One-shot schema survey: tables (+ approx row counts) and foreign keys.
 pub async fn schema_overview(
     driver: &Arc<dyn EngineDriver>,
-    connection_url: Option<&str>,
+    source: Option<&str>,
     schema: Option<&str>,
 ) -> Result<SchemaOverview, String> {
     let ttl = schema_cache_ttl();
-    let key = overview_cache_key(driver.kind(), connection_url, schema);
-    if let Some(hit) = cache_lookup(overview_cache(), &key, ttl) {
+    let key = schema_cache_key(source.unwrap_or(""), driver.kind(), schema, "overview", &[]);
+    if let Some(hit) = cache_lookup("overview", overview_cache(), &key, ttl) {
         return Ok(hit);
     }
     let fresh = schema_overview_uncached(driver, schema).await?;
@@ -543,28 +755,15 @@ async fn schema_overview_uncached(
         tables.truncate(SCHEMA_OVERVIEW_MAX_TABLES);
     }
 
-    let foreign_keys: Vec<ForeignKeyInfo> = if engine == EngineKind::Sqlite {
-        let mut all = Vec::new();
-        for t in &tables {
-            all.extend(
-                driver
-                    .list_foreign_keys(Some(&schema_name), Some(&t.name))
-                    .await
-                    .map_err(|e| e.to_string())?
-                    .into_iter()
-                    .map(map_fk),
-            );
-        }
-        all
-    } else {
-        driver
-            .list_foreign_keys(Some(&schema_name), None)
-            .await
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .map(map_fk)
-            .collect()
-    };
+    // Every engine now exposes a set-based all-tables FK query (SQLite
+    // included, PRD-F2-06): no per-table round-trip loop.
+    let foreign_keys: Vec<ForeignKeyInfo> = driver
+        .list_foreign_keys(Some(&schema_name), None)
+        .await
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(map_fk)
+        .collect();
 
     let n_tables = tables.len();
     let n_foreign_keys = foreign_keys.len();
@@ -670,18 +869,74 @@ mod tests {
         let map: StdMutex<StdHashMap<String, (StdInstant, Vec<SchemaObject>)>> =
             StdMutex::new(StdHashMap::new());
         cache_store(&map, "k".into(), vec![obj("cached", None)]);
-        let hit = cache_lookup(&map, "k", Duration::from_secs(30)).expect("fresh hit");
+        let hit = cache_lookup("test", &map, "k", Duration::from_secs(30)).expect("fresh hit");
         assert_eq!(hit[0].name, "cached");
         assert!(
-            cache_lookup(&map, "k", Duration::ZERO).is_none(),
+            cache_lookup("test", &map, "k", Duration::ZERO).is_none(),
             "TTL 0 disables the cache"
         );
         // Expired entries are misses: age the entry past a tiny TTL.
         std::thread::sleep(Duration::from_millis(3));
         assert!(
-            cache_lookup(&map, "k", Duration::from_millis(1)).is_none(),
+            cache_lookup("test", &map, "k", Duration::from_millis(1)).is_none(),
             "entry older than TTL must miss"
         );
+    }
+
+    #[test]
+    fn cache_keys_are_scoped_per_source() {
+        let key_a = schema_cache_key("src_a", EngineKind::Sqlite, Some("main"), "tables", &[]);
+        let key_b = schema_cache_key("src_b", EngineKind::Sqlite, Some("main"), "tables", &[]);
+        assert_ne!(key_a, key_b);
+        assert!(key_a.starts_with("src_a\u{1f}"));
+        assert!(key_b.starts_with("src_b\u{1f}"));
+    }
+
+    #[test]
+    fn invalidate_source_drops_only_that_source() {
+        let key_a = schema_cache_key("src_a", EngineKind::Sqlite, Some("main"), "tables", &[]);
+        let key_b = schema_cache_key("src_b", EngineKind::Sqlite, Some("main"), "tables", &[]);
+        cache_store(
+            objects_cache(),
+            key_a.clone(),
+            CachedObjects {
+                objects: vec![obj("a", None)],
+                has_more: false,
+            },
+        );
+        cache_store(
+            objects_cache(),
+            key_b.clone(),
+            CachedObjects {
+                objects: vec![obj("b", None)],
+                has_more: false,
+            },
+        );
+        invalidate_source("src_a");
+        assert!(
+            objects_cache().lock().unwrap().get(&key_a).is_none(),
+            "source A must be invalidated"
+        );
+        assert!(
+            objects_cache().lock().unwrap().get(&key_b).is_some(),
+            "source B must survive"
+        );
+        if let Ok(mut guard) = objects_cache().lock() {
+            guard.remove(&key_b);
+        }
+    }
+
+    #[test]
+    fn cache_hit_miss_counters_advance() {
+        let before = cache_stats();
+        let map: StdMutex<StdHashMap<String, (StdInstant, Vec<SchemaObject>)>> =
+            StdMutex::new(StdHashMap::new());
+        cache_store(&map, "counted".into(), vec![obj("x", None)]);
+        let _ = cache_lookup("test", &map, "counted", StdDuration::from_secs(30));
+        let _ = cache_lookup("test", &map, "missing", StdDuration::from_secs(30));
+        let after = cache_stats();
+        assert!(after.0 > before.0, "hit counter must advance");
+        assert!(after.1 > before.1, "miss counter must advance");
     }
 
     #[test]

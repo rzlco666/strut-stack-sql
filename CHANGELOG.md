@@ -1,5 +1,25 @@
 # Changelog
 
+## [Unreleased]
+
+### Benchmarks (PRD-F2-12/F2-13)
+
+- Reproducible harness added at `scripts/benchmark/bench.py` (+
+  `run-bench.sh`); raw results for 2.0.0 in
+  `scripts/benchmark/results/2.0.0.json` with machine specs.
+- Reference machine (WSL2, 6 vCPU, 5.8 GB): **stdio meets every PRD-F2-12
+  target** — idle RSS 8.60 MB, cold-start p95 6.25 ms, `tools/list`
+  2,783 bytes, 100×8 result 7,526 bytes, SELECT-by-PK p50 0.83 ms.
+- HTTP transport **misses two targets** and is recorded as such rather than
+  rounded away: cold-start p95 54.06 ms (target ≤ 25 ms; HTTP listener
+  readiness + session handshake are included) and SELECT-by-PK p50 3.99 ms
+  (target ≤ 1 ms; each call is a fresh HTTP request, so network/HTTP framing
+  dominates). The stdio core meets the target; the HTTP gap is transport
+  overhead, not query/format overhead.
+- Competitor comparison not run: `npx`/Node is absent and the pinned
+  competitors require a live PostgreSQL server. PostgreSQL/MySQL engine
+  results are `not_run` for the same reason (no live server on this machine).
+
 ## [1.1.0] — 2026-11-02
 
 Hardening release: closes every guard-bypass and correctness finding from the

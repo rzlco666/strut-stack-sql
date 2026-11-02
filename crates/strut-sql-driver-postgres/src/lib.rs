@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 use strut_sql_driver_api::{
     BoundQuery, ColumnInfo, ColumnMeta, ConnectOptions, DriverError, EngineDriver, EngineKind,
-    ForeignKeyInfo, IndexInfo, ObjectType, QueryMeta, QueryResult, RoutineInfo, SchemaObject,
-    SqlValue, TableInfo, TableRowCount,
+    ForeignKeyInfo, IndexInfo, IndexPage, ObjectType, QueryMeta, QueryResult, RoutineInfo,
+    SchemaObject, SchemaPage, SqlValue, TableInfo, TableRowCount,
 };
 use uuid::Uuid;
 
@@ -200,6 +200,158 @@ impl EngineDriver for PostgresDriver {
                 })
             })
             .collect())
+    }
+
+    async fn list_schemas_page(
+        &self,
+        keyword: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<SchemaPage, DriverError> {
+        let rows = sqlx::query(
+            "SELECT schema_name FROM information_schema.schemata \
+             WHERE schema_name NOT IN ('pg_catalog', 'information_schema', 'pg_toast') \
+               AND ($1::text IS NULL OR strpos(lower(schema_name), lower($1)) > 0) \
+             ORDER BY schema_name LIMIT $2 OFFSET $3",
+        )
+        .bind(keyword)
+        .bind((limit.saturating_add(1)) as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DriverError::Introspection(e.to_string()))?;
+        Ok(pg_page_from_rows(rows, limit, |r| {
+            Some(SchemaObject {
+                object_type: ObjectType::Schema,
+                schema: None,
+                name: r.try_get(0).ok()?,
+                table: None,
+                data_type: None,
+                nullable: None,
+            })
+        }))
+    }
+
+    async fn list_tables_page(
+        &self,
+        schema: Option<&str>,
+        keyword: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<SchemaPage, DriverError> {
+        let schema = schema.filter(|s| !s.is_empty()).unwrap_or("public");
+        let rows = sqlx::query(
+            "SELECT table_name FROM information_schema.tables \
+             WHERE table_schema = $1 AND table_type = 'BASE TABLE' \
+               AND ($2::text IS NULL OR strpos(lower(table_name), lower($2)) > 0) \
+             ORDER BY table_name LIMIT $3 OFFSET $4",
+        )
+        .bind(schema)
+        .bind(keyword)
+        .bind((limit.saturating_add(1)) as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DriverError::Introspection(e.to_string()))?;
+        Ok(pg_page_from_rows(rows, limit, |r| {
+            Some(SchemaObject {
+                object_type: ObjectType::Table,
+                schema: Some(schema.to_string()),
+                name: r.try_get(0).ok()?,
+                table: None,
+                data_type: None,
+                nullable: None,
+            })
+        }))
+    }
+
+    async fn list_columns_page(
+        &self,
+        schema: Option<&str>,
+        keyword: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<SchemaPage, DriverError> {
+        let schema = schema.filter(|s| !s.is_empty()).unwrap_or("public");
+        let rows = sqlx::query(
+            "SELECT table_name, column_name, \
+             CASE WHEN data_type = 'USER-DEFINED' THEN udt_name ELSE data_type END, \
+             is_nullable \
+             FROM information_schema.columns \
+             WHERE table_schema = $1 \
+               AND ($2::text IS NULL \
+                    OR strpos(lower(column_name), lower($2)) > 0 \
+                    OR strpos(lower(table_name), lower($2)) > 0) \
+             ORDER BY table_name, ordinal_position LIMIT $3 OFFSET $4",
+        )
+        .bind(schema)
+        .bind(keyword)
+        .bind((limit.saturating_add(1)) as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DriverError::Introspection(e.to_string()))?;
+        Ok(pg_page_from_rows(rows, limit, |r| {
+            let table: String = r.try_get(0).ok()?;
+            let name: String = r.try_get(1).ok()?;
+            let data_type: String = r.try_get(2).ok()?;
+            let nullable: String = r.try_get(3).ok()?;
+            Some(SchemaObject {
+                object_type: ObjectType::Column,
+                schema: Some(schema.to_string()),
+                name,
+                table: Some(table),
+                data_type: Some(data_type),
+                nullable: Some(nullable == "YES"),
+            })
+        }))
+    }
+
+    async fn list_indexes_page(
+        &self,
+        schema: Option<&str>,
+        table: Option<&str>,
+        keyword: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<IndexPage, DriverError> {
+        let schema = schema.filter(|s| !s.is_empty()).unwrap_or("public");
+        let rows = sqlx::query(
+            "SELECT indexname, indexdef, tablename FROM pg_indexes \
+             WHERE schemaname = $1 \
+               AND ($2::text IS NULL OR tablename = $2) \
+               AND ($3::text IS NULL \
+                    OR strpos(lower(indexname), lower($3)) > 0 \
+                    OR strpos(lower(tablename), lower($3)) > 0) \
+             ORDER BY indexname LIMIT $4 OFFSET $5",
+        )
+        .bind(schema)
+        .bind(table)
+        .bind(keyword)
+        .bind((limit.saturating_add(1)) as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DriverError::Introspection(e.to_string()))?;
+        let mut indexes: Vec<IndexInfo> = rows
+            .iter()
+            .filter_map(|r| {
+                let name: String = r.try_get(0).ok()?;
+                let def: String = r.try_get(1).ok()?;
+                let table: String = r.try_get(2).ok()?;
+                Some(IndexInfo {
+                    schema: Some(schema.to_string()),
+                    table,
+                    name,
+                    columns: pg_indexdef_columns(&def),
+                    unique: pg_indexdef_is_unique(&def),
+                    primary: false,
+                })
+            })
+            .collect();
+        let has_more = indexes.len() > limit;
+        indexes.truncate(limit);
+        Ok(IndexPage { indexes, has_more })
     }
 
     async fn describe_table(
@@ -447,6 +599,17 @@ impl EngineDriver for PostgresDriver {
             .map_err(|e| DriverError::Execution(e.to_string()))?;
         Ok(())
     }
+}
+
+fn pg_page_from_rows(
+    rows: Vec<PgRow>,
+    limit: usize,
+    map: impl Fn(&PgRow) -> Option<SchemaObject>,
+) -> SchemaPage {
+    let mut objects: Vec<SchemaObject> = rows.iter().filter_map(map).collect();
+    let has_more = objects.len() > limit;
+    objects.truncate(limit);
+    SchemaPage { objects, has_more }
 }
 
 fn command_result(rows_affected: u64) -> QueryResult {

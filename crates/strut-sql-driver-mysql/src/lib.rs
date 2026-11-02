@@ -4,16 +4,21 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use sqlx::mysql::{MySqlPool, MySqlPoolOptions, MySqlRow};
 use sqlx::{Column, Row, TypeInfo, ValueRef};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use strut_sql_driver_api::{
-    BoundQuery, ColumnInfo, ColumnMeta, ConnectOptions, DriverError, EngineDriver, EngineKind,
-    ForeignKeyInfo, IndexInfo, ObjectType, QueryMeta, QueryResult, RoutineInfo, SchemaObject,
-    SqlValue, TableInfo, TableRowCount,
+    BoundQuery, CapabilityNote, ColumnInfo, ColumnMeta, ConnectOptions, DriverError, EngineDriver,
+    EngineKind, ForeignKeyInfo, IndexInfo, IndexPage, ObjectType, QueryMeta, QueryResult,
+    RoutineInfo, SchemaObject, SchemaPage, SqlValue, TableInfo, TableRowCount,
 };
 
 pub struct MySqlDriver {
     pool: MySqlPool,
     url: String,
+    statement_timeout_ms: u64,
+    /// Set when `SET SESSION max_execution_time` failed at least once.
+    max_execution_time_failed: Arc<AtomicBool>,
 }
 
 impl MySqlDriver {
@@ -33,12 +38,29 @@ impl MySqlDriver {
             .max_lifetime(Duration::from_secs(300))
             .test_before_acquire(true);
         let read_only = options.read_only;
+        let timeout_failed = Arc::new(AtomicBool::new(false));
+        let timeout_failed_cb = timeout_failed.clone();
         pool_options = pool_options.after_connect(move |conn, _meta| {
+            let timeout_failed = timeout_failed_cb.clone();
             Box::pin(async move {
                 // max_execution_time is SELECT-only (ms); still helps agent runaway reads.
-                let _ = sqlx::query(&format!("SET SESSION max_execution_time = {stmt_ms}"))
+                // PRD-F2-11: a failure is NOT swallowed — it is logged as a
+                // structured warning and reported through capability_notes().
+                if let Err(e) = sqlx::query(&format!("SET SESSION max_execution_time = {stmt_ms}"))
                     .execute(&mut *conn)
-                    .await;
+                    .await
+                {
+                    if !timeout_failed.swap(true, Ordering::Relaxed) {
+                        tracing::warn!(
+                            engine = "mysql",
+                            capability = "max_execution_time",
+                            timeout_ms = stmt_ms,
+                            error = %e,
+                            "server-side statement timeout could not be installed; \
+                             only the client timeout is effective"
+                        );
+                    }
+                }
                 if read_only {
                     sqlx::query("SET SESSION TRANSACTION READ ONLY")
                         .execute(&mut *conn)
@@ -54,6 +76,8 @@ impl MySqlDriver {
         Ok(Self {
             pool,
             url: connection_string.to_string(),
+            statement_timeout_ms: stmt_ms,
+            max_execution_time_failed: timeout_failed,
         })
     }
 
@@ -95,6 +119,13 @@ enum MysqlSchemaScope {
 impl EngineDriver for MySqlDriver {
     fn kind(&self) -> EngineKind {
         EngineKind::MySql
+    }
+
+    fn capability_notes(&self) -> Vec<CapabilityNote> {
+        max_execution_time_notes(
+            self.max_execution_time_failed.load(Ordering::Relaxed),
+            self.statement_timeout_ms,
+        )
     }
 
     async fn from_connection_string_with_options(
@@ -265,6 +296,241 @@ impl EngineDriver for MySqlDriver {
             });
         }
         Ok(out)
+    }
+
+    async fn list_schemas_page(
+        &self,
+        keyword: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<SchemaPage, DriverError> {
+        let rows = sqlx::query(
+            "SELECT schema_name FROM information_schema.schemata \
+             WHERE (? IS NULL OR LOCATE(LOWER(?), LOWER(schema_name)) > 0) \
+             ORDER BY schema_name LIMIT ? OFFSET ?",
+        )
+        .bind(keyword)
+        .bind(keyword)
+        .bind((limit.saturating_add(1)) as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DriverError::Introspection(e.to_string()))?;
+        Ok(mysql_page_from_rows(rows, limit, |r| {
+            Some(SchemaObject {
+                object_type: ObjectType::Schema,
+                schema: None,
+                name: mysql_decode_text_by_index(r, 0)?,
+                table: None,
+                data_type: None,
+                nullable: None,
+            })
+        }))
+    }
+
+    async fn list_tables_page(
+        &self,
+        schema: Option<&str>,
+        keyword: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<SchemaPage, DriverError> {
+        let scope = self.resolve_scope(schema).await?;
+        let mut sql = String::from(
+            "SELECT table_schema, table_name FROM information_schema.tables \
+             WHERE table_type = 'BASE TABLE'",
+        );
+        if matches!(scope, MysqlSchemaScope::One(_)) {
+            sql.push_str(" AND table_schema = ?");
+        }
+        sql.push_str(
+            " AND (? IS NULL OR LOCATE(LOWER(?), LOWER(table_name)) > 0) \
+             ORDER BY table_schema, table_name LIMIT ? OFFSET ?",
+        );
+        let mut query = sqlx::query(&sql);
+        if let MysqlSchemaScope::One(name) = &scope {
+            query = query.bind(name);
+        }
+        let rows = query
+            .bind(keyword)
+            .bind(keyword)
+            .bind((limit.saturating_add(1)) as i64)
+            .bind(offset as i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| DriverError::Introspection(e.to_string()))?;
+        Ok(mysql_page_from_rows(rows, limit, |r| {
+            Some(SchemaObject {
+                object_type: ObjectType::Table,
+                schema: Some(mysql_decode_text_by_index(r, 0)?),
+                name: mysql_decode_text_by_index(r, 1)?,
+                table: None,
+                data_type: None,
+                nullable: None,
+            })
+        }))
+    }
+
+    async fn list_columns_page(
+        &self,
+        schema: Option<&str>,
+        keyword: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<SchemaPage, DriverError> {
+        let scope = self.resolve_scope(schema).await?;
+        let mut sql = String::from(
+            "SELECT table_schema, table_name, column_name, data_type, is_nullable \
+             FROM information_schema.columns WHERE 1 = 1",
+        );
+        if matches!(scope, MysqlSchemaScope::One(_)) {
+            sql.push_str(" AND table_schema = ?");
+        }
+        sql.push_str(
+            " AND (? IS NULL \
+                 OR LOCATE(LOWER(?), LOWER(column_name)) > 0 \
+                 OR LOCATE(LOWER(?), LOWER(table_name)) > 0) \
+             ORDER BY table_schema, table_name, ordinal_position LIMIT ? OFFSET ?",
+        );
+        let mut query = sqlx::query(&sql);
+        if let MysqlSchemaScope::One(name) = &scope {
+            query = query.bind(name);
+        }
+        let rows = query
+            .bind(keyword)
+            .bind(keyword)
+            .bind(keyword)
+            .bind((limit.saturating_add(1)) as i64)
+            .bind(offset as i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| DriverError::Introspection(e.to_string()))?;
+        Ok(mysql_page_from_rows(rows, limit, |r| {
+            let nullable =
+                mysql_decode_text_by_index(r, 4).is_some_and(|v| v.eq_ignore_ascii_case("YES"));
+            Some(SchemaObject {
+                object_type: ObjectType::Column,
+                schema: Some(mysql_decode_text_by_index(r, 0)?),
+                name: mysql_decode_text_by_index(r, 2)?,
+                table: Some(mysql_decode_text_by_index(r, 1)?),
+                data_type: Some(mysql_decode_text_by_index(r, 3)?),
+                nullable: Some(nullable),
+            })
+        }))
+    }
+
+    async fn list_indexes_page(
+        &self,
+        schema: Option<&str>,
+        table: Option<&str>,
+        keyword: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<IndexPage, DriverError> {
+        let scope = self.resolve_scope(schema).await?;
+        // Page over DISTINCT index keys so LIMIT counts indexes, not the
+        // per-column rows of composite indexes.
+        let mut key_sql = String::from(
+            "SELECT DISTINCT table_schema, table_name, index_name \
+             FROM information_schema.statistics WHERE 1 = 1",
+        );
+        if matches!(scope, MysqlSchemaScope::One(_)) {
+            key_sql.push_str(" AND table_schema = ?");
+        }
+        if table.is_some() {
+            key_sql.push_str(" AND table_name = ?");
+        }
+        key_sql.push_str(
+            " AND (? IS NULL \
+                 OR LOCATE(LOWER(?), LOWER(index_name)) > 0 \
+                 OR LOCATE(LOWER(?), LOWER(table_name)) > 0) \
+             ORDER BY table_schema, table_name, index_name LIMIT ? OFFSET ?",
+        );
+        let mut key_query = sqlx::query(&key_sql);
+        if let MysqlSchemaScope::One(name) = &scope {
+            key_query = key_query.bind(name);
+        }
+        if let Some(table) = table {
+            key_query = key_query.bind(table);
+        }
+        let key_rows = key_query
+            .bind(keyword)
+            .bind(keyword)
+            .bind(keyword)
+            .bind((limit.saturating_add(1)) as i64)
+            .bind(offset as i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| DriverError::Introspection(e.to_string()))?;
+
+        let mut keys: Vec<(String, String, String)> = Vec::with_capacity(key_rows.len());
+        for r in &key_rows {
+            let (Some(schema), Some(table), Some(name)) = (
+                mysql_decode_text_by_index(r, 0),
+                mysql_decode_text_by_index(r, 1),
+                mysql_decode_text_by_index(r, 2),
+            ) else {
+                continue;
+            };
+            keys.push((schema, table, name));
+        }
+        let has_more = keys.len() > limit;
+        keys.truncate(limit);
+        if keys.is_empty() {
+            return Ok(IndexPage {
+                indexes: Vec::new(),
+                has_more,
+            });
+        }
+
+        let predicates =
+            vec!["(table_schema = ? AND table_name = ? AND index_name = ?)"; keys.len()]
+                .join(" OR ");
+        let sql = format!(
+            "SELECT table_schema, table_name, index_name, column_name, non_unique \
+             FROM information_schema.statistics WHERE {predicates} \
+             ORDER BY table_schema, table_name, index_name, seq_in_index"
+        );
+        let mut query = sqlx::query(&sql);
+        for (schema, table, name) in &keys {
+            query = query.bind(schema).bind(table).bind(name);
+        }
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| DriverError::Introspection(e.to_string()))?;
+
+        let mut map: BTreeMap<(String, String, String), IndexInfo> = BTreeMap::new();
+        for row in &rows {
+            let Some(schema) = mysql_decode_text_by_index(row, 0) else {
+                continue;
+            };
+            let Some(table) = mysql_decode_text_by_index(row, 1) else {
+                continue;
+            };
+            let Some(name) = mysql_decode_text_by_index(row, 2) else {
+                continue;
+            };
+            let Some(column) = mysql_decode_text_by_index(row, 3) else {
+                continue;
+            };
+            let unique = mysql_int_by_index(row, 4).unwrap_or(1) == 0;
+            let key = index_key(&schema, &table, &name);
+            map.entry(key)
+                .and_modify(|i| i.columns.push(column.clone()))
+                .or_insert(IndexInfo {
+                    primary: name == "PRIMARY",
+                    schema: Some(schema),
+                    table,
+                    name,
+                    columns: vec![column],
+                    unique,
+                });
+        }
+        Ok(IndexPage {
+            indexes: map.into_values().collect(),
+            has_more,
+        })
     }
 
     async fn describe_table(
@@ -547,6 +813,31 @@ impl EngineDriver for MySqlDriver {
             .map_err(|e| DriverError::Execution(e.to_string()))?;
         Ok(())
     }
+}
+
+fn max_execution_time_notes(failed: bool, timeout_ms: u64) -> Vec<CapabilityNote> {
+    if failed {
+        vec![CapabilityNote {
+            code: "mysql_max_execution_time_unavailable".into(),
+            message: format!(
+                "SET SESSION max_execution_time = {timeout_ms}ms failed; server-side statement \
+                 timeout is NOT effective (client timeout only)"
+            ),
+        }]
+    } else {
+        Vec::new()
+    }
+}
+
+fn mysql_page_from_rows(
+    rows: Vec<MySqlRow>,
+    limit: usize,
+    map: impl Fn(&MySqlRow) -> Option<SchemaObject>,
+) -> SchemaPage {
+    let mut objects: Vec<SchemaObject> = rows.iter().filter_map(map).collect();
+    let has_more = objects.len() > limit;
+    objects.truncate(limit);
+    SchemaPage { objects, has_more }
 }
 
 fn command_result(rows_affected: u64) -> QueryResult {
@@ -1055,5 +1346,15 @@ mod tests {
     fn normalizes_identifiers() {
         assert_eq!(normalize_mysql_ident("`users`"), "users");
         assert_eq!(normalize_mysql_ident(" users "), "users");
+    }
+
+    #[test]
+    fn failed_max_execution_time_surfaces_a_capability_note() {
+        assert!(max_execution_time_notes(false, 10_000).is_empty());
+        let notes = max_execution_time_notes(true, 10_000);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].code, "mysql_max_execution_time_unavailable");
+        assert!(notes[0].message.contains("10000ms"));
+        assert!(notes[0].message.contains("NOT effective"));
     }
 }

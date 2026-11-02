@@ -15,6 +15,8 @@ use uuid::Uuid;
 ///   decimal type in sqlx, so it binds as TEXT (documented fallback).
 /// - `{"$json": …}`       → native JSON/JSONB (PG/MySQL); SQLite binds the
 ///   compact JSON text (documented fallback).
+/// - `{"$binary": "…"}`   → native BLOB/BYTEA; the value is base64 (standard
+///   alphabet) or hex when prefixed with `0x`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RichParam {
     Uuid(Uuid),
@@ -22,6 +24,7 @@ pub enum RichParam {
     DateTime(NaiveDateTime),
     Decimal(BigDecimal),
     Json(Value),
+    Binary(Vec<u8>),
 }
 
 /// Parse a JSON parameter into a [`RichParam`] when it carries a rich marker.
@@ -64,11 +67,42 @@ pub fn parse_rich_marker(p: &Value) -> Option<Result<RichParam, String>> {
                     .map_err(|e| format!("invalid $decimal parameter: {e}"))
             }),
         "$json" => Ok(RichParam::Json(val.clone())),
+        "$binary" => val
+            .as_str()
+            .ok_or_else(|| "$binary parameter must be a string".to_string())
+            .and_then(parse_binary_param)
+            .map(RichParam::Binary),
         other => Err(format!(
-            "unknown rich parameter marker '{other}' (supported: $uuid, $date, $datetime, $decimal, $json)"
+            "unknown rich parameter marker '{other}' (supported: $uuid, $date, $datetime, $decimal, $json, $binary)"
         )),
     };
     Some(parsed)
+}
+
+fn parse_binary_param(s: &str) -> Result<Vec<u8>, String> {
+    use base64::Engine;
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        if hex.len() % 2 != 0 {
+            return Err(
+                "invalid $binary parameter: hex form must have an even number of digits"
+                    .to_string(),
+            );
+        }
+        let mut out = Vec::with_capacity(hex.len() / 2);
+        for pair in hex.as_bytes().chunks_exact(2) {
+            let byte = std::str::from_utf8(pair)
+                .ok()
+                .and_then(|p| u8::from_str_radix(p, 16).ok())
+                .ok_or_else(|| {
+                    "invalid $binary parameter: hex form contains non-hex digits".to_string()
+                })?;
+            out.push(byte);
+        }
+        return Ok(out);
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode(s)
+        .map_err(|e| format!("invalid $binary parameter: {e} (expected base64 or 0x-hex)"))
 }
 
 fn parse_datetime_param(s: &str) -> Result<NaiveDateTime, String> {
@@ -98,6 +132,7 @@ fn json_to_sql_value(p: &Value) -> Result<SqlValue, String> {
             RichParam::DateTime(dt) => SqlValue::DateTime(dt),
             RichParam::Decimal(d) => SqlValue::BigDecimal(d),
             RichParam::Json(v) => SqlValue::Json(v),
+            RichParam::Binary(b) => SqlValue::Binary(b),
         });
     }
     Ok(match p {
@@ -163,6 +198,29 @@ mod tests {
                     .unwrap()
             )
         );
+    }
+
+    #[test]
+    fn rich_marker_binary_accepts_base64_and_hex() {
+        let b = parse_rich_marker(&json!({"$binary": "ZWRvYw=="}))
+            .expect("marker")
+            .expect("valid");
+        assert_eq!(b, RichParam::Binary(b"edoc".to_vec()));
+        let b = parse_rich_marker(&json!({"$binary": "0x65646f63"}))
+            .expect("marker")
+            .expect("valid");
+        assert_eq!(b, RichParam::Binary(b"edoc".to_vec()));
+        let err = parse_rich_marker(&json!({"$binary": "0xzz"}))
+            .expect("marker")
+            .unwrap_err();
+        assert!(err.contains("invalid $binary"), "{err}");
+        let err = parse_rich_marker(&json!({"$binary": 42}))
+            .expect("marker")
+            .unwrap_err();
+        assert!(err.contains("must be a string"), "{err}");
+
+        let bound = to_sql_values(&[json!({"$binary": "ZWRvYw=="})]).expect("bind");
+        assert_eq!(bound, vec![SqlValue::Binary(b"edoc".to_vec())]);
     }
 
     #[test]

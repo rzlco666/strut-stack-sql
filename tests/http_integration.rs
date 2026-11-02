@@ -23,7 +23,7 @@ use strut_stack_sql::tools::core::{
     handle_execute_sql, handle_search_objects, BatchQueryItem, ExecuteSqlParams,
     SearchObjectsParams,
 };
-use strut_stack_sql::tools::introspect::{describe_table, ObjectType};
+use strut_stack_sql::tools::introspect::{describe_table, schema_overview, ObjectType};
 use tower::ServiceExt;
 
 fn force_columnar_test_format() {
@@ -80,6 +80,9 @@ async fn sqlite_config(write_mode: WriteMode) -> AppConfig {
         max_bytes: 64 * 1024,
         query_timeout: Duration::from_secs(10),
         batch_concurrency: 8,
+        batch_max_statements: 50,
+        batch_timeout: Duration::from_secs(60),
+        batch_max_bytes: 1024 * 1024,
         fail_fast: false,
         deny_columns: vec![],
         default_source: "default".into(),
@@ -692,6 +695,51 @@ async fn describe_table_returns_columns() {
 }
 
 #[tokio::test]
+async fn ddl_through_execute_sql_invalidates_schema_cache() {
+    let config = Arc::new(sqlite_config(WriteMode::AllowDdl).await);
+    let driver = config.source(None).unwrap().driver().await.expect("driver");
+    exec_sql_ok(
+        &config,
+        ExecuteSqlParams {
+            sql: Some("CREATE TABLE cache_first (id INTEGER)".into()),
+            params: None,
+            queries: None,
+            page_offset: None,
+            page_size: None,
+            source: None,
+            format: None,
+        },
+    )
+    .await;
+    let before = schema_overview(&driver, Some("default"), Some("main"))
+        .await
+        .expect("overview before");
+    assert_eq!(before.meta.n_tables, 1);
+
+    exec_sql_ok(
+        &config,
+        ExecuteSqlParams {
+            sql: Some("CREATE TABLE cache_second (id INTEGER)".into()),
+            params: None,
+            queries: None,
+            page_offset: None,
+            page_size: None,
+            source: None,
+            format: None,
+        },
+    )
+    .await;
+
+    let after = schema_overview(&driver, Some("default"), Some("main"))
+        .await
+        .expect("overview after");
+    assert_eq!(
+        after.meta.n_tables, 2,
+        "successful DDL through execute_sql must invalidate the schema cache"
+    );
+}
+
+#[tokio::test]
 async fn search_objects_finds_table() {
     let config = Arc::new(sqlite_config(WriteMode::AllowDdl).await);
     seed_users(&config).await;
@@ -754,6 +802,9 @@ async fn postgres_config() -> Option<AppConfig> {
         max_bytes: 64 * 1024,
         query_timeout: Duration::from_secs(10),
         batch_concurrency: 8,
+        batch_max_statements: 50,
+        batch_timeout: Duration::from_secs(60),
+        batch_max_bytes: 1024 * 1024,
         fail_fast: false,
         deny_columns: vec![],
         default_source: "default".into(),
@@ -846,6 +897,9 @@ async fn mysql_config() -> Option<AppConfig> {
         max_bytes: 64 * 1024,
         query_timeout: Duration::from_secs(10),
         batch_concurrency: 8,
+        batch_max_statements: 50,
+        batch_timeout: Duration::from_secs(60),
+        batch_max_bytes: 1024 * 1024,
         fail_fast: false,
         deny_columns: vec![],
         default_source: "default".into(),
