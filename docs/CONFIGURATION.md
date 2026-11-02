@@ -164,6 +164,7 @@ strut-stack-sql --max-rows 50 --max-bytes 32768
 strut-stack-sql --pool-size 16 --query-timeout 15 --connect-timeout 2
 strut-stack-sql --batch-concurrency 4 --fail-fast
 strut-stack-sql --deny-columns password_hash,totp_secret
+strut-stack-sql --allow-explain-analyze     # advisor may run EXPLAIN ANALYZE (executes SQL)
 strut-stack-sql --workspace /path/to/project   # chdir + .env walk + SQLite relative paths
 strut-stack-sql --eager-connect                # connect at startup (default: lazy)
 strut-stack-sql --ephemeral                    # acknowledge the in-memory SQLite fallback

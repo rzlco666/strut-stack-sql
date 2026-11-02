@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::ErrorData as McpError;
@@ -14,7 +15,9 @@ use strut_sql_guard::{classify_sql, SqlClass};
 use crate::exec::{
     execute_batch, execute_query, BatchLimits, BatchResult, ExecError, ExecOptions, QueryResult,
 };
-use crate::introspect::{search_objects, ObjectType};
+use crate::history;
+use crate::intel;
+use crate::introspect::{search_objects_ranked, ObjectType};
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchObjectsParams {
@@ -33,6 +36,9 @@ pub struct SearchObjectsParams {
     pub offset: Option<usize>,
     #[serde(default)]
     pub limit: Option<usize>,
+    /// Include the relevance score on each object (default: compact output).
+    #[serde(default)]
+    pub include_score: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -89,6 +95,10 @@ pub struct AnalyzeQueryParams {
     pub params: Option<Vec<Value>>,
     #[serde(default)]
     pub source: Option<String>,
+    /// Run EXPLAIN ANALYZE (executes the statement). Requires the server
+    /// opt-in --allow-explain-analyze; never enabled implicitly.
+    #[serde(default)]
+    pub analyze: Option<bool>,
 }
 
 pub fn exec_options(config: &AppConfig) -> ExecOptions {
@@ -109,12 +119,25 @@ pub fn exec_options(config: &AppConfig) -> ExecOptions {
 /// database execution failures must not share one code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolErrorKind {
-    /// Caller supplied something invalid (bad params, guard denial,
-    /// unknown source) → `invalid_params`; retrying unchanged is pointless.
+    /// Caller supplied something invalid (bad params, unknown source).
     Validation,
-    /// The database/driver failed (connect, execute) → `internal_error`;
-    /// retrying later may succeed.
-    Db,
+    /// Authorization policy denied the invocation.
+    Authorization,
+    /// The SQL guard denied the statement.
+    Guard,
+    /// The database/driver failed (connect, execute); retryable.
+    Execution,
+}
+
+impl ToolErrorKind {
+    fn wire(self) -> (&'static str, i32, bool) {
+        match self {
+            Self::Validation => ("invalid_params", -32602, false),
+            Self::Authorization => ("authorization_denied", -32010, false),
+            Self::Guard => ("guard_denied", -32011, false),
+            Self::Execution => ("execution_error", -32012, true),
+        }
+    }
 }
 
 pub fn tool_error(msg: impl Into<String>) -> McpError {
@@ -124,17 +147,21 @@ pub fn tool_error(msg: impl Into<String>) -> McpError {
 pub fn tool_error_code(msg: impl Into<String>, kind: ToolErrorKind) -> McpError {
     // Never leak credentials embedded in URLs inside error text.
     let msg = redact_url(&msg.into());
-    match kind {
-        ToolErrorKind::Validation => McpError::invalid_params(msg, None),
-        ToolErrorKind::Db => McpError::internal_error(msg, None),
-    }
+    let (wire_code, json_rpc_code, retryable) = kind.wire();
+    let data = serde_json::json!({
+        "code": wire_code,
+        "message": msg,
+        "retryable": retryable,
+    });
+    McpError::new(rmcp::model::ErrorCode(json_rpc_code), msg, Some(data))
 }
 
 /// Map an execution-layer error to its tool error kind.
-fn exec_error_kind(err: &ExecError) -> ToolErrorKind {
+pub(crate) fn exec_error_kind(err: &ExecError) -> ToolErrorKind {
     match err {
-        ExecError::Guard(_) | ExecError::Limit(_) => ToolErrorKind::Validation,
-        ExecError::Database(_) | ExecError::Other(_) => ToolErrorKind::Db,
+        ExecError::Guard(_) => ToolErrorKind::Guard,
+        ExecError::Limit(_) => ToolErrorKind::Validation,
+        ExecError::Database(_) | ExecError::Other(_) => ToolErrorKind::Execution,
     }
 }
 
@@ -188,11 +215,11 @@ pub async fn handle_search_objects(
     let driver = source
         .driver()
         .await
-        .map_err(|e| tool_error_code(e.to_string(), ToolErrorKind::Db))?;
+        .map_err(|e| tool_error_code(e.to_string(), ToolErrorKind::Execution))?;
     let offset = params.offset.unwrap_or(0);
     let limit = params.limit.unwrap_or(50).min(200);
 
-    let result = search_objects(
+    let result = search_objects_ranked(
         &driver,
         Some(&source.name),
         params.object_type,
@@ -200,9 +227,10 @@ pub async fn handle_search_objects(
         params.schema.as_deref(),
         offset,
         limit,
+        params.include_score.unwrap_or(false),
     )
     .await
-    .map_err(|e| tool_error_code(e, ToolErrorKind::Db))?;
+    .map_err(|e| tool_error_code(e, ToolErrorKind::Execution))?;
 
     json_result(&result)
 }
@@ -237,7 +265,7 @@ pub async fn handle_execute_sql(
         let driver = source
             .driver()
             .await
-            .map_err(|e| tool_error_code(e.to_string(), ToolErrorKind::Db))?;
+            .map_err(|e| tool_error_code(e.to_string(), ToolErrorKind::Execution))?;
         let batch_items: Vec<(String, Vec<Value>)> =
             queries.into_iter().map(|q| q.into_sql_params()).collect();
         let batch_sqls: Vec<String> = batch_items.iter().map(|(sql, _)| sql.clone()).collect();
@@ -261,7 +289,7 @@ pub async fn handle_execute_sql(
             invalidate_after_sql(&source.name, engine, sql, result.ok);
         }
         return Ok(CallToolResult::success(vec![ContentBlock::text(
-            serde_json::to_string(&format_batch_result(&batch, format)).unwrap_or_default(),
+            to_json_text(&format_batch_result(&batch, format)),
         )]));
     }
 
@@ -276,13 +304,44 @@ pub async fn handle_execute_sql(
     let driver = source
         .driver()
         .await
-        .map_err(|e| tool_error_code(e.to_string(), ToolErrorKind::Db))?;
+        .map_err(|e| tool_error_code(e.to_string(), ToolErrorKind::Execution))?;
+    let started = Instant::now();
     let result = execute_query(&driver, &sql, &query_params, &opts)
         .await
         .map_err(|e| tool_error_code(e.to_string(), exec_error_kind(&e)))?;
+    let elapsed_ms = started.elapsed().as_millis() as u64;
     invalidate_after_sql(&source.name, driver.kind(), &sql, result.ok);
+
+    let mut payload = format_query_result(&result, format);
+    let select_like = classify_sql(&sql, driver.kind())
+        .map(|class| class.is_select_like())
+        .unwrap_or(false);
+    if config.full_tools && select_like {
+        let patterns =
+            intel::execution_anti_patterns(&driver, Some(&source.name), None, &sql).await;
+        if !patterns.is_empty() {
+            payload["anti_patterns"] = serde_json::to_value(&patterns).unwrap_or_default();
+        }
+    }
+    if config.query_history {
+        let label = classify_sql(&sql, driver.kind())
+            .map(|class| class.label().to_string())
+            .unwrap_or_else(|_| "UNKNOWN".to_string());
+        let rows = result.data.as_ref().map(|d| d.meta.n).unwrap_or(0);
+        let suggestions = history::record(
+            &config.principal_id,
+            &sql,
+            &label,
+            elapsed_ms,
+            rows,
+            &query_params,
+        );
+        if !suggestions.is_empty() {
+            payload["suggestions"] = serde_json::to_value(&suggestions).unwrap_or_default();
+        }
+    }
     Ok(CallToolResult::success(vec![ContentBlock::text(
-        serde_json::to_string(&format_query_result(&result, format)).unwrap_or_default(),
+        to_json_text(&payload),
     )]))
 }
 
@@ -297,6 +356,13 @@ pub async fn handle_analyze_query(
         ));
     }
 
+    let analyze = params.analyze.unwrap_or(false);
+    if analyze && !config.allow_explain_analyze {
+        return Err(tool_error(
+            "analyze:true requires the server opt-in --allow-explain-analyze (EXPLAIN ANALYZE executes the statement)",
+        ));
+    }
+
     let source = config
         .source(params.source.as_deref())
         .map_err(|e| tool_error(e.to_string()))?;
@@ -304,17 +370,39 @@ pub async fn handle_analyze_query(
     let driver = source
         .driver()
         .await
-        .map_err(|e| tool_error_code(e.to_string(), ToolErrorKind::Db))?;
+        .map_err(|e| tool_error_code(e.to_string(), ToolErrorKind::Execution))?;
 
-    let summary = crate::explain::analyze_query(
+    let summary = crate::explain::analyze_query_with_options(
         &driver,
         &params.sql,
         &params.params.unwrap_or_default(),
         config.write_mode,
         config.query_timeout,
+        crate::explain::AnalyzeOptions {
+            analyze,
+            include_anti_patterns: config.full_tools,
+        },
     )
     .await
-    .map_err(|e| tool_error_code(e.to_string(), ToolErrorKind::Db))?;
+    .map_err(|e| match e {
+        crate::explain::ExplainError::Guard(g) => {
+            tool_error_code(g.to_string(), ToolErrorKind::Guard)
+        }
+        crate::explain::ExplainError::Database(message) => {
+            tool_error_code(message, ToolErrorKind::Execution)
+        }
+        crate::explain::ExplainError::Other(message) => {
+            let kind = if message.contains("only supports")
+                || message.contains("not supported")
+                || message.contains("invalid explain")
+            {
+                ToolErrorKind::Validation
+            } else {
+                ToolErrorKind::Execution
+            };
+            tool_error_code(message, kind)
+        }
+    })?;
 
     json_result(&summary)
 }

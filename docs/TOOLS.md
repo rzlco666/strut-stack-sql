@@ -16,6 +16,7 @@ Progressive schema discovery.
 | `source` | string? | multi-source name |
 | `offset` | number? | default 0; an offset past the end returns an empty page, never an error |
 | `limit` | number? | default 50, max 200 |
+| `include_score` | bool? | include relevance score per object; ranking is exact > prefix > substring > comment match |
 
 ### `execute_sql`
 
@@ -118,12 +119,20 @@ On MySQL, `total_cost` and `plan_rows` are best-effort (aggregated from plan nod
 {
   "engine": "postgresql",
   "query": "SELECT ...",
+  "analyze": false,
   "total_cost": 12.5,
   "plan_rows": 1000,
-  "warnings": ["Sequential scan detected — consider adding an index"],
-  "nodes": [{ "node_type": "Seq Scan", "relation": "users", "issues": ["full table scan"] }]
+  "nodes": [{ "node_type": "Seq Scan", "relation": "users", "rows": 50000, "filter": "(status = 'open'::text)" }],
+  "issues": [{ "severity": "warning", "code": "full_scan", "message": "full scan over ~50000 rows", "suggestion": "Add an index ..." }],
+  "index_suggestions": [{ "sql": "CREATE INDEX ...;", "table": "users", "columns": ["status"], "plan_node": "Seq Scan", "estimated_rows": 50000, "confidence": "high", "reason": "sequential scan ..." }]
 }
 ```
+
+Pass `analyze: true` to run `EXPLAIN ANALYZE` (PostgreSQL/MySQL only). It
+executes the statement and additionally requires the server opt-in
+`--allow-explain-analyze` (or `STRUT_STACK_SQL_ALLOW_EXPLAIN_ANALYZE=1`).
+`index_suggestions` are advice text; the advisor never executes DDL.
+`issues[].severity` is `info` | `warning` | `critical`.
 
 ## Full tools (`--full-tools`)
 
@@ -137,7 +146,10 @@ Introspection (always when `--full-tools`):
 | `describe_table` | Columns + indexes (`unique` + `columns[]`; PG domain types via `udt_name`) |
 | `list_indexes` | Flat indexes: `{schema?,table?,name,columns,unique}` (no nested `indexes[]`, no `CREATE INDEX` blob) |
 | `list_foreign_keys` | Foreign keys for schema/table |
-| `schema_overview` | One-shot: tables + approx row counts (`meta.row_counts=approx`; omit if never-analyzed / unknown — do not treat missing/`0`-after-ANALYZE as exact; use `COUNT(*)` for exact) + FKs (cap 200 tables) |
+| `schema_overview` | One-shot: tables + approx row counts (`meta.row_counts=approx`; omit if never-analyzed / unknown — do not treat missing/`0`-after-ANALYZE as exact; use `COUNT(*)` for exact) + FKs + per-table `fk_in`/`fk_out`, `hub` and `orphan` markers (`meta.hubs`, `meta.orphans`); cap 200 tables stated as `meta.truncated` |
+| `get_relationship_graph` | `{schema?, source?, table?, depth?}` → `{nodes, edges, meta}` from FK metadata; `depth` default 2, max 4 (focus table only) |
+| `suggest_joins` | `{tables: [2..8], schema?, source?}` → shortest FK paths with copy-ready `on` conditions and `confidence`; no-FK-path same-name candidates are marked `guess: true` |
+| `get_schema_context` | `{schema?, source?, token_budget? (default 4000, max 32000), tables?, keyword?}` → deterministic compact digest (`context`) with `meta {approx_tokens, truncated, tables_included, tables_total, tables_omitted, columns_omitted, relations_omitted}`; expands around focus tables via the FK graph |
 
 DDL tools appear **only** when `--full-tools` **and** `--allow-ddl` (hidden in read-only / writes-only to save tokens):
 
@@ -179,11 +191,24 @@ fell into the reject bucket without any doc saying so.)
 ### DDL — requires `--allow-ddl`
 
 - `CREATE TABLE` / `CREATE VIEW` / `CREATE INDEX` / `CREATE SCHEMA` /
-  `CREATE DATABASE` / `CREATE FUNCTION`
-- `DROP …`, `ALTER TABLE`, `ALTER INDEX`, `TRUNCATE`
+  `CREATE DATABASE`; `CREATE FUNCTION` is PostgreSQL-only under the current
+  parser
+- `CREATE SEQUENCE` (PostgreSQL) and `COMMENT ON` (PostgreSQL)
+- `DROP …`, `ALTER TABLE`, `ALTER INDEX`, `TRUNCATE` (not SQLite)
 - `GRANT` / `REVOKE` are their own class (**Admin**, since 1.1.0) and need
   more than `--allow-ddl`: the additional explicit `--allow-grants` opt-in
   (see [SECURITY.md](SECURITY.md)).
+
+### Admin — requires `--allow-grants`
+
+- `VACUUM`, `ANALYZE` (maintenance; explicit Admin grant + `--allow-grants`)
+
+### Read-only engine pragmas
+
+- SQLite read pragmas from the allowlist (`PRAGMA table_info('t')`,
+  `index_list`, `foreign_key_list`, `database_list`, `page_count`, …).
+  State-changing pragmas are denied. See [CAPABILITIES.md](CAPABILITIES.md)
+  for the exact per-engine matrix.
 
 ### Always rejected — in every mode, including `--allow-ddl`
 
@@ -198,17 +223,26 @@ fell into the reject bucket without any doc saying so.)
 | `SELECT … INTO`, `INTO OUTFILE`, `INTO DUMPFILE` in read modes | Creates tables/files; not a read |
 | Dangerous functions (per-engine denylist: `pg_read_file`, `LOAD_FILE`, `readfile`, `nextval`/`setval`, `pg_sleep`, `SLEEP`, `BENCHMARK`, …) | File access, sequence mutation, or DoS primitives |
 
-### Not supported (rejected as unknown statement type)
+### Not supported
 
-These fall into the guard's deny-by-default bucket. They are listed here so
-the rejection is a documented contract, not a surprise:
+The per-engine supported/not-supported matrix lives in
+[CAPABILITIES.md](CAPABILITIES.md) and is enforced by
+`crates/strut-sql-guard/src/capabilities.rs`. Unsupported cells are rejected
+before execution; there is no silent subset.
 
-- `CREATE SEQUENCE` / `CREATE TYPE` / `CREATE EXTENSION` / `CREATE ROLE`
-- `COMMENT`, `VACUUM`, `ANALYZE` (as a standalone statement), `SET`, `USE`, `PRAGMA` (the server's own introspection uses PRAGMAs internally; agent-issued PRAGMAs are not exposed)
+## Error contract
 
-If you need one of these, run it with a regular database client — the MCP
-server deliberately covers the query/introspection/DDL surface agents need,
-not full database administration.
+Every tool failure carries `data: {code, message, retryable}`:
+
+| Category | JSON-RPC code | `code` | Retryable |
+|---|---|---|---|
+| Validation (bad params, unknown source) | -32602 | `invalid_params` | no |
+| Authorization policy denial | -32010 | `authorization_denied` | no |
+| Guard denial / blocked statement | -32011 | `guard_denied` | no |
+| Execution / connection failure | -32012 | `execution_error` | yes |
+
+Successful calls never return an `{ok:false}` payload; batch items keep their
+per-item `{ok, data|error}` shape because a batch is fail-soft by design.
 
 ## Caps
 
@@ -221,3 +255,5 @@ not full database administration.
 | `--pool-size` | 10 | sqlx pool per source |
 | `--connect-timeout` | 2s | sqlx pool acquire / handshake after TCP preflight |
 | `--deny-columns` | (empty) | Opt-in comma-separated column names to redact in results |
+| `--allow-explain-analyze` | off | Allow `analyze_query_performance(analyze=true)` (executes the statement) |
+| `STRUT_STACK_SQL_QUERY_HISTORY` | off | Local-principal session history; per-principal opt-in is `query_history = true` on a `[[grants]]` entry |

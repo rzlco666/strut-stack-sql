@@ -6,8 +6,12 @@ use serde::{Deserialize, Serialize};
 use strut_sql_core::config::{source_endpoint, AppConfig};
 use strut_sql_driver_api::EngineDriver;
 
-use crate::core::{json_result, tool_error};
+use crate::core::{json_result, tool_error, tool_error_code, ToolErrorKind};
 use crate::introspect;
+
+fn catalog_error(message: String) -> rmcp::ErrorData {
+    tool_error_code(message, ToolErrorKind::Execution)
+}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SourceParams {
@@ -74,7 +78,7 @@ async fn source_driver(
     let driver = source
         .driver()
         .await
-        .map_err(|e| tool_error(e.to_string()))?;
+        .map_err(|e| tool_error_code(e.to_string(), ToolErrorKind::Execution))?;
     Ok((driver, source.name.clone(), source.url.clone()))
 }
 
@@ -128,7 +132,7 @@ pub async fn handle_list_schemas(
     let (driver, _, _) = source_driver(config, params.source.as_deref()).await?;
     let objects = introspect::list_schemas(&driver, None)
         .await
-        .map_err(|e| tool_error(e.to_string()))?;
+        .map_err(catalog_error)?;
     json_result(&objects)
 }
 
@@ -148,7 +152,7 @@ pub async fn handle_list_tables(
         limit,
     )
     .await
-    .map_err(|e| tool_error(e.to_string()))?;
+    .map_err(catalog_error)?;
     json_result(&ListTablesResult {
         meta: ListTablesMeta {
             n: page.meta.n,
@@ -167,7 +171,7 @@ pub async fn handle_describe_table(
     let (driver, _, _) = source_driver(config, params.source.as_deref()).await?;
     let object = introspect::describe_table(&driver, params.schema.as_deref(), &params.table)
         .await
-        .map_err(|e| tool_error(e.to_string()))?;
+        .map_err(catalog_error)?;
     json_result(&object)
 }
 
@@ -184,7 +188,7 @@ pub async fn handle_list_indexes(
         params.keyword.as_deref(),
     )
     .await
-    .map_err(|e| tool_error(e.to_string()))?;
+    .map_err(catalog_error)?;
     json_result(&listed)
 }
 
@@ -214,7 +218,7 @@ pub async fn handle_list_foreign_keys(
     let fks =
         introspect::list_foreign_keys(&driver, params.schema.as_deref(), params.table.as_deref())
             .await
-            .map_err(|e| tool_error(e.to_string()))?;
+            .map_err(catalog_error)?;
     json_result(&fks)
 }
 
@@ -226,6 +230,6 @@ pub async fn handle_schema_overview(
     let overview =
         introspect::schema_overview(&driver, Some(&source_name), params.schema.as_deref())
             .await
-            .map_err(|e| tool_error(e.to_string()))?;
+            .map_err(catalog_error)?;
     json_result(&overview)
 }

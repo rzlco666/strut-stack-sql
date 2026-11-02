@@ -1,5 +1,7 @@
+mod capabilities;
 mod classify;
 mod params;
+mod patterns;
 
 use serde_json::Value;
 use sqlparser::ast::{
@@ -50,11 +52,13 @@ impl WriteMode {
     }
 }
 
+pub use capabilities::{CapabilityRow, CAPABILITY_MATRIX};
 pub use classify::{SqlClass, StmtClass};
 pub use params::{
     count_pg_numbered_placeholders, count_question_mark_placeholders, placeholder_count,
     rewrite_placeholders_for_postgres, validate_param_count,
 };
+pub use patterns::{detect_anti_patterns, AntiPattern, PatternContext};
 
 #[derive(Debug, Clone, Default)]
 pub struct PrepareOptions {
@@ -102,13 +106,16 @@ fn reject_file_export_syntax(sql: &str) -> Result<(), GuardError> {
     Ok(())
 }
 
-/// Parse a single statement with the engine's dialect and classify it.
-/// Used by the structured DDL tools (SQL-SEC-14) to verify that SQL they
-/// assembled really is the statement class they claim to run.
-pub fn classify_sql(sql: &str, engine: EngineKind) -> Result<StmtClass, GuardError> {
+/// Parse exactly one statement with the engine's dialect (no classification).
+/// Shared by the guard, anti-pattern detectors and the advisor.
+pub(crate) fn parse_single_statement(
+    sql: &str,
+    engine: EngineKind,
+) -> Result<Statement, GuardError> {
     reject_file_export_syntax(sql)?;
-    let dialect: Box<dyn Dialect> = dialect_for(engine);
-    let statements = Parser::parse_sql(dialect.as_ref(), sql)
+    let normalized = normalize_sql_for_engine(sql, engine);
+    let dialect = dialect_for(engine);
+    let statements = Parser::parse_sql(dialect.as_ref(), &normalized)
         .map_err(|e| GuardError::Denied(format!("parse error: {e}")))?;
     if statements.len() != 1 {
         return Err(GuardError::Denied(format!(
@@ -116,7 +123,29 @@ pub fn classify_sql(sql: &str, engine: EngineKind) -> Result<StmtClass, GuardErr
             statements.len()
         )));
     }
-    classify::classify(&statements[0])
+    statements
+        .into_iter()
+        .next()
+        .ok_or_else(|| GuardError::Denied("empty query".into()))
+}
+
+/// Parse and classify without applying the engine capability matrix. Used by
+/// authorization to determine the required tier even for statements the
+/// engine cannot run (so the denial has the right tier/gate).
+pub fn classify_sql_raw(sql: &str, engine: EngineKind) -> Result<StmtClass, GuardError> {
+    let stmt = parse_single_statement(sql, engine)?;
+    classify::classify(&stmt)
+}
+
+/// Parse a single statement with the engine's dialect and classify it.
+/// Used by the structured DDL tools (SQL-SEC-14) to verify that SQL they
+/// assembled really is the statement class they claim to run.
+pub fn classify_sql(sql: &str, engine: EngineKind) -> Result<StmtClass, GuardError> {
+    let stmt = parse_single_statement(sql, engine)?;
+    let class = classify::classify(&stmt)?;
+    capabilities::unsupported_statement(engine, &stmt)
+        .map(GuardError::Denied)
+        .map_or(Ok(class), Err)
 }
 
 fn dialect_for(engine: EngineKind) -> Box<dyn Dialect> {
@@ -171,6 +200,9 @@ pub fn validate_and_prepare_with_options(
     }
 
     let stmt = statements.into_iter().next().expect("checked len");
+    if let Some(message) = capabilities::unsupported_statement(engine, &stmt) {
+        return Err(GuardError::Denied(message));
+    }
     let class = classify::classify(&stmt)?;
     check_query_complexity(&stmt)?;
     // SQL-SEC-03/04: dangerous functions are denied in EVERY mode — this is

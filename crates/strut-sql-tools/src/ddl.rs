@@ -8,7 +8,9 @@ use strut_sql_core::config::{AppConfig, WriteMode};
 use strut_sql_driver_api::EngineKind;
 use strut_sql_guard::{classify_sql, validate_and_prepare, SqlClass};
 
-use crate::core::{exec_options, json_result, tool_error};
+use crate::core::{
+    exec_error_kind, exec_options, json_result, tool_error, tool_error_code, ToolErrorKind,
+};
 use crate::exec::{execute_query, ExecOptions};
 
 #[derive(Debug, Clone, Copy, Deserialize, JsonSchema, Serialize)]
@@ -241,8 +243,9 @@ pub async fn handle_schema_mutate(
     params: SchemaMutateParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     if !config.write_mode.allows_ddl() {
-        return Err(tool_error(
+        return Err(tool_error_code(
             "schema_mutate requires --allow-ddl on the server",
+            ToolErrorKind::Guard,
         ));
     }
 
@@ -252,30 +255,20 @@ pub async fn handle_schema_mutate(
     let driver = source
         .driver()
         .await
-        .map_err(|e| tool_error(e.to_string()))?;
+        .map_err(|e| tool_error_code(e.to_string(), ToolErrorKind::Execution))?;
     let engine = driver.kind();
 
     let sql = build_ddl_sql(&params, engine)?;
 
     validate_and_prepare(&sql, &[], engine, WriteMode::AllowDdl, config.max_rows)
-        .map_err(|e| tool_error(e.to_string()))?;
+        .map_err(|e| tool_error_code(e.to_string(), ToolErrorKind::Guard))?;
 
     let mut opts: ExecOptions = exec_options(config);
     opts.write_mode = WriteMode::AllowDdl;
 
     let result = execute_query(&driver, &sql, &[], &opts)
         .await
-        .map_err(|e| tool_error(e.to_string()))?;
-
-    if !result.ok {
-        return json_result(&SchemaMutateResult {
-            ok: false,
-            action: params.action,
-            table: params.table,
-            rows_affected: None,
-            error: result.error,
-        });
-    }
+        .map_err(|e| tool_error_code(e.to_string(), exec_error_kind(&e)))?;
 
     let rows_affected = result.data.as_ref().and_then(|d| d.meta.rows_affected);
 

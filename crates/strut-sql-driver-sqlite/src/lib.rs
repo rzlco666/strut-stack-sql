@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use strut_sql_driver_api::{
     BoundQuery, ColumnInfo, ColumnMeta, ConnectOptions, DriverError, EngineDriver, EngineKind,
     ForeignKeyInfo, IndexInfo, IndexPage, ObjectType, QueryMeta, QueryResult, RoutineInfo,
-    SchemaObject, SchemaPage, SqlValue, TableInfo, TableRowCount,
+    RowEstimateKind, SchemaObject, SchemaPage, SqlValue, TableInfo, TableRowCount, TableStats,
 };
 
 pub struct SqliteDriver {
@@ -155,6 +155,7 @@ impl EngineDriver for SqliteDriver {
                     table: None,
                     data_type: None,
                     nullable: None,
+                    comment: None,
                 })
             })
             .collect())
@@ -180,6 +181,7 @@ impl EngineDriver for SqliteDriver {
                     table: None,
                     data_type: None,
                     nullable: None,
+                    comment: None,
                 })
             })
             .collect())
@@ -188,7 +190,7 @@ impl EngineDriver for SqliteDriver {
     async fn list_columns(&self, schema: Option<&str>) -> Result<Vec<SchemaObject>, DriverError> {
         let schema_name = resolve_sqlite_schema(schema);
         let rows = sqlx::query(
-            "SELECT m.name AS table_name, p.name, p.type, p.notnull \
+            "SELECT m.name AS table_name, p.name, p.type, p.\"notnull\" \
              FROM sqlite_master AS m, pragma_table_info(m.name) AS p \
              WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%' \
              ORDER BY m.name, p.cid",
@@ -210,6 +212,7 @@ impl EngineDriver for SqliteDriver {
                     table: Some(table),
                     data_type: Some(data_type),
                     nullable: Some(notnull == 0),
+                    comment: None,
                 })
             })
             .collect())
@@ -311,6 +314,7 @@ impl EngineDriver for SqliteDriver {
                 table: None,
                 data_type: None,
                 nullable: None,
+                comment: None,
             })
         }))
     }
@@ -324,7 +328,7 @@ impl EngineDriver for SqliteDriver {
     ) -> Result<SchemaPage, DriverError> {
         let schema_name = resolve_sqlite_schema(schema);
         let sql = format!(
-            "SELECT m.name AS table_name, p.name, p.type, p.notnull \
+            "SELECT m.name AS table_name, p.name, p.type, p.\"notnull\" \
              FROM {}.sqlite_master AS m, pragma_table_info(m.name) AS p \
              WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%' \
                AND (? IS NULL \
@@ -354,6 +358,7 @@ impl EngineDriver for SqliteDriver {
                 table: Some(table),
                 data_type: Some(data_type),
                 nullable: Some(notnull == 0),
+                comment: None,
             })
         }))
     }
@@ -383,13 +388,82 @@ impl EngineDriver for SqliteDriver {
         &self,
         schema: Option<&str>,
     ) -> Result<Vec<TableRowCount>, DriverError> {
+        let schema_name = resolve_sqlite_schema(schema).to_string();
+        let stat_sql = format!(
+            "SELECT tbl, stat FROM {}.sqlite_stat1",
+            sqlite_quote_ident(&schema_name)
+        );
+        let mut estimates: BTreeMap<String, i64> = BTreeMap::new();
+        if let Ok(rows) = sqlx::query(&stat_sql).fetch_all(&self.pool).await {
+            for row in &rows {
+                let table: String = row.try_get(0).unwrap_or_default();
+                let stat: String = row.try_get(1).unwrap_or_default();
+                if let Some(first) = stat.split_whitespace().next() {
+                    if let Ok(n) = first.parse::<i64>() {
+                        estimates.insert(table, n);
+                    }
+                }
+            }
+        }
         Ok(self
             .list_tables(schema)
             .await?
             .into_iter()
-            .map(|o| TableRowCount {
-                name: o.name,
-                approx_rows: None,
+            .map(|o| {
+                let approx_rows = estimates.get(&o.name).copied();
+                TableRowCount {
+                    name: o.name,
+                    approx_rows,
+                }
+            })
+            .collect())
+    }
+
+    async fn table_stats(&self, schema: Option<&str>) -> Result<Vec<TableStats>, DriverError> {
+        let schema_name = resolve_sqlite_schema(schema).to_string();
+        let tables = self.list_tables(Some(&schema_name)).await?;
+        let indexes = self.list_indexes(Some(&schema_name), None).await?;
+        // sqlite_stat1 only exists after ANALYZE; absence is not an error.
+        let stat_sql = format!(
+            "SELECT tbl, stat FROM {}.sqlite_stat1",
+            sqlite_quote_ident(&schema_name)
+        );
+        let stat_rows = sqlx::query(&stat_sql).fetch_all(&self.pool).await.ok();
+
+        let mut estimates: BTreeMap<String, i64> = BTreeMap::new();
+        if let Some(rows) = stat_rows {
+            for row in &rows {
+                let table: String = row.try_get(0).unwrap_or_default();
+                let stat: String = row.try_get(1).unwrap_or_default();
+                if let Some(first) = stat.split_whitespace().next() {
+                    if let Ok(n) = first.parse::<i64>() {
+                        estimates.insert(table, n);
+                    }
+                }
+            }
+        }
+
+        Ok(tables
+            .into_iter()
+            .map(|o| {
+                let approx_rows = estimates.get(&o.name).copied();
+                let table_indexes = indexes
+                    .iter()
+                    .filter(|i| i.table == o.name)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                TableStats {
+                    table: o.name,
+                    approx_rows,
+                    row_estimate: if approx_rows.is_some() {
+                        RowEstimateKind::CatalogStats
+                    } else {
+                        RowEstimateKind::Unavailable
+                    },
+                    table_bytes: None,
+                    index_bytes: None,
+                    indexes: table_indexes,
+                }
             })
             .collect())
     }

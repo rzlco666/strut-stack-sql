@@ -109,6 +109,25 @@ pub fn classify(stmt: &Statement) -> Result<StmtClass, crate::GuardError> {
         Statement::CreateSchema { .. } => Ok(ddl("CREATE SCHEMA")),
         Statement::CreateDatabase { .. } => Ok(ddl("CREATE DATABASE")),
         Statement::CreateFunction(_) => Ok(ddl("CREATE FUNCTION")),
+        // PRD-F3-09: explicit classes for the statements v1 silently
+        // rejected as `Other`.
+        Statement::CreateSequence { .. } => Ok(ddl("CREATE SEQUENCE")),
+        Statement::Comment { .. } => Ok(ddl("COMMENT")),
+        // Maintenance statements are Admin-tier: they are operational
+        // commands, not schema changes, and need an explicit Admin grant.
+        Statement::Vacuum(_) => Ok(admin("VACUUM")),
+        Statement::Analyze(_) => Ok(admin("ANALYZE")),
+        Statement::Pragma { name, is_eq, .. } => {
+            if !*is_eq && pragma_is_read_only(name) {
+                Ok(StmtClass {
+                    class: SqlClass::Read,
+                    label: "PRAGMA".into(),
+                    explain_analyze: false,
+                })
+            } else {
+                Ok(other("PRAGMA"))
+            }
+        }
         // SQL-SEC-13 fix: privilege management gets its own class.
         Statement::Grant { .. } => Ok(admin("GRANT")),
         Statement::Revoke { .. } => Ok(admin("REVOKE")),
@@ -412,6 +431,41 @@ fn other(label: &str) -> StmtClass {
         label: label.into(),
         explain_analyze: false,
     }
+}
+
+/// SQLite read-only pragmas this server exposes. Anything not listed — and
+/// any `PRAGMA name = value` assignment — is denied as `Other`.
+fn pragma_is_read_only(name: &sqlparser::ast::ObjectName) -> bool {
+    const READ_ONLY: &[&str] = &[
+        "database_list",
+        "table_info",
+        "table_xinfo",
+        "table_list",
+        "index_list",
+        "index_info",
+        "index_xinfo",
+        "foreign_key_list",
+        "collation_list",
+        "function_list",
+        "module_list",
+        "compile_options",
+        "pragma_list",
+        "user_version",
+        "schema_version",
+        "page_count",
+        "page_size",
+        "freelist_count",
+        "encoding",
+        "journal_mode",
+        "synchronous",
+        "cache_size",
+        "foreign_keys",
+    ];
+    let Some(last) = name.0.last() else {
+        return false;
+    };
+    let ident = last.to_string().to_ascii_lowercase();
+    READ_ONLY.contains(&ident.as_str())
 }
 
 #[cfg(test)]

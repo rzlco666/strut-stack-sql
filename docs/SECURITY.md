@@ -20,7 +20,8 @@ flowchart LR
 
 - Dialects: `PostgreSqlDialect` / `MySqlDialect` / `SQLiteDialect`
 - Reject empty / multi-statement strings
-- Classify: Read / Dml / Ddl / Txn / Other (unknown → deny)
+- Classify: Read / Dml / Ddl / Admin / Txn / Other (unknown → deny)
+- Per-engine capability matrix (PRD-F3-09): unsupported statements are rejected before execution; see [CAPABILITIES.md](CAPABILITIES.md). `VACUUM`/`ANALYZE` are Admin; PG `CREATE SEQUENCE`/`COMMENT ON` are Ddl; SQLite read PRAGMAs are Read.
 - Explicit deny labels: `COPY`, `CALL`, `ATTACH DATABASE`, `LOAD DATA`, `PREPARE`, `EXECUTE`
 - Complexity limits: max 8 joins, max subquery depth 5 (checked across the whole statement tree, including subqueries and CTE bodies)
 - Enforce against `WriteMode`

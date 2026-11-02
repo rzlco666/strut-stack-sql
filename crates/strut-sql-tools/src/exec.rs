@@ -111,11 +111,9 @@ pub async fn execute_query(
             error = "explain_analyze_requires_writes",
             "query failed"
         );
-        return Ok(QueryResult {
-            ok: false,
-            data: None,
-            error: Some("EXPLAIN ANALYZE executes the query and requires --allow-writes".into()),
-        });
+        return Err(ExecError::Guard(GuardError::Denied(
+            "EXPLAIN ANALYZE executes the query and requires --allow-writes".into(),
+        )));
     }
 
     // SQL-BUG-05 / SQL-SEC (limit_unverified): execution shape derives from

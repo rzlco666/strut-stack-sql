@@ -280,6 +280,12 @@ pub struct Cli {
     #[arg(long)]
     pub allow_grants: bool,
 
+    /// Allow analyze_query_performance(analyze=true). EXPLAIN ANALYZE
+    /// executes the statement, so this is always an explicit opt-in.
+    /// Also: STRUT_STACK_SQL_ALLOW_EXPLAIN_ANALYZE=1.
+    #[arg(long)]
+    pub allow_explain_analyze: bool,
+
     /// Per-token HTTP rate limit, requests per minute (0 = off).
     #[arg(long, default_value_t = 600)]
     pub http_rate_limit_per_minute: u32,
@@ -394,6 +400,9 @@ pub struct GrantConfig {
     /// Per-call query timeout in seconds.
     #[serde(default)]
     pub query_timeout: Option<u64>,
+    /// Opt-in in-memory session query history (PRD-F3-08). Default false.
+    #[serde(default)]
+    pub query_history: bool,
 }
 
 fn default_grant_source() -> String {
@@ -444,6 +453,12 @@ pub struct AppConfig {
     pub batch_max_bytes: usize,
     pub fail_fast: bool,
     pub deny_columns: Vec<String>,
+    /// Explicit opt-in for EXPLAIN ANALYZE in the advisor (PRD-F3-04).
+    pub allow_explain_analyze: bool,
+    /// Authenticated principal id for this scoped view (history attribution).
+    pub principal_id: String,
+    /// In-memory session query history enabled for this principal (PRD-F3-08).
+    pub query_history: bool,
     pub default_source: String,
     pub sources: HashMap<String, ResolvedSource>,
     pub searched_paths: Vec<PathBuf>,
@@ -495,6 +510,8 @@ impl AppConfig {
     pub fn scoped_for(&self, authz: &Authorization) -> AppConfig {
         let mut scoped = self.clone();
         scoped.write_mode = authz.write_mode();
+        scoped.principal_id = authz.principal_id.clone();
+        scoped.query_history = authz.query_history;
         if let Some(max_rows) = authz.max_rows {
             scoped.max_rows = scoped.max_rows.min(max_rows);
         }
@@ -541,6 +558,10 @@ fn env_truthy(key: &str) -> bool {
 /// Resolve `--allow-grants` / `STRUT_STACK_SQL_ALLOW_GRANTS=1`.
 fn resolve_allow_grants(cli: &Cli) -> bool {
     cli.allow_grants || env_truthy("STRUT_STACK_SQL_ALLOW_GRANTS")
+}
+
+fn resolve_allow_explain_analyze(cli: &Cli) -> bool {
+    cli.allow_explain_analyze || env_truthy("STRUT_STACK_SQL_ALLOW_EXPLAIN_ANALYZE")
 }
 
 /// Resolve the optional OAuth resource-server settings.
@@ -792,6 +813,7 @@ fn build_policy(
             max_rows: grant.max_rows,
             max_bytes: grant.max_bytes,
             query_timeout: grant.query_timeout.map(Duration::from_secs),
+            query_history: grant.query_history,
         });
     }
 
@@ -825,6 +847,7 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
     let http_tokens = resolve_http_tokens(cli, write_mode)?;
     let hide_endpoints = resolve_hide_endpoints(cli);
     let allow_grants = resolve_allow_grants(cli);
+    let allow_explain_analyze = resolve_allow_explain_analyze(cli);
     let oauth = resolve_oauth_settings()?;
 
     let read_only = !write_mode.allows_dml();
@@ -901,6 +924,8 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
             &toml_cfg.grants,
             &source_names,
         )?;
+        let mut policy = policy;
+        policy.set_local_query_history(env_truthy("STRUT_STACK_SQL_QUERY_HISTORY"));
         return Ok(AppConfig {
             write_mode,
             full_tools: cli.full_tools,
@@ -913,6 +938,9 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
             batch_max_bytes: cli.batch_max_bytes,
             fail_fast: cli.fail_fast,
             deny_columns,
+            allow_explain_analyze,
+            principal_id: crate::auth::Principal::LOCAL_ID.to_string(),
+            query_history: false,
             default_source,
             sources,
             searched_paths,
@@ -1003,6 +1031,8 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
         &[],
         &["default".to_string()],
     )?;
+    let mut policy = policy;
+    policy.set_local_query_history(env_truthy("STRUT_STACK_SQL_QUERY_HISTORY"));
 
     Ok(AppConfig {
         write_mode,
@@ -1016,6 +1046,9 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
         batch_max_bytes: cli.batch_max_bytes,
         fail_fast: cli.fail_fast,
         deny_columns,
+        allow_explain_analyze,
+        principal_id: crate::auth::Principal::LOCAL_ID.to_string(),
+        query_history: false,
         default_source: "default".into(),
         sources,
         searched_paths,
@@ -1504,6 +1537,7 @@ mod tests {
             max_rows: None,
             max_bytes: None,
             query_timeout: None,
+            query_history: false,
         }];
         let policy = build_policy(
             WriteMode::AllowDdl,
@@ -1536,6 +1570,7 @@ mod tests {
                 max_rows: Some(5),
                 max_bytes: Some(2048),
                 query_timeout: Some(3),
+                query_history: false,
             },
             GrantConfig {
                 principal: Principal::LOCAL_ID.into(),
@@ -1544,6 +1579,7 @@ mod tests {
                 max_rows: None,
                 max_bytes: None,
                 query_timeout: None,
+                query_history: false,
             },
         ];
         let policy = build_policy(
@@ -1583,6 +1619,7 @@ mod tests {
             max_rows: None,
             max_bytes: None,
             query_timeout: None,
+            query_history: false,
         }];
         let err = build_policy(
             WriteMode::ReadOnly,
@@ -1607,6 +1644,7 @@ mod tests {
                 max_rows: None,
                 max_bytes: None,
                 query_timeout: None,
+                query_history: false,
             },
             GrantConfig {
                 principal: "alice".into(),
@@ -1615,6 +1653,7 @@ mod tests {
                 max_rows: None,
                 max_bytes: None,
                 query_timeout: None,
+                query_history: false,
             },
         ];
         assert!(build_policy(
@@ -1635,6 +1674,7 @@ mod tests {
             max_rows: Some(0),
             max_bytes: None,
             query_timeout: None,
+            query_history: false,
         }];
         assert!(build_policy(
             WriteMode::ReadOnly,
@@ -1742,6 +1782,7 @@ max_rows = 7
             http_token: None,
             allow_unauthenticated_http: false,
             allow_grants: false,
+            allow_explain_analyze: false,
             http_rate_limit_per_minute: 600,
             ephemeral: false,
             hide_source_endpoints: false,

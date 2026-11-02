@@ -30,6 +30,10 @@ pub struct SchemaObject {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nullable: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub columns: Option<Vec<ColumnInfo>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub indexes: Option<Vec<IndexInfo>>,
@@ -87,6 +91,26 @@ pub struct TableOverview {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approx_rows: Option<i64>,
+    /// Foreign keys this table points at (outgoing edges).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub fk_out: usize,
+    /// Foreign keys other tables point at this table (incoming edges).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub fk_in: usize,
+    /// Highest-degree table(s) in the schema join graph.
+    #[serde(skip_serializing_if = "is_false")]
+    pub hub: bool,
+    /// No incoming or outgoing foreign keys.
+    #[serde(skip_serializing_if = "is_false")]
+    pub orphan: bool,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -96,6 +120,12 @@ pub struct SchemaOverviewMeta {
     pub truncated: bool,
     /// Always `"approx"` — planner/stats estimates; use `COUNT(*)` for exact.
     pub row_counts: &'static str,
+    /// Tables at the maximum join-graph degree.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hubs: Vec<String>,
+    /// Tables with no foreign-key relation in either direction.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub orphans: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -298,6 +328,8 @@ fn map_schema_object(o: DriverSchemaObject) -> SchemaObject {
         table: o.table,
         data_type: o.data_type,
         nullable: o.nullable,
+        comment: o.comment,
+        score: None,
         columns: None,
         indexes: None,
     }
@@ -563,11 +595,12 @@ pub async fn list_tables(
 /// Backwards-compatible unpaginated column listing.
 pub async fn list_columns(
     driver: &Arc<dyn EngineDriver>,
+    source: Option<&str>,
     schema: Option<&str>,
     keyword: Option<&str>,
 ) -> Result<Vec<SchemaObject>, String> {
     Ok(
-        list_columns_page(driver, None, schema, keyword, 0, CATALOG_PAGE_MAX)
+        list_columns_page(driver, source, schema, keyword, 0, CATALOG_PAGE_MAX)
             .await?
             .objects,
     )
@@ -582,17 +615,57 @@ pub async fn search_objects(
     offset: usize,
     limit: usize,
 ) -> Result<SearchResult, String> {
-    match object_type {
-        ObjectType::Schema => list_schemas_page(driver, source, keyword, offset, limit).await,
-        ObjectType::Table => list_tables_page(driver, source, schema, keyword, offset, limit).await,
+    search_objects_ranked(
+        driver,
+        source,
+        object_type,
+        keyword,
+        schema,
+        offset,
+        limit,
+        false,
+    )
+    .await
+}
+
+/// Ranked search (PRD-F3-01): exact > prefix > substring > comment match.
+///
+/// Ranking is global, so the catalog page is fetched wide and sliced only
+/// after ordering — a page-local sort would rank the wrong candidates.
+#[allow(clippy::too_many_arguments)]
+pub async fn search_objects_ranked(
+    driver: &Arc<dyn EngineDriver>,
+    source: Option<&str>,
+    object_type: ObjectType,
+    keyword: Option<&str>,
+    schema: Option<&str>,
+    offset: usize,
+    limit: usize,
+    include_score: bool,
+) -> Result<SearchResult, String> {
+    let mut objects: Vec<SchemaObject> = match object_type {
+        ObjectType::Schema => {
+            let page = driver
+                .list_schemas_page(keyword, 0, CATALOG_PAGE_MAX)
+                .await
+                .map_err(|e| e.to_string())?;
+            page.objects.into_iter().map(map_schema_object).collect()
+        }
+        ObjectType::Table => {
+            let page =
+                list_tables_page(driver, source, schema, keyword, 0, CATALOG_PAGE_MAX).await?;
+            page.objects
+        }
         ObjectType::Column => {
-            list_columns_page(driver, source, schema, keyword, offset, limit).await
+            let page =
+                list_columns_page(driver, source, schema, keyword, 0, CATALOG_PAGE_MAX).await?;
+            page.objects
         }
         ObjectType::Index => {
             let page =
-                driver_indexes_page(driver, source, schema, None, keyword, offset, limit).await?;
-            let objects = page
-                .indexes
+                driver_indexes_page(driver, source, schema, None, keyword, 0, CATALOG_PAGE_MAX)
+                    .await?;
+            page.indexes
                 .into_iter()
                 .map(|idx| SchemaObject {
                     object_type: ObjectType::Index,
@@ -601,20 +674,103 @@ pub async fn search_objects(
                     table: Some(idx.table.clone()),
                     data_type: None,
                     nullable: None,
+                    comment: None,
+                    score: None,
                     columns: None,
                     indexes: Some(vec![map_index(idx)]),
                 })
-                .collect::<Vec<_>>();
-            Ok(SearchResult {
-                meta: SearchMeta {
-                    n: objects.len(),
-                    offset,
-                    limit,
-                    has_more: page.has_more,
-                },
-                objects,
-            })
+                .collect()
         }
+    };
+
+    if let Some(kw) = keyword {
+        objects.retain(|o| object_matches(o, kw));
+        for object in &mut objects {
+            object.score = score_object(object, kw);
+        }
+        objects.sort_by(|a, b| {
+            b.score
+                .cmp(&a.score)
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                .then_with(|| a.table.cmp(&b.table))
+                .then_with(|| a.schema.cmp(&b.schema))
+        });
+    } else {
+        for object in &mut objects {
+            object.score = Some(0);
+        }
+    }
+    if !include_score {
+        for object in &mut objects {
+            object.score = None;
+        }
+    } else if keyword.is_none() {
+        for object in &mut objects {
+            object.score = Some(0);
+        }
+    }
+
+    let total = objects.len();
+    let start = offset.min(total);
+    let end = start.saturating_add(limit).min(total);
+    let page = objects[start..end].to_vec();
+    Ok(SearchResult {
+        meta: SearchMeta {
+            n: page.len(),
+            offset,
+            limit,
+            has_more: end < total,
+        },
+        objects: page,
+    })
+}
+
+fn object_matches(object: &SchemaObject, keyword: &str) -> bool {
+    let kw = keyword.to_lowercase();
+    object.name.to_lowercase().contains(&kw)
+        || object
+            .table
+            .as_ref()
+            .is_some_and(|t| t.to_lowercase().contains(&kw))
+        || object
+            .schema
+            .as_ref()
+            .is_some_and(|s| s.to_lowercase().contains(&kw))
+        || object
+            .comment
+            .as_ref()
+            .is_some_and(|c| c.to_lowercase().contains(&kw))
+}
+
+fn score_object(object: &SchemaObject, keyword: &str) -> Option<u32> {
+    let kw = keyword.to_lowercase();
+    let name = object.name.to_lowercase();
+    if name == kw {
+        Some(1000)
+    } else if name.starts_with(&kw) {
+        Some(800)
+    } else if name.contains(&kw) {
+        Some(600)
+    } else if object
+        .table
+        .as_ref()
+        .is_some_and(|t| t.to_lowercase().contains(&kw))
+    {
+        Some(400)
+    } else if object
+        .schema
+        .as_ref()
+        .is_some_and(|s| s.to_lowercase().contains(&kw))
+    {
+        Some(350)
+    } else if object
+        .comment
+        .as_ref()
+        .is_some_and(|c| c.to_lowercase().contains(&kw))
+    {
+        Some(200)
+    } else {
+        Some(0)
     }
 }
 
@@ -648,6 +804,8 @@ pub async fn describe_table(
         table: None,
         data_type: None,
         nullable: None,
+        comment: None,
+        score: None,
         columns: Some(columns),
         indexes: Some(indexes),
     })
@@ -747,6 +905,10 @@ async fn schema_overview_uncached(
         .map(|t| TableOverview {
             name: t.name,
             approx_rows: t.approx_rows,
+            fk_out: 0,
+            fk_in: 0,
+            hub: false,
+            orphan: false,
         })
         .collect();
 
@@ -765,6 +927,32 @@ async fn schema_overview_uncached(
         .map(map_fk)
         .collect();
 
+    // Per-table FK in/out counts plus hub/orphan markers (PRD-F3-03).
+    for fk in &foreign_keys {
+        if let Some(parent) = tables.iter_mut().find(|t| t.name == fk.ref_table) {
+            parent.fk_in += 1;
+        }
+        if let Some(child) = tables.iter_mut().find(|t| t.name == fk.table) {
+            child.fk_out += 1;
+        }
+    }
+    let max_degree = tables.iter().map(|t| t.fk_in + t.fk_out).max().unwrap_or(0);
+    let mut hubs = Vec::new();
+    let mut orphans = Vec::new();
+    for table in &mut tables {
+        let degree = table.fk_in + table.fk_out;
+        table.hub = max_degree > 0 && degree == max_degree;
+        table.orphan = degree == 0;
+        if table.hub {
+            hubs.push(table.name.clone());
+        }
+        if table.orphan {
+            orphans.push(table.name.clone());
+        }
+    }
+    hubs.sort();
+    orphans.sort();
+
     let n_tables = tables.len();
     let n_foreign_keys = foreign_keys.len();
     Ok(SchemaOverview {
@@ -776,6 +964,8 @@ async fn schema_overview_uncached(
             n_foreign_keys,
             truncated,
             row_counts: "approx",
+            hubs,
+            orphans,
         },
     })
 }
@@ -792,6 +982,8 @@ mod tests {
             table: None,
             data_type: None,
             nullable: None,
+            comment: None,
+            score: None,
             columns: None,
             indexes: None,
         }
@@ -830,6 +1022,8 @@ mod tests {
             table: Some("users".into()),
             data_type: None,
             nullable: None,
+            comment: None,
+            score: None,
             columns: None,
             indexes: Some(vec![IndexInfo {
                 name: "users_email_key".into(),
@@ -946,9 +1140,25 @@ mod tests {
             n_foreign_keys: 0,
             truncated: false,
             row_counts: "approx",
+            hubs: vec![],
+            orphans: vec![],
         };
         let json = serde_json::to_string(&meta).unwrap();
         assert!(json.contains("\"row_counts\":\"approx\""));
+    }
+
+    #[test]
+    fn relevance_scores_exact_prefix_substring_and_comment() {
+        let mut exact = obj("users", None);
+        exact.name = "users".into();
+        assert_eq!(score_object(&exact, "users"), Some(1000));
+        exact.name = "users_archive".into();
+        assert_eq!(score_object(&exact, "users"), Some(800));
+        exact.name = "old_users_archive".into();
+        assert_eq!(score_object(&exact, "users"), Some(600));
+        exact.name = "legacy".into();
+        exact.comment = Some("user lookup table".into());
+        assert_eq!(score_object(&exact, "user"), Some(200));
     }
 
     #[test]

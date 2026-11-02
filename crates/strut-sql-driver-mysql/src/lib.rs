@@ -10,7 +10,8 @@ use std::time::Duration;
 use strut_sql_driver_api::{
     BoundQuery, CapabilityNote, ColumnInfo, ColumnMeta, ConnectOptions, DriverError, EngineDriver,
     EngineKind, ForeignKeyInfo, IndexInfo, IndexPage, ObjectType, QueryMeta, QueryResult,
-    RoutineInfo, SchemaObject, SchemaPage, SqlValue, TableInfo, TableRowCount,
+    RoutineInfo, RowEstimateKind, SchemaObject, SchemaPage, SqlValue, TableInfo, TableRowCount,
+    TableStats,
 };
 
 pub struct MySqlDriver {
@@ -191,6 +192,7 @@ impl EngineDriver for MySqlDriver {
                     table: None,
                     data_type: None,
                     nullable: None,
+                    comment: None,
                 })
             })
             .collect())
@@ -208,23 +210,19 @@ impl EngineDriver for MySqlDriver {
     async fn list_tables(&self, schema: Option<&str>) -> Result<Vec<SchemaObject>, DriverError> {
         let scope = self.resolve_scope(schema).await?;
         let rows = match &scope {
-            MysqlSchemaScope::All => {
-                sqlx::query(
-                    "SELECT table_schema, table_name FROM information_schema.tables \
+            MysqlSchemaScope::All => sqlx::query(
+                "SELECT table_schema, table_name, table_comment FROM information_schema.tables \
                      WHERE table_type = 'BASE TABLE' ORDER BY table_schema, table_name",
-                )
-                .fetch_all(&self.pool)
-                .await
-            }
-            MysqlSchemaScope::One(schema_name) => {
-                sqlx::query(
-                    "SELECT table_schema, table_name FROM information_schema.tables \
+            )
+            .fetch_all(&self.pool)
+            .await,
+            MysqlSchemaScope::One(schema_name) => sqlx::query(
+                "SELECT table_schema, table_name, table_comment FROM information_schema.tables \
                      WHERE table_schema = ? AND table_type = 'BASE TABLE' ORDER BY table_name",
-                )
-                .bind(schema_name)
-                .fetch_all(&self.pool)
-                .await
-            }
+            )
+            .bind(schema_name)
+            .fetch_all(&self.pool)
+            .await,
         }
         .map_err(|e| DriverError::Introspection(e.to_string()))?;
 
@@ -233,6 +231,7 @@ impl EngineDriver for MySqlDriver {
             .filter_map(|r| {
                 let schema = mysql_decode_text_by_index(r, 0)?;
                 let name = mysql_decode_text_by_index(r, 1)?;
+                let comment = mysql_decode_text_by_index(r, 2).filter(|c| !c.is_empty());
                 Some(SchemaObject {
                     object_type: ObjectType::Table,
                     schema: Some(schema),
@@ -240,6 +239,7 @@ impl EngineDriver for MySqlDriver {
                     table: None,
                     data_type: None,
                     nullable: None,
+                    comment,
                 })
             })
             .collect())
@@ -250,7 +250,7 @@ impl EngineDriver for MySqlDriver {
         let rows = match &scope {
             MysqlSchemaScope::All => {
                 sqlx::query(
-                    "SELECT table_schema, table_name, column_name, data_type, is_nullable \
+                    "SELECT table_schema, table_name, column_name, data_type, is_nullable, column_comment \
                      FROM information_schema.columns \
                      ORDER BY table_schema, table_name, ordinal_position",
                 )
@@ -259,7 +259,7 @@ impl EngineDriver for MySqlDriver {
             }
             MysqlSchemaScope::One(schema_name) => {
                 sqlx::query(
-                    "SELECT table_schema, table_name, column_name, data_type, is_nullable \
+                    "SELECT table_schema, table_name, column_name, data_type, is_nullable, column_comment \
                      FROM information_schema.columns WHERE table_schema = ? \
                      ORDER BY table_name, ordinal_position",
                 )
@@ -286,6 +286,7 @@ impl EngineDriver for MySqlDriver {
             };
             let nullable =
                 mysql_decode_text_by_index(r, 4).is_some_and(|v| v.eq_ignore_ascii_case("YES"));
+            let comment = mysql_decode_text_by_index(r, 5).filter(|c| !c.is_empty());
             out.push(SchemaObject {
                 object_type: ObjectType::Column,
                 schema: Some(schema),
@@ -293,6 +294,7 @@ impl EngineDriver for MySqlDriver {
                 table: Some(table),
                 data_type: Some(data_type),
                 nullable: Some(nullable),
+                comment,
             });
         }
         Ok(out)
@@ -324,6 +326,7 @@ impl EngineDriver for MySqlDriver {
                 table: None,
                 data_type: None,
                 nullable: None,
+                comment: None,
             })
         }))
     }
@@ -337,14 +340,15 @@ impl EngineDriver for MySqlDriver {
     ) -> Result<SchemaPage, DriverError> {
         let scope = self.resolve_scope(schema).await?;
         let mut sql = String::from(
-            "SELECT table_schema, table_name FROM information_schema.tables \
+            "SELECT table_schema, table_name, table_comment FROM information_schema.tables \
              WHERE table_type = 'BASE TABLE'",
         );
         if matches!(scope, MysqlSchemaScope::One(_)) {
             sql.push_str(" AND table_schema = ?");
         }
         sql.push_str(
-            " AND (? IS NULL OR LOCATE(LOWER(?), LOWER(table_name)) > 0) \
+            " AND (? IS NULL OR LOCATE(LOWER(?), LOWER(table_name)) > 0 \
+                 OR LOCATE(LOWER(?), LOWER(table_comment)) > 0) \
              ORDER BY table_schema, table_name LIMIT ? OFFSET ?",
         );
         let mut query = sqlx::query(&sql);
@@ -352,6 +356,7 @@ impl EngineDriver for MySqlDriver {
             query = query.bind(name);
         }
         let rows = query
+            .bind(keyword)
             .bind(keyword)
             .bind(keyword)
             .bind((limit.saturating_add(1)) as i64)
@@ -367,6 +372,7 @@ impl EngineDriver for MySqlDriver {
                 table: None,
                 data_type: None,
                 nullable: None,
+                comment: mysql_decode_text_by_index(r, 2).filter(|c| !c.is_empty()),
             })
         }))
     }
@@ -380,7 +386,7 @@ impl EngineDriver for MySqlDriver {
     ) -> Result<SchemaPage, DriverError> {
         let scope = self.resolve_scope(schema).await?;
         let mut sql = String::from(
-            "SELECT table_schema, table_name, column_name, data_type, is_nullable \
+            "SELECT table_schema, table_name, column_name, data_type, is_nullable, column_comment \
              FROM information_schema.columns WHERE 1 = 1",
         );
         if matches!(scope, MysqlSchemaScope::One(_)) {
@@ -389,7 +395,8 @@ impl EngineDriver for MySqlDriver {
         sql.push_str(
             " AND (? IS NULL \
                  OR LOCATE(LOWER(?), LOWER(column_name)) > 0 \
-                 OR LOCATE(LOWER(?), LOWER(table_name)) > 0) \
+                 OR LOCATE(LOWER(?), LOWER(table_name)) > 0 \
+                 OR LOCATE(LOWER(?), LOWER(column_comment)) > 0) \
              ORDER BY table_schema, table_name, ordinal_position LIMIT ? OFFSET ?",
         );
         let mut query = sqlx::query(&sql);
@@ -397,6 +404,7 @@ impl EngineDriver for MySqlDriver {
             query = query.bind(name);
         }
         let rows = query
+            .bind(keyword)
             .bind(keyword)
             .bind(keyword)
             .bind(keyword)
@@ -415,6 +423,7 @@ impl EngineDriver for MySqlDriver {
                 table: Some(mysql_decode_text_by_index(r, 1)?),
                 data_type: Some(mysql_decode_text_by_index(r, 3)?),
                 nullable: Some(nullable),
+                comment: mysql_decode_text_by_index(r, 5).filter(|c| !c.is_empty()),
             })
         }))
     }
@@ -777,6 +786,70 @@ impl EngineDriver for MySqlDriver {
                 Some(TableRowCount {
                     name,
                     approx_rows: approx,
+                })
+            })
+            .collect())
+    }
+
+    async fn table_stats(&self, schema: Option<&str>) -> Result<Vec<TableStats>, DriverError> {
+        let schema_name = match self.resolve_scope(schema).await? {
+            MysqlSchemaScope::One(name) => name,
+            MysqlSchemaScope::All => {
+                return Err(DriverError::InvalidConfig(
+                    "table_stats requires schema on MySQL (or omit for current database)".into(),
+                ))
+            }
+        };
+        let rows = sqlx::query(
+            "SELECT table_name, table_rows, data_length, index_length \
+             FROM information_schema.tables \
+             WHERE table_schema = ? AND table_type = 'BASE TABLE' \
+             ORDER BY table_name",
+        )
+        .bind(&schema_name)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DriverError::Introspection(e.to_string()))?;
+
+        let indexes = self.list_indexes(Some(&schema_name), None).await?;
+        Ok(rows
+            .iter()
+            .filter_map(|r| {
+                let table = mysql_decode_text_by_index(r, 0)?;
+                let approx = r.try_get::<Option<i64>, _>(1).ok().flatten().or_else(|| {
+                    r.try_get::<Option<u64>, _>(1)
+                        .ok()
+                        .flatten()
+                        .and_then(|v| i64::try_from(v).ok())
+                });
+                let table_bytes = r.try_get::<Option<i64>, _>(2).ok().flatten().or_else(|| {
+                    r.try_get::<Option<u64>, _>(2)
+                        .ok()
+                        .flatten()
+                        .and_then(|v| i64::try_from(v).ok())
+                });
+                let index_bytes = r.try_get::<Option<i64>, _>(3).ok().flatten().or_else(|| {
+                    r.try_get::<Option<u64>, _>(3)
+                        .ok()
+                        .flatten()
+                        .and_then(|v| i64::try_from(v).ok())
+                });
+                let table_indexes = indexes
+                    .iter()
+                    .filter(|i| i.table == table)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                Some(TableStats {
+                    table,
+                    approx_rows: approx,
+                    row_estimate: if approx.is_some() {
+                        RowEstimateKind::CatalogStats
+                    } else {
+                        RowEstimateKind::Unavailable
+                    },
+                    table_bytes,
+                    index_bytes,
+                    indexes: table_indexes,
                 })
             })
             .collect())

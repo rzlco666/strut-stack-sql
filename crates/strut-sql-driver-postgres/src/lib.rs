@@ -9,7 +9,7 @@ use std::time::Duration;
 use strut_sql_driver_api::{
     BoundQuery, ColumnInfo, ColumnMeta, ConnectOptions, DriverError, EngineDriver, EngineKind,
     ForeignKeyInfo, IndexInfo, IndexPage, ObjectType, QueryMeta, QueryResult, RoutineInfo,
-    SchemaObject, SchemaPage, SqlValue, TableInfo, TableRowCount,
+    RowEstimateKind, SchemaObject, SchemaPage, SqlValue, TableInfo, TableRowCount, TableStats,
 };
 use uuid::Uuid;
 
@@ -132,6 +132,7 @@ impl EngineDriver for PostgresDriver {
                     table: None,
                     data_type: None,
                     nullable: None,
+                    comment: None,
                 })
             })
             .collect())
@@ -165,6 +166,7 @@ impl EngineDriver for PostgresDriver {
                     table: None,
                     data_type: None,
                     nullable: None,
+                    comment: None,
                 })
             })
             .collect())
@@ -197,6 +199,7 @@ impl EngineDriver for PostgresDriver {
                     table: Some(table),
                     data_type: Some(data_type),
                     nullable: Some(nullable == "YES"),
+                    comment: None,
                 })
             })
             .collect())
@@ -228,6 +231,7 @@ impl EngineDriver for PostgresDriver {
                 table: None,
                 data_type: None,
                 nullable: None,
+                comment: None,
             })
         }))
     }
@@ -261,6 +265,7 @@ impl EngineDriver for PostgresDriver {
                 table: None,
                 data_type: None,
                 nullable: None,
+                comment: None,
             })
         }))
     }
@@ -303,6 +308,7 @@ impl EngineDriver for PostgresDriver {
                 table: Some(table),
                 data_type: Some(data_type),
                 nullable: Some(nullable == "YES"),
+                comment: None,
             })
         }))
     }
@@ -565,6 +571,55 @@ impl EngineDriver for PostgresDriver {
                 Some(TableRowCount {
                     name,
                     approx_rows: pg_approx_rows(live, reltuples),
+                })
+            })
+            .collect())
+    }
+
+    async fn table_stats(&self, schema: Option<&str>) -> Result<Vec<TableStats>, DriverError> {
+        let schema_name = schema.filter(|s| !s.is_empty()).unwrap_or("public");
+        let rows = sqlx::query(
+            "SELECT c.relname, s.n_live_tup, c.reltuples::float8, \
+                    pg_table_size(c.oid)::bigint, \
+                    pg_indexes_size(c.oid)::bigint \
+             FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid \
+             WHERE n.nspname = $1 AND c.relkind = 'r' \
+             ORDER BY c.relname",
+        )
+        .bind(schema_name)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DriverError::Introspection(e.to_string()))?;
+
+        let indexes = self.list_indexes(Some(schema_name), None).await?;
+        Ok(rows
+            .iter()
+            .filter_map(|r| {
+                let table: String = r.try_get(0).ok()?;
+                let live: Option<i64> = r.try_get(1).ok().flatten();
+                let reltuples =
+                    pg_decode_reltuples(r.try_get::<f32, _>(2).ok(), r.try_get::<f64, _>(2).ok());
+                let approx_rows = pg_approx_rows(live, reltuples);
+                let table_bytes: Option<i64> = r.try_get(3).ok().flatten();
+                let index_bytes: Option<i64> = r.try_get(4).ok().flatten();
+                let table_indexes = indexes
+                    .iter()
+                    .filter(|i| i.table == table)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                Some(TableStats {
+                    table,
+                    approx_rows,
+                    row_estimate: if reltuples.is_some() || live.is_some() {
+                        RowEstimateKind::PlannerStats
+                    } else {
+                        RowEstimateKind::Unavailable
+                    },
+                    table_bytes,
+                    index_bytes,
+                    indexes: table_indexes,
                 })
             })
             .collect())

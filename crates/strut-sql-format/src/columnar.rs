@@ -325,7 +325,8 @@ pub fn truncate_to_bytes(mut result: ColumnarResult, max_bytes: usize) -> Column
 }
 
 pub fn to_json_text(value: &impl Serialize) -> String {
-    serde_json::to_string(value).unwrap_or_else(|e| format!(r#"{{"error":"{e}"}}"#))
+    serde_json::to_string(value)
+        .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() }).to_string())
 }
 
 #[cfg(test)]
@@ -550,5 +551,27 @@ mod tests {
         assert_eq!(result.meta.page_size, Some(2));
         assert_eq!(result.meta.total_fetched, Some(5));
         assert_eq!(result.meta.has_more, Some(true));
+    }
+}
+
+#[cfg(test)]
+mod escaping_tests {
+    use super::*;
+    use serde::ser::{Error as _, Serializer};
+    use serde::Serialize;
+
+    struct Failing;
+
+    impl Serialize for Failing {
+        fn serialize<S: Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+            Err(S::Error::custom("quote\"backslash\\newline\n"))
+        }
+    }
+
+    #[test]
+    fn json_fallback_escapes_error_text() {
+        let text = to_json_text(&Failing);
+        let parsed: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
+        assert_eq!(parsed["error"], "quote\"backslash\\newline\n");
     }
 }

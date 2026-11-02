@@ -2,6 +2,44 @@
 
 ## [Unreleased]
 
+### Schema intelligence & performance advisor (PRD-F3)
+
+- **Ranked `search_objects`**: relevance ordering exact > prefix > substring >
+  catalog comment, optional `include_score`; compact output stays the
+  default. Ranking is global before pagination.
+- **New tools (surface now exactly 20)**: `get_relationship_graph` (FK graph
+  with optional focus/depth), `suggest_joins` (shortest paths with
+  copy-ready `on` conditions; same-name candidates marked `guess: true`),
+  and `get_schema_context` (deterministic token-budgeted digest, expanded
+  around focus tables via the join graph). All are read-tier, guarded,
+  audited, and respect source allowlists/deny-columns.
+- **Relation-aware `schema_overview`**: per-table `fk_in`/`fk_out`, `hub`
+  and `orphan` flags, `meta.hubs`/`meta.orphans`; the 200-table cap is
+  explicit in `meta.truncated`.
+- **Advisor v2**: uniform plan tree for PostgreSQL/MySQL/SQLite, tiered
+  `issues` (`info`/`warning`/`critical`) for full scans, large nested loops,
+  expensive sort/hash, dominant-cost nodes, row-estimate misses, type casts,
+  leading-wildcard LIKE, plus AST anti-patterns; index advice as
+  `CREATE INDEX …` text with triggering node, row estimate and confidence.
+  `EXPLAIN ANALYZE` is opt-in (`analyze: true` + `--allow-explain-analyze`).
+- **Schema stats (F3-07)**: driver `table_stats` with honest estimate
+  provenance (planner/catalog/unavailable), table/index sizes where the
+  engine reports them, and index coverage for advisor rules.
+- **Anti-patterns (F3-06)**: structured findings on `execute_sql` in full
+  mode (`meta`-adjacent `anti_patterns`) and in the advisor.
+- **Session history (F3-08)**: per-principal opt-in in-memory history with
+  normalized SQL hashes, class, duration and rows (no parameter values),
+  N+1 and repeated-slow suggestions.
+- **Capability matrix (F3-09)**: `docs/CAPABILITIES.md` plus enforced
+  per-engine classification tests; `CREATE SEQUENCE`/`COMMENT` (PostgreSQL
+  Ddl), `VACUUM`/`ANALYZE` (Admin), and SQLite read pragmas are now
+  explicit instead of silently `Other`.
+- **Error contract (F3-10)**: every handler distinguishes
+  `invalid_params` (validation), `authorization_denied`, `guard_denied`,
+  and retryable `execution_error` with structured `{code,message,retryable}`
+  data; success payloads no longer carry `{ok:false}`; JSON fallback text
+  escaping is correct.
+
 ### Benchmarks (PRD-F2-12/F2-13)
 
 - Reproducible harness added at `scripts/benchmark/bench.py` (+

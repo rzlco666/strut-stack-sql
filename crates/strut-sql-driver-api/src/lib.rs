@@ -88,6 +88,10 @@ pub struct SchemaObject {
     pub table: Option<String>,
     pub data_type: Option<String>,
     pub nullable: Option<bool>,
+    /// Catalog comment for the object (column/table), where the engine
+    /// exposes one. Used by ranked search (PRD-F3-01) and omitted otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
 }
 
 /// Object type in schema.
@@ -179,6 +183,37 @@ pub struct RoutineInfo {
 pub struct TableRowCount {
     pub name: String,
     pub approx_rows: Option<i64>,
+}
+
+/// How an approximate row count was obtained (PRD-F3-07). The label is
+/// deliberately explicit because MySQL/SQLite catalog values are not
+/// planner-quality estimates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RowEstimateKind {
+    /// Postgres planner statistics (`pg_class.reltuples` / live tuples).
+    PlannerStats,
+    /// Engine catalog estimate (MySQL `table_rows`, SQLite `sqlite_stat1`).
+    CatalogStats,
+    /// The engine has no usable estimate; do not infer one.
+    Unavailable,
+}
+
+/// Uniform per-table statistics for the performance advisor (PRD-F3-07).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TableStats {
+    /// Table name.
+    pub table: String,
+    /// Approximate row count; `None` when unavailable.
+    pub approx_rows: Option<i64>,
+    /// Provenance of `approx_rows`.
+    pub row_estimate: RowEstimateKind,
+    /// Total table bytes (heap/data + auxiliary structures), when reported.
+    pub table_bytes: Option<i64>,
+    /// Total index bytes, when reported.
+    pub index_bytes: Option<i64>,
+    /// Indexes on the table, in catalog order.
+    pub indexes: Vec<IndexInfo>,
 }
 
 /// Case-insensitive substring match over name/table/schema, matching the
@@ -430,6 +465,36 @@ pub trait EngineDriver: Send + Sync {
         schema: Option<&str>,
     ) -> Result<Vec<TableRowCount>, DriverError>;
 
+    /// Uniform per-table stats for the advisor (PRD-F3-07). Drivers override
+    /// this to report sizes and honest estimate provenance; the default only
+    /// combines row counts with the index catalog.
+    async fn table_stats(&self, schema: Option<&str>) -> Result<Vec<TableStats>, DriverError> {
+        let counts = self.approximate_row_counts(schema).await?;
+        let indexes = self.list_indexes(schema, None).await?;
+        Ok(counts
+            .into_iter()
+            .map(|c| {
+                let table_indexes: Vec<IndexInfo> = indexes
+                    .iter()
+                    .filter(|i| i.table == c.name)
+                    .cloned()
+                    .collect();
+                TableStats {
+                    table: c.name,
+                    approx_rows: c.approx_rows,
+                    row_estimate: if c.approx_rows.is_some() {
+                        RowEstimateKind::CatalogStats
+                    } else {
+                        RowEstimateKind::Unavailable
+                    },
+                    table_bytes: None,
+                    index_bytes: None,
+                    indexes: table_indexes,
+                }
+            })
+            .collect())
+    }
+
     /// List all routines (functions/procedures).
     async fn list_routines(&self) -> Result<Vec<RoutineInfo>, DriverError>;
 
@@ -454,6 +519,7 @@ pub trait EngineDriver: Send + Sync {
                     table: Some(i.table),
                     data_type: None,
                     nullable: None,
+                    comment: None,
                 })
                 .collect(),
             Some(ObjectType::ForeignKey) | Some(ObjectType::Routine) | None => Vec::new(),
@@ -471,6 +537,9 @@ pub trait EngineDriver: Send + Sync {
                             || o.schema
                                 .as_ref()
                                 .is_some_and(|s| s.to_lowercase().contains(&kw))
+                            || o.comment
+                                .as_ref()
+                                .is_some_and(|c| c.to_lowercase().contains(&kw))
                     })
                     .collect()
             }
@@ -494,6 +563,7 @@ mod tests {
             table: table.map(str::to_string),
             data_type: None,
             nullable: None,
+            comment: None,
         }
     }
 

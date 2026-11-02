@@ -38,7 +38,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use strut_sql_driver_api::EngineKind;
-use strut_sql_guard::{classify_sql, SqlClass, WriteMode};
+use strut_sql_guard::{classify_sql_raw, SqlClass, WriteMode};
 
 /// Tools always exposed (every mode, every `full_tools` setting).
 pub const CORE_TOOLS: &[&str] = &["search_objects", "execute_sql", "analyze_query_performance"];
@@ -52,6 +52,9 @@ pub const FULL_INTROSPECT_TOOLS: &[&str] = &[
     "list_indexes",
     "list_foreign_keys",
     "schema_overview",
+    "get_relationship_graph",
+    "suggest_joins",
+    "get_schema_context",
 ];
 
 /// DDL tools exposed only with `--full-tools` (and, by tier, `--allow-ddl`).
@@ -100,7 +103,7 @@ pub fn sql_class_tier(class: SqlClass) -> Tier {
 /// Minimum tier required to run `sql` on `engine`, or `None` when the
 /// statement cannot be parsed (the handler will return the parse error).
 pub fn sql_required_tier(sql: &str, engine: EngineKind) -> Option<Tier> {
-    classify_sql(sql, engine)
+    classify_sql_raw(sql, engine)
         .ok()
         .map(|class| sql_class_tier(class.sql_class()))
 }
@@ -256,6 +259,8 @@ pub struct Grant {
     pub max_rows: Option<u32>,
     pub max_bytes: Option<usize>,
     pub query_timeout: Option<Duration>,
+    /// Opt-in in-memory session query history for this principal (PRD-F3-08).
+    pub query_history: bool,
 }
 
 impl Grant {
@@ -267,6 +272,7 @@ impl Grant {
             max_rows: None,
             max_bytes: None,
             query_timeout: None,
+            query_history: false,
         }
     }
 }
@@ -282,6 +288,8 @@ pub struct Authorization {
     pub max_rows: Option<u32>,
     pub max_bytes: Option<usize>,
     pub query_timeout: Option<Duration>,
+    /// Session query history was explicitly enabled for this grant.
+    pub query_history: bool,
 }
 
 impl Authorization {
@@ -407,6 +415,16 @@ impl Policy {
         self.grants.push(grant);
     }
 
+    /// Enable/disable in-memory query history on the synthesized local
+    /// principal's wildcard grant (process-wide env opt-in, PRD-F3-08).
+    pub fn set_local_query_history(&mut self, enabled: bool) {
+        for grant in &mut self.grants {
+            if grant.principal == Principal::LOCAL_ID && grant.source == GrantSource::Any {
+                grant.query_history = enabled;
+            }
+        }
+    }
+
     /// Insert a grant, replacing any existing grant for the same
     /// principal + source. Explicit TOML grants use this to override the
     /// implicit grant derived from a legacy HTTP token entry.
@@ -511,6 +529,7 @@ impl Policy {
             max_rows: grant.max_rows,
             max_bytes: grant.max_bytes,
             query_timeout: grant.query_timeout,
+            query_history: grant.query_history,
         })
     }
 
@@ -543,6 +562,7 @@ mod tests {
             max_rows: Some(10),
             max_bytes: Some(1024),
             query_timeout: Some(Duration::from_secs(2)),
+            query_history: true,
         });
         p.add_grant(Grant {
             principal: "bob".into(),
@@ -551,6 +571,7 @@ mod tests {
             max_rows: None,
             max_bytes: None,
             query_timeout: None,
+            query_history: false,
         });
         p.add_grant(Grant {
             principal: "root".into(),

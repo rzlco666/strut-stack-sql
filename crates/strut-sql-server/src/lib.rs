@@ -35,8 +35,8 @@ use strut_sql_core::redact::redact_url;
 use strut_sql_driver_api::EngineKind;
 use strut_sql_tools::audit::{audit_call, sql_fingerprint};
 use strut_sql_tools::core::{
-    handle_analyze_query, handle_execute_sql, handle_search_objects, AnalyzeQueryParams,
-    BatchQueryItem, ExecuteSqlParams, SearchObjectsParams,
+    handle_analyze_query, handle_execute_sql, handle_search_objects, tool_error_code,
+    AnalyzeQueryParams, BatchQueryItem, ExecuteSqlParams, SearchObjectsParams, ToolErrorKind,
 };
 use strut_sql_tools::ddl::{
     handle_add_column, handle_alter_column, handle_create_table, handle_drop_column,
@@ -48,6 +48,10 @@ use strut_sql_tools::full::{
     handle_describe_table, handle_list_foreign_keys, handle_list_indexes, handle_list_schemas,
     handle_list_sources, handle_list_tables, handle_schema_overview, DescribeTableParams,
     ListForeignKeysParams, ListIndexesParams, ListTablesParams, SchemaOverviewParams, SourceParams,
+};
+use strut_sql_tools::intel::{
+    handle_get_relationship_graph, handle_get_schema_context, handle_suggest_joins,
+    RelationshipGraphParams, SchemaContextParams, SuggestJoinsParams,
 };
 
 pub mod oauth;
@@ -158,12 +162,17 @@ fn required_tier_for_call(
 }
 
 fn authorization_error(denial: &Denial) -> McpError {
-    McpError::invalid_params(format!("authorization denied: {denial}"), None)
+    tool_error_code(
+        format!("authorization denied: {denial}"),
+        ToolErrorKind::Authorization,
+    )
 }
 
 #[tool_router]
 impl McpSqlServer {
-    #[tool(description = "Search schemas, tables, columns, or indexes with keyword filter.")]
+    #[tool(
+        description = "Search schemas, tables, columns, or indexes. Results are ranked exact > prefix > substring > comment; include_score opts into per-object scores."
+    )]
     async fn search_objects(
         &self,
         params: Parameters<SearchObjectsParams>,
@@ -211,7 +220,9 @@ impl McpSqlServer {
         .await
     }
 
-    #[tool(description = "EXPLAIN query plan summary for slow SELECT diagnostics.")]
+    #[tool(
+        description = "EXPLAIN advisor: normalized plan nodes + tiered issues + index advice. analyze:true runs EXPLAIN ANALYZE (opt-in, PostgreSQL/MySQL)."
+    )]
     async fn analyze_query_performance(
         &self,
         params: Parameters<AnalyzeQueryParams>,
@@ -314,7 +325,7 @@ impl McpSqlServer {
     }
 
     #[tool(
-        description = "One-shot schema survey: tables + approx row counts (planner stats; omit if unknown; use COUNT(*) for exact) + FKs."
+        description = "One-shot schema survey: tables + approx row counts (planner stats; omit if unknown; use COUNT(*) for exact) + FKs, FK in/out counts, hubs, orphans."
     )]
     async fn schema_overview(
         &self,
@@ -326,6 +337,57 @@ impl McpSqlServer {
             source,
             None,
             handle_schema_overview(&self.config, params.0),
+        )
+        .await
+    }
+
+    #[tool(
+        description = "Foreign-key relationship graph for a schema; optional focus table + depth (default 2, max 4)."
+    )]
+    async fn get_relationship_graph(
+        &self,
+        params: Parameters<RelationshipGraphParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let source = params.0.source.clone();
+        audit_call(
+            "get_relationship_graph",
+            source,
+            None,
+            handle_get_relationship_graph(&self.config, params.0),
+        )
+        .await
+    }
+
+    #[tool(
+        description = "Shortest FK join paths connecting 2-8 tables, with ready-to-copy join conditions; same-name column guesses are marked."
+    )]
+    async fn suggest_joins(
+        &self,
+        params: Parameters<SuggestJoinsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let source = params.0.source.clone();
+        audit_call(
+            "suggest_joins",
+            source,
+            None,
+            handle_suggest_joins(&self.config, params.0),
+        )
+        .await
+    }
+
+    #[tool(
+        description = "Token-budgeted schema context digest (tables, columns, keys, FK relations, approx rows), expanded around focus tables via the FK graph."
+    )]
+    async fn get_schema_context(
+        &self,
+        params: Parameters<SchemaContextParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let source = params.0.source.clone();
+        audit_call(
+            "get_schema_context",
+            source,
+            None,
+            handle_get_schema_context(&self.config, params.0),
         )
         .await
     }
@@ -1080,4 +1142,28 @@ pub async fn run_http(config: AppConfig, addr: &str) -> Result<()> {
         .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_router_exposes_exactly_twenty_tools() {
+        let router = McpSqlServer::tool_router();
+        let mut names: Vec<String> = router
+            .list_all()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        names.sort();
+        assert_eq!(names.len(), 20, "tool surface: {names:?}");
+        for expected in [
+            "get_relationship_graph",
+            "suggest_joins",
+            "get_schema_context",
+        ] {
+            assert!(names.iter().any(|n| n == expected), "missing {expected}");
+        }
+    }
 }
