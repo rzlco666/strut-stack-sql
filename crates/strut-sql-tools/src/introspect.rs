@@ -1,0 +1,707 @@
+use std::sync::Arc;
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use strut_sql_driver_api::{
+    ColumnInfo as DriverColumnInfo, EngineDriver, EngineKind,
+    ForeignKeyInfo as DriverForeignKeyInfo, IndexInfo as DriverIndexInfo,
+    ObjectType as DriverObjectType, SchemaObject as DriverSchemaObject,
+};
+
+/// Object kind exposed to agents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ObjectType {
+    Schema,
+    Table,
+    Column,
+    Index,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SchemaObject {
+    pub object_type: ObjectType,
+    pub schema: Option<String>,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub table: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nullable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub columns: Option<Vec<ColumnInfo>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indexes: Option<Vec<IndexInfo>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ColumnInfo {
+    pub name: String,
+    pub data_type: String,
+    pub nullable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ForeignKeyInfo {
+    pub name: String,
+    pub table: String,
+    pub columns: Vec<String>,
+    pub ref_table: String,
+    pub ref_columns: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub on_delete: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub on_update: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct IndexInfo {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub unique: bool,
+}
+
+/// Flat index row for `list_indexes` (token-cheap; no nested `indexes[]` / indexdef).
+#[derive(Debug, Clone, Serialize)]
+pub struct ListedIndex {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub table: Option<String>,
+    pub name: String,
+    pub columns: Vec<String>,
+    pub unique: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TableOverview {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approx_rows: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SchemaOverviewMeta {
+    pub n_tables: usize,
+    pub n_foreign_keys: usize,
+    pub truncated: bool,
+    /// Always `"approx"` — planner/stats estimates; use `COUNT(*)` for exact.
+    pub row_counts: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SchemaOverview {
+    pub schema: String,
+    pub tables: Vec<TableOverview>,
+    pub foreign_keys: Vec<ForeignKeyInfo>,
+    pub meta: SchemaOverviewMeta,
+}
+
+const SCHEMA_OVERVIEW_MAX_TABLES: usize = 200;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchResult {
+    pub objects: Vec<SchemaObject>,
+    pub meta: SearchMeta,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchMeta {
+    pub n: usize,
+    pub offset: usize,
+    pub limit: usize,
+    pub has_more: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Schema metadata cache (SQL-BUG-10)
+//
+// `list_tables` / `schema_overview` results are cached per source (engine +
+// connection URL + schema [+ keyword]) for a short TTL so repeated agent
+// introspection does not re-hit the catalogs every call. Freshness is
+// TTL-only: a DDL change becomes visible after the TTL lapses at the latest.
+// TTL comes from `MCP_SQL_SCHEMA_CACHE_TTL_SECS` (default 30; 0 disables).
+// ---------------------------------------------------------------------------
+
+use std::collections::HashMap as StdHashMap;
+use std::sync::{LazyLock, Mutex as StdMutex};
+use std::time::{Duration as StdDuration, Instant as StdInstant};
+
+fn schema_cache_ttl() -> StdDuration {
+    match std::env::var("MCP_SQL_SCHEMA_CACHE_TTL_SECS") {
+        Ok(v) => v
+            .trim()
+            .parse::<u64>()
+            .map(StdDuration::from_secs)
+            .unwrap_or_else(|_| StdDuration::from_secs(30)),
+        Err(_) => StdDuration::from_secs(30),
+    }
+}
+
+type CacheMap<V> = StdHashMap<String, (StdInstant, V)>;
+
+static TABLES_CACHE: LazyLock<StdMutex<CacheMap<Vec<SchemaObject>>>> =
+    LazyLock::new(|| StdMutex::new(StdHashMap::new()));
+
+static OVERVIEW_CACHE: LazyLock<StdMutex<CacheMap<SchemaOverview>>> =
+    LazyLock::new(|| StdMutex::new(StdHashMap::new()));
+
+fn tables_cache() -> &'static StdMutex<CacheMap<Vec<SchemaObject>>> {
+    &TABLES_CACHE
+}
+
+fn overview_cache() -> &'static StdMutex<CacheMap<SchemaOverview>> {
+    &OVERVIEW_CACHE
+}
+
+fn cache_lookup<V: Clone>(
+    map: &StdMutex<StdHashMap<String, (StdInstant, V)>>,
+    key: &str,
+    ttl: StdDuration,
+) -> Option<V> {
+    if ttl.is_zero() {
+        return None;
+    }
+    let mut guard = map.lock().ok()?;
+    match guard.get(key) {
+        Some((at, value)) if at.elapsed() < ttl => Some(value.clone()),
+        Some(_) => {
+            guard.remove(key);
+            None
+        }
+        None => None,
+    }
+}
+
+fn cache_store<V>(map: &StdMutex<StdHashMap<String, (StdInstant, V)>>, key: String, value: V) {
+    if let Ok(mut guard) = map.lock() {
+        guard.insert(key, (StdInstant::now(), value));
+    }
+}
+
+fn tables_cache_key(
+    engine: EngineKind,
+    connection_url: Option<&str>,
+    schema: Option<&str>,
+    keyword: Option<&str>,
+) -> String {
+    format!(
+        "tables|{:?}|{}|{}|{}",
+        engine,
+        connection_url.unwrap_or(""),
+        schema.unwrap_or(""),
+        keyword.unwrap_or("")
+    )
+}
+
+fn overview_cache_key(
+    engine: EngineKind,
+    connection_url: Option<&str>,
+    schema: Option<&str>,
+) -> String {
+    format!(
+        "overview|{:?}|{}|{}",
+        engine,
+        connection_url.unwrap_or(""),
+        schema.unwrap_or("")
+    )
+}
+
+fn map_object_type(t: DriverObjectType) -> ObjectType {
+    match t {
+        DriverObjectType::Schema => ObjectType::Schema,
+        DriverObjectType::Table => ObjectType::Table,
+        DriverObjectType::Column => ObjectType::Column,
+        DriverObjectType::Index => ObjectType::Index,
+        DriverObjectType::ForeignKey => ObjectType::Table,
+        DriverObjectType::Routine => ObjectType::Table,
+    }
+}
+
+fn map_schema_object(o: DriverSchemaObject) -> SchemaObject {
+    SchemaObject {
+        object_type: map_object_type(o.object_type),
+        schema: o.schema,
+        name: o.name,
+        table: o.table,
+        data_type: o.data_type,
+        nullable: o.nullable,
+        columns: None,
+        indexes: None,
+    }
+}
+
+fn map_column(engine: EngineKind, c: DriverColumnInfo) -> ColumnInfo {
+    // Legacy MySQL describe_table exposed Key/Extra/Comment/Default; PG and
+    // SQLite exposed only name/type/nullability.
+    let mysql_extras = engine == EngineKind::MySql;
+    ColumnInfo {
+        name: c.name,
+        data_type: c.data_type,
+        nullable: c.nullable,
+        key: if mysql_extras { c.key } else { None },
+        extra: if mysql_extras { c.extra } else { None },
+        comment: if mysql_extras { c.comment } else { None },
+        default: if mysql_extras { c.default_value } else { None },
+    }
+}
+
+fn map_fk(fk: DriverForeignKeyInfo) -> ForeignKeyInfo {
+    ForeignKeyInfo {
+        name: fk.name,
+        table: fk.table,
+        columns: fk.columns,
+        ref_table: fk.ref_table,
+        ref_columns: fk.ref_columns,
+        on_delete: fk.on_delete,
+        on_update: fk.on_update,
+    }
+}
+
+fn map_index(idx: DriverIndexInfo) -> IndexInfo {
+    IndexInfo {
+        name: idx.name,
+        columns: idx.columns,
+        unique: idx.unique,
+    }
+}
+
+pub fn filter_objects(mut objects: Vec<SchemaObject>, keyword: Option<&str>) -> Vec<SchemaObject> {
+    if let Some(kw) = keyword {
+        let kw = kw.to_lowercase();
+        objects.retain(|o| {
+            o.name.to_lowercase().contains(&kw)
+                || o.table
+                    .as_ref()
+                    .is_some_and(|t| t.to_lowercase().contains(&kw))
+                || o.schema
+                    .as_ref()
+                    .is_some_and(|s| s.to_lowercase().contains(&kw))
+        });
+    }
+    objects
+}
+
+/// Slice one page out of `objects` (SQL-BUG-01). The old code drained
+/// `offset..total.min(offset + limit)`, which panics when `offset > total`
+/// (invalid range). Clamp both bounds so an out-of-range offset simply
+/// yields an empty page.
+pub fn paginate_objects(
+    mut objects: Vec<SchemaObject>,
+    offset: usize,
+    limit: usize,
+) -> Vec<SchemaObject> {
+    let total = objects.len();
+    let start = offset.min(total);
+    let end = start.saturating_add(limit).min(total);
+    objects.drain(start..end).collect()
+}
+
+pub async fn list_schemas(
+    driver: &Arc<dyn EngineDriver>,
+    keyword: Option<&str>,
+) -> Result<Vec<SchemaObject>, String> {
+    let objects = driver
+        .list_schemas()
+        .await
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(map_schema_object)
+        .collect();
+    Ok(filter_objects(objects, keyword))
+}
+
+pub async fn list_tables(
+    driver: &Arc<dyn EngineDriver>,
+    connection_url: Option<&str>,
+    schema: Option<&str>,
+    keyword: Option<&str>,
+) -> Result<Vec<SchemaObject>, String> {
+    let ttl = schema_cache_ttl();
+    let key = tables_cache_key(driver.kind(), connection_url, schema, keyword);
+    if let Some(hit) = cache_lookup(tables_cache(), &key, ttl) {
+        return Ok(hit);
+    }
+    let objects = driver
+        .list_tables(schema)
+        .await
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(map_schema_object)
+        .collect();
+    let fresh = filter_objects(objects, keyword);
+    if !ttl.is_zero() {
+        cache_store(tables_cache(), key, fresh.clone());
+    }
+    Ok(fresh)
+}
+
+pub async fn list_columns(
+    driver: &Arc<dyn EngineDriver>,
+    schema: Option<&str>,
+    keyword: Option<&str>,
+) -> Result<Vec<SchemaObject>, String> {
+    let objects = driver
+        .list_columns(schema)
+        .await
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(map_schema_object)
+        .collect();
+    Ok(filter_objects(objects, keyword))
+}
+
+async fn list_index_objects(
+    driver: &Arc<dyn EngineDriver>,
+    schema: Option<&str>,
+    table: Option<&str>,
+    keyword: Option<&str>,
+) -> Result<Vec<SchemaObject>, String> {
+    let objects = driver
+        .list_indexes(schema, table)
+        .await
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|idx| SchemaObject {
+            object_type: ObjectType::Index,
+            schema: idx.schema.clone(),
+            name: idx.name.clone(),
+            table: Some(idx.table.clone()),
+            data_type: None,
+            nullable: None,
+            columns: None,
+            indexes: Some(vec![map_index(idx)]),
+        })
+        .collect();
+    Ok(filter_objects(objects, keyword))
+}
+
+pub async fn search_objects(
+    driver: &Arc<dyn EngineDriver>,
+    connection_url: Option<&str>,
+    object_type: ObjectType,
+    keyword: Option<&str>,
+    schema: Option<&str>,
+    offset: usize,
+    limit: usize,
+) -> Result<SearchResult, String> {
+    let objects = match object_type {
+        ObjectType::Schema => list_schemas(driver, keyword).await?,
+        ObjectType::Table => list_tables(driver, connection_url, schema, keyword).await?,
+        ObjectType::Column => list_columns(driver, schema, keyword).await?,
+        ObjectType::Index => list_index_objects(driver, schema, None, keyword).await?,
+    };
+
+    let total = objects.len();
+    let slice = paginate_objects(objects, offset, limit);
+
+    Ok(SearchResult {
+        meta: SearchMeta {
+            n: slice.len(),
+            offset,
+            limit,
+            has_more: offset + slice.len() < total,
+        },
+        objects: slice,
+    })
+}
+
+pub async fn describe_table(
+    driver: &Arc<dyn EngineDriver>,
+    schema: Option<&str>,
+    table: &str,
+) -> Result<SchemaObject, String> {
+    let engine = driver.kind();
+    let info = driver
+        .describe_table(schema, table)
+        .await
+        .map_err(|e| e.to_string())?;
+    let columns: Vec<ColumnInfo> = info
+        .columns
+        .into_iter()
+        .map(|c| map_column(engine, c))
+        .collect();
+    let indexes = driver
+        .list_indexes(info.schema.as_deref(), Some(&info.name))
+        .await
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(map_index)
+        .collect();
+
+    Ok(SchemaObject {
+        object_type: ObjectType::Table,
+        schema: info.schema,
+        name: info.name,
+        table: None,
+        data_type: None,
+        nullable: None,
+        columns: Some(columns),
+        indexes: Some(indexes),
+    })
+}
+
+pub async fn list_indexes(
+    driver: &Arc<dyn EngineDriver>,
+    schema: Option<&str>,
+    table: Option<&str>,
+    keyword: Option<&str>,
+) -> Result<Vec<ListedIndex>, String> {
+    let objects = list_index_objects(driver, schema, table, keyword).await?;
+    Ok(objects
+        .into_iter()
+        .map(listed_index_from_schema_object)
+        .collect())
+}
+
+/// Flatten a schema index object into the compact `list_indexes` row shape.
+pub fn listed_index_from_schema_object(o: SchemaObject) -> ListedIndex {
+    let nested = o.indexes.and_then(|i| i.into_iter().next());
+    ListedIndex {
+        schema: o.schema,
+        table: o.table,
+        name: o.name,
+        columns: nested
+            .as_ref()
+            .map(|i| i.columns.clone())
+            .unwrap_or_default(),
+        unique: nested.map(|i| i.unique).unwrap_or(false),
+    }
+}
+
+pub async fn list_foreign_keys(
+    driver: &Arc<dyn EngineDriver>,
+    schema: Option<&str>,
+    table: Option<&str>,
+) -> Result<Vec<ForeignKeyInfo>, String> {
+    Ok(driver
+        .list_foreign_keys(schema, table)
+        .await
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(map_fk)
+        .collect())
+}
+
+/// One-shot schema survey: tables (+ approx row counts) and foreign keys.
+pub async fn schema_overview(
+    driver: &Arc<dyn EngineDriver>,
+    connection_url: Option<&str>,
+    schema: Option<&str>,
+) -> Result<SchemaOverview, String> {
+    let ttl = schema_cache_ttl();
+    let key = overview_cache_key(driver.kind(), connection_url, schema);
+    if let Some(hit) = cache_lookup(overview_cache(), &key, ttl) {
+        return Ok(hit);
+    }
+    let fresh = schema_overview_uncached(driver, schema).await?;
+    if !ttl.is_zero() {
+        cache_store(overview_cache(), key, fresh.clone());
+    }
+    Ok(fresh)
+}
+
+async fn schema_overview_uncached(
+    driver: &Arc<dyn EngineDriver>,
+    schema: Option<&str>,
+) -> Result<SchemaOverview, String> {
+    let engine = driver.kind();
+    let schema_name = match (engine, schema) {
+        (EngineKind::MySql, Some("*")) => {
+            return Err(
+                "schema_overview requires schema on MySQL (or omit for current database)".into(),
+            )
+        }
+        _ => driver
+            .resolve_schema(schema)
+            .await
+            .map_err(|e| e.to_string())?,
+    };
+
+    let mut tables: Vec<TableOverview> = driver
+        .approximate_row_counts(Some(&schema_name))
+        .await
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|t| TableOverview {
+            name: t.name,
+            approx_rows: t.approx_rows,
+        })
+        .collect();
+
+    let truncated = tables.len() > SCHEMA_OVERVIEW_MAX_TABLES;
+    if truncated {
+        tables.truncate(SCHEMA_OVERVIEW_MAX_TABLES);
+    }
+
+    let foreign_keys: Vec<ForeignKeyInfo> = if engine == EngineKind::Sqlite {
+        let mut all = Vec::new();
+        for t in &tables {
+            all.extend(
+                driver
+                    .list_foreign_keys(Some(&schema_name), Some(&t.name))
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .into_iter()
+                    .map(map_fk),
+            );
+        }
+        all
+    } else {
+        driver
+            .list_foreign_keys(Some(&schema_name), None)
+            .await
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(map_fk)
+            .collect()
+    };
+
+    let n_tables = tables.len();
+    let n_foreign_keys = foreign_keys.len();
+    Ok(SchemaOverview {
+        schema: schema_name,
+        tables,
+        foreign_keys,
+        meta: SchemaOverviewMeta {
+            n_tables,
+            n_foreign_keys,
+            truncated,
+            row_counts: "approx",
+        },
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn obj(name: &str, schema: Option<&str>) -> SchemaObject {
+        SchemaObject {
+            object_type: ObjectType::Table,
+            schema: schema.map(str::to_string),
+            name: name.into(),
+            table: None,
+            data_type: None,
+            nullable: None,
+            columns: None,
+            indexes: None,
+        }
+    }
+
+    #[test]
+    fn pagination_clamps_out_of_range_offset() {
+        let objects = vec![obj("a", None), obj("b", None)];
+        assert!(paginate_objects(objects.clone(), 5, 10).is_empty());
+        assert_eq!(paginate_objects(objects, 1, 10).len(), 1);
+    }
+
+    #[test]
+    fn paginate_objects_normal_and_partial_pages() {
+        let objects = (0..5)
+            .map(|i| obj(&format!("t{i}"), None))
+            .collect::<Vec<_>>();
+        let page = paginate_objects(objects, 1, 2);
+        assert_eq!(page.len(), 2);
+        assert_eq!(page[0].name, "t1");
+        let objects = (0..5)
+            .map(|i| obj(&format!("t{i}"), None))
+            .collect::<Vec<_>>();
+        let page = paginate_objects(objects, 4, 10);
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].name, "t4");
+        assert!(paginate_objects(vec![obj("x", None)], 0, 0).is_empty());
+    }
+
+    #[test]
+    fn listed_index_flattens_without_indexdef() {
+        let o = SchemaObject {
+            object_type: ObjectType::Index,
+            schema: Some("public".into()),
+            name: "users_email_key".into(),
+            table: Some("users".into()),
+            data_type: None,
+            nullable: None,
+            columns: None,
+            indexes: Some(vec![IndexInfo {
+                name: "users_email_key".into(),
+                columns: vec!["email".into()],
+                unique: true,
+            }]),
+        };
+        let listed = listed_index_from_schema_object(o);
+        assert_eq!(listed.name, "users_email_key");
+        assert_eq!(listed.table.as_deref(), Some("users"));
+        assert_eq!(listed.columns, vec!["email"]);
+        assert!(listed.unique);
+        let json = serde_json::to_string(&listed).unwrap();
+        assert!(!json.contains("CREATE INDEX"));
+        assert!(!json.contains("\"indexes\""));
+        assert!(!json.contains("data_type"));
+    }
+
+    #[test]
+    fn map_index_preserves_unique_and_columns() {
+        let mapped = map_index(DriverIndexInfo {
+            schema: Some("public".into()),
+            table: "users".into(),
+            name: "users_username_key".into(),
+            columns: vec!["username".into()],
+            unique: true,
+            primary: false,
+        });
+        assert_eq!(mapped.name, "users_username_key");
+        assert_eq!(mapped.columns, vec!["username"]);
+        assert!(mapped.unique);
+    }
+
+    #[test]
+    fn schema_cache_roundtrip_and_expiry() {
+        use std::time::Duration;
+        let map: StdMutex<StdHashMap<String, (StdInstant, Vec<SchemaObject>)>> =
+            StdMutex::new(StdHashMap::new());
+        cache_store(&map, "k".into(), vec![obj("cached", None)]);
+        let hit = cache_lookup(&map, "k", Duration::from_secs(30)).expect("fresh hit");
+        assert_eq!(hit[0].name, "cached");
+        assert!(
+            cache_lookup(&map, "k", Duration::ZERO).is_none(),
+            "TTL 0 disables the cache"
+        );
+        // Expired entries are misses: age the entry past a tiny TTL.
+        std::thread::sleep(Duration::from_millis(3));
+        assert!(
+            cache_lookup(&map, "k", Duration::from_millis(1)).is_none(),
+            "entry older than TTL must miss"
+        );
+    }
+
+    #[test]
+    fn schema_overview_meta_marks_approx_row_counts() {
+        let meta = SchemaOverviewMeta {
+            n_tables: 1,
+            n_foreign_keys: 0,
+            truncated: false,
+            row_counts: "approx",
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        assert!(json.contains("\"row_counts\":\"approx\""));
+    }
+
+    #[test]
+    fn keyword_filters_name_table_and_schema() {
+        let mut o = obj("users", Some("public"));
+        o.table = Some("accounts".into());
+        assert_eq!(filter_objects(vec![o.clone()], Some("user")).len(), 1);
+        assert_eq!(filter_objects(vec![o.clone()], Some("acc")).len(), 1);
+        assert_eq!(filter_objects(vec![o], Some("pub")).len(), 1);
+    }
+}

@@ -1,23 +1,27 @@
 //! SQLite integration tests — in-memory, no external database required.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use sqlx::sqlite::SqlitePoolOptions;
+use strut_sql_driver_api::{ConnectOptions, EngineDriver, EngineKind};
+use strut_sql_driver_sqlite::SqliteDriver;
 use strut_stack_sql::config::WriteMode;
-use strut_stack_sql::db::EngineKind;
-use strut_stack_sql::db::{
-    analyze_query, describe_table, execute_query, list_tables, EnginePool, ExecOptions,
-};
 use strut_stack_sql::guard::validate_and_prepare;
+use strut_stack_sql::tools::exec::{execute_query, ExecOptions};
+use strut_stack_sql::tools::explain::analyze_query;
+use strut_stack_sql::tools::introspect::{describe_table, list_tables};
 
-async fn sqlite_pool() -> EnginePool {
-    let pool = SqlitePoolOptions::new()
-        .max_connections(2)
-        .connect("sqlite::memory:")
+async fn sqlite_pool() -> Arc<dyn EngineDriver> {
+    let options = ConnectOptions {
+        pool_size: 1,
+        read_only: false,
+        ..ConnectOptions::default()
+    };
+    let driver = SqliteDriver::from_connection_string_with_options("sqlite::memory:", &options)
         .await
-        .expect("sqlite memory pool");
-    EnginePool::Sqlite(pool)
+        .expect("sqlite memory driver");
+    Arc::new(*driver)
 }
 
 fn exec_opts(write_mode: WriteMode) -> ExecOptions {
@@ -94,7 +98,7 @@ async fn sqlite_list_tables_and_describe_table() {
         .expect("list tables");
     assert!(tables.iter().any(|t| t.name == "items"));
 
-    let described = describe_table(&pool, None, Some("main"), "items")
+    let described = describe_table(&pool, Some("main"), "items")
         .await
         .expect("describe items");
     let columns = described.columns.expect("columns");
@@ -132,7 +136,7 @@ async fn sqlite_describe_table_unique_index_flag() {
     .await
     .expect("non-unique index");
 
-    let described = describe_table(&pool, None, Some("main"), "uniq_demo")
+    let described = describe_table(&pool, Some("main"), "uniq_demo")
         .await
         .expect("describe uniq_demo");
     let indexes = described.indexes.expect("indexes");

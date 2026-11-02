@@ -4,10 +4,12 @@ use rmcp::model::CallToolResult;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::config::{AppConfig, WriteMode};
-use crate::db::{execute_query, EngineKind, ExecOptions};
-use crate::guard::{classify_sql, validate_and_prepare, SqlClass};
-use crate::tools::core::{exec_options, json_result, tool_error};
+use strut_sql_core::config::{AppConfig, WriteMode};
+use strut_sql_driver_api::EngineKind;
+use strut_sql_guard::{classify_sql, validate_and_prepare, SqlClass};
+
+use crate::core::{exec_options, json_result, tool_error};
+use crate::exec::{execute_query, ExecOptions};
 
 #[derive(Debug, Clone, Copy, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -247,8 +249,11 @@ pub async fn handle_schema_mutate(
     let source = config
         .source(params.source.as_deref())
         .map_err(|e| tool_error(e.to_string()))?;
-    let pool = source.pool().await.map_err(|e| tool_error(e.to_string()))?;
-    let engine = pool.engine();
+    let driver = source
+        .driver()
+        .await
+        .map_err(|e| tool_error(e.to_string()))?;
+    let engine = driver.kind();
 
     let sql = build_ddl_sql(&params, engine)?;
 
@@ -258,7 +263,7 @@ pub async fn handle_schema_mutate(
     let mut opts: ExecOptions = exec_options(config);
     opts.write_mode = WriteMode::AllowDdl;
 
-    let result = execute_query(&pool, &sql, &[], &opts)
+    let result = execute_query(&driver, &sql, &[], &opts)
         .await
         .map_err(|e| tool_error(e.to_string()))?;
 
@@ -360,7 +365,7 @@ fn build_ddl_sql_unchecked(
             let col = quote_ident(&column.name, engine);
             let data_type = validate_column_type(&column.data_type)?;
             match engine {
-                EngineKind::Mysql => Ok(format!(
+                EngineKind::MySql => Ok(format!(
                     "ALTER TABLE {qualified} MODIFY COLUMN {col} {data_type}"
                 )),
                 EngineKind::Postgres => {
@@ -535,7 +540,7 @@ fn qualify_table(schema: Option<&str>, table: &str, engine: EngineKind) -> Strin
 
 fn quote_ident(name: &str, engine: EngineKind) -> String {
     match engine {
-        EngineKind::Mysql => {
+        EngineKind::MySql => {
             let trimmed = name.trim().trim_matches('`');
             format!("`{}`", trimmed.replace('`', "``"))
         }
@@ -565,7 +570,7 @@ mod tests {
             confirm: None,
             source: None,
         };
-        let sql = build_ddl_sql(&params, EngineKind::Mysql).unwrap();
+        let sql = build_ddl_sql(&params, EngineKind::MySql).unwrap();
         assert_eq!(sql, "ALTER TABLE `t` MODIFY COLUMN `c` VARCHAR(64)");
     }
 
@@ -684,7 +689,7 @@ mod tests {
             None,
             Some("INT, (SELECT 1)"),
         );
-        assert!(build_ddl_sql(&params, EngineKind::Mysql).is_err());
+        assert!(build_ddl_sql(&params, EngineKind::MySql).is_err());
     }
 
     #[test]

@@ -15,6 +15,7 @@ fn bound(sql: &str, params: Vec<SqlValue>, row_cap: Option<usize>) -> BoundQuery
         sql: sql.to_string(),
         params,
         row_cap,
+        fetch_rows: true,
     }
 }
 
@@ -118,7 +119,7 @@ where
     );
 
     // Verify list_tables contains our table
-    let tables = driver.list_tables().await?;
+    let tables = driver.list_tables(None).await?;
     assert!(
         tables.iter().any(|t| t.name == "conformance_test"),
         "list_tables should contain conformance_test"

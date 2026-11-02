@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use async_trait::async_trait;
 use bigdecimal::BigDecimal;
 use chrono::{NaiveDate, NaiveDateTime};
@@ -11,6 +13,27 @@ pub enum EngineKind {
     Postgres,
     MySql,
     Sqlite,
+}
+
+/// Connection-pool options shared by every driver.
+#[derive(Debug, Clone)]
+pub struct ConnectOptions {
+    pub pool_size: u32,
+    pub read_only: bool,
+    pub connect_timeout: Duration,
+    /// Server-side statement timeout applied on each new connection (PG/MySQL).
+    pub statement_timeout: Duration,
+}
+
+impl Default for ConnectOptions {
+    fn default() -> Self {
+        Self {
+            pool_size: 5,
+            read_only: false,
+            connect_timeout: Duration::from_secs(2),
+            statement_timeout: Duration::from_secs(10),
+        }
+    }
 }
 
 /// Neutral SQL value representation for cross-driver compatibility.
@@ -52,6 +75,8 @@ pub struct QueryResult {
 pub struct QueryMeta {
     pub row_count: usize,
     pub truncated: bool,
+    /// Rows affected by a non-row-returning statement.
+    pub rows_affected: Option<u64>,
 }
 
 /// Schema object (table, column, index, etc.).
@@ -60,7 +85,9 @@ pub struct SchemaObject {
     pub object_type: ObjectType,
     pub schema: Option<String>,
     pub name: String,
-    pub display_name: Option<String>,
+    pub table: Option<String>,
+    pub data_type: Option<String>,
+    pub nullable: Option<bool>,
 }
 
 /// Object type in schema.
@@ -83,6 +110,12 @@ pub struct ColumnInfo {
     pub nullable: bool,
     pub default_value: Option<String>,
     pub is_primary_key: bool,
+    /// MySQL `SHOW FULL COLUMNS.Key` (PRI/UNI/MUL); other engines leave `None`.
+    pub key: Option<String>,
+    /// MySQL `SHOW FULL COLUMNS.Extra`; other engines leave `None`.
+    pub extra: Option<String>,
+    /// MySQL `SHOW FULL COLUMNS.Comment`; other engines leave `None`.
+    pub comment: Option<String>,
 }
 
 /// Table information.
@@ -127,12 +160,21 @@ pub struct RoutineInfo {
     pub return_type: Option<String>,
 }
 
+/// Approximate row count for one table (planner/stats estimates).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TableRowCount {
+    pub name: String,
+    pub approx_rows: Option<i64>,
+}
+
 /// Bound query with SQL and parameters.
 #[derive(Debug, Clone)]
 pub struct BoundQuery {
     pub sql: String,
     pub params: Vec<SqlValue>,
     pub row_cap: Option<usize>,
+    /// Fetch rows (`true`) or run as a command and report rows affected.
+    pub fetch_rows: bool,
 }
 
 /// Driver-specific error.
@@ -166,17 +208,36 @@ pub trait EngineDriver: Send + Sync {
     /// Return the engine kind.
     fn kind(&self) -> EngineKind;
 
-    /// Create a driver instance from a connection string.
+    /// Create a driver instance from a connection string with pool options.
     ///
     /// The connection string format is engine-specific (e.g., postgres://, mysql://, sqlite:).
-    async fn from_connection_string(connection_string: &str) -> Result<Box<Self>, DriverError>
+    async fn from_connection_string_with_options(
+        connection_string: &str,
+        options: &ConnectOptions,
+    ) -> Result<Box<Self>, DriverError>
     where
         Self: Sized;
+
+    /// Create a driver instance with default options.
+    async fn from_connection_string(connection_string: &str) -> Result<Box<Self>, DriverError>
+    where
+        Self: Sized,
+    {
+        Self::from_connection_string_with_options(connection_string, &ConnectOptions::default())
+            .await
+    }
+
     /// Execute a bound query.
     async fn execute(&self, query: &BoundQuery) -> Result<QueryResult, DriverError>;
 
-    /// List all tables in the database.
-    async fn list_tables(&self) -> Result<Vec<SchemaObject>, DriverError>;
+    /// List all schemas/databases.
+    async fn list_schemas(&self) -> Result<Vec<SchemaObject>, DriverError>;
+
+    /// List tables, optionally scoped to a schema/database.
+    async fn list_tables(&self, schema: Option<&str>) -> Result<Vec<SchemaObject>, DriverError>;
+
+    /// List columns, optionally scoped to a schema/database.
+    async fn list_columns(&self, schema: Option<&str>) -> Result<Vec<SchemaObject>, DriverError>;
 
     /// Describe a table's schema.
     async fn describe_table(
@@ -185,11 +246,28 @@ pub trait EngineDriver: Send + Sync {
         table: &str,
     ) -> Result<TableInfo, DriverError>;
 
-    /// List all indexes.
-    async fn list_indexes(&self) -> Result<Vec<IndexInfo>, DriverError>;
+    /// List indexes, optionally scoped to a schema/database and table.
+    async fn list_indexes(
+        &self,
+        schema: Option<&str>,
+        table: Option<&str>,
+    ) -> Result<Vec<IndexInfo>, DriverError>;
 
-    /// List all foreign keys.
-    async fn list_foreign_keys(&self) -> Result<Vec<ForeignKeyInfo>, DriverError>;
+    /// List foreign keys, optionally scoped to a schema/database and table.
+    async fn list_foreign_keys(
+        &self,
+        schema: Option<&str>,
+        table: Option<&str>,
+    ) -> Result<Vec<ForeignKeyInfo>, DriverError>;
+
+    /// Resolve the default schema/database name for this driver.
+    async fn resolve_schema(&self, schema: Option<&str>) -> Result<String, DriverError>;
+
+    /// Approximate row counts per table from planner/catalog statistics.
+    async fn approximate_row_counts(
+        &self,
+        schema: Option<&str>,
+    ) -> Result<Vec<TableRowCount>, DriverError>;
 
     /// List all routines (functions/procedures).
     async fn list_routines(&self) -> Result<Vec<RoutineInfo>, DriverError>;
@@ -199,7 +277,45 @@ pub trait EngineDriver: Send + Sync {
         &self,
         keyword: Option<&str>,
         object_type: Option<ObjectType>,
-    ) -> Result<Vec<SchemaObject>, DriverError>;
+    ) -> Result<Vec<SchemaObject>, DriverError> {
+        let objects = match object_type {
+            Some(ObjectType::Schema) => self.list_schemas().await?,
+            Some(ObjectType::Table) => self.list_tables(None).await?,
+            Some(ObjectType::Column) => self.list_columns(None).await?,
+            Some(ObjectType::Index) => self
+                .list_indexes(None, None)
+                .await?
+                .into_iter()
+                .map(|i| SchemaObject {
+                    object_type: ObjectType::Index,
+                    schema: i.schema,
+                    name: i.name,
+                    table: Some(i.table),
+                    data_type: None,
+                    nullable: None,
+                })
+                .collect(),
+            Some(ObjectType::ForeignKey) | Some(ObjectType::Routine) | None => Vec::new(),
+        };
+        Ok(match keyword {
+            Some(kw) => {
+                let kw = kw.to_lowercase();
+                objects
+                    .into_iter()
+                    .filter(|o| {
+                        o.name.to_lowercase().contains(&kw)
+                            || o.table
+                                .as_ref()
+                                .is_some_and(|t| t.to_lowercase().contains(&kw))
+                            || o.schema
+                                .as_ref()
+                                .is_some_and(|s| s.to_lowercase().contains(&kw))
+                    })
+                    .collect()
+            }
+            None => objects,
+        })
+    }
 
     /// Ping the database to check connectivity.
     async fn ping(&self) -> Result<(), DriverError>;

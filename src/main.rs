@@ -21,12 +21,12 @@ async fn main() -> Result<()> {
 }
 
 fn init_tracing() {
-    // Audit events (target "audit", one per tool call — see server.rs) are
+    // Audit events (target "audit", one per tool call — see crates/strut-sql-tools/src/audit.rs) are
     // info-level: visible in the default filter, isolatable with
     // MCP_SQL_LOG=audit=info.
     let filter = EnvFilter::try_from_env("MCP_SQL_LOG")
         .or_else(|_| EnvFilter::try_from_env("STRUT_STACK_SQL_LOG"))
-        .unwrap_or_else(|_| EnvFilter::new("info,sqlx=warn,audit=info"));
+        .unwrap_or_else(|_| EnvFilter::new(strut_stack_sql::server::DEFAULT_LOG_FILTER));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)

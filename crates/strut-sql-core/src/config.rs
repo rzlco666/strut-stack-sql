@@ -6,9 +6,13 @@ use anyhow::{bail, Context, Result};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
-use crate::db::{
-    detect_engine_from_url, parse_host_port, EngineKind, EnginePool, LazyEnginePool,
-    DEFAULT_CONNECT_TIMEOUT_SECS,
+use std::sync::Arc;
+
+use strut_sql_driver_api::{EngineDriver, EngineKind};
+pub use strut_sql_guard::WriteMode;
+
+use crate::registry::{
+    detect_engine_from_url, parse_host_port, LazyDriver, DEFAULT_CONNECT_TIMEOUT_SECS,
 };
 
 pub const DEFAULT_MAX_ROWS: u32 = 100;
@@ -16,39 +20,6 @@ pub const DEFAULT_MAX_BYTES: usize = 64 * 1024;
 pub const DEFAULT_POOL_SIZE: u32 = 10;
 pub const DEFAULT_QUERY_TIMEOUT_SECS: u64 = 10;
 pub const DEFAULT_BATCH_CONCURRENCY: usize = 8;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub enum WriteMode {
-    ReadOnly,
-    AllowWrites,
-    AllowDdl,
-}
-
-impl WriteMode {
-    pub fn allows_dml(self) -> bool {
-        matches!(self, Self::AllowWrites | Self::AllowDdl)
-    }
-
-    pub fn allows_ddl(self) -> bool {
-        matches!(self, Self::AllowDdl)
-    }
-
-    /// The stricter (lower) of two modes — used to cap a per-token mode by
-    /// the process-wide mode so a token can never exceed the process grant.
-    pub fn capped(self, ceiling: WriteMode) -> WriteMode {
-        self.min(ceiling)
-    }
-
-    /// Parse a token/config mode string: `readonly` | `writes` | `ddl`.
-    pub fn parse_mode(s: &str) -> Result<WriteMode> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "readonly" | "read-only" | "read_only" | "read" | "ro" => Ok(Self::ReadOnly),
-            "writes" | "write" | "dml" => Ok(Self::AllowWrites),
-            "ddl" | "admin" => Ok(Self::AllowDdl),
-            other => bail!("invalid write mode '{other}' (expected readonly, writes, or ddl)"),
-        }
-    }
-}
 
 /// One HTTP bearer token with its own authorization grant (SQL-SEC-05 /
 /// SQL-GAP-01, pragmatic v1.1 form): a name, the secret, the max
@@ -243,24 +214,25 @@ pub struct SourceConfig {
     pub engine: Option<String>,
 }
 
+/// One configured source: its metadata plus the lazily connected driver.
 #[derive(Debug, Clone)]
 pub struct ResolvedSource {
     pub name: String,
     pub url: String,
     pub engine: EngineKind,
-    lazy_pool: LazyEnginePool,
+    lazy_driver: LazyDriver,
 }
 
 impl ResolvedSource {
-    pub async fn pool(&self) -> Result<EnginePool> {
-        self.lazy_pool.get().await
+    pub async fn driver(&self) -> Result<Arc<dyn EngineDriver>> {
+        self.lazy_driver.get().await
     }
 
-    pub fn with_connected_pool(
+    pub fn with_driver(
         name: impl Into<String>,
         url: String,
         engine: EngineKind,
-        pool: EnginePool,
+        driver: Arc<dyn EngineDriver>,
         read_only: bool,
     ) -> Self {
         let name = name.into();
@@ -268,7 +240,7 @@ impl ResolvedSource {
             name: name.clone(),
             url: url.clone(),
             engine,
-            lazy_pool: LazyEnginePool::with_pool(url, engine, pool, read_only),
+            lazy_driver: LazyDriver::with_driver(url, engine, driver, read_only),
         }
     }
 }
@@ -310,7 +282,7 @@ impl AppConfig {
 
     pub async fn connect_all(&self) -> Result<()> {
         for source in self.sources.values() {
-            source.pool().await?.ping().await?;
+            source.driver().await?.ping().await?;
         }
         Ok(())
     }
@@ -458,7 +430,7 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
                     name: src.name.clone(),
                     url: url.clone(),
                     engine,
-                    lazy_pool: LazyEnginePool::new(
+                    lazy_driver: LazyDriver::new(
                         url,
                         engine,
                         pool_size,
@@ -567,7 +539,7 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
             name: "default".into(),
             url: url.clone(),
             engine,
-            lazy_pool: LazyEnginePool::new(
+            lazy_driver: LazyDriver::new(
                 url,
                 engine,
                 pool_size,
@@ -810,7 +782,7 @@ pub fn source_endpoint(url: &str, engine: EngineKind) -> SourceEndpoint {
     SourceEndpoint {
         engine: match engine {
             EngineKind::Postgres => "postgres".into(),
-            EngineKind::Mysql => "mysql".into(),
+            EngineKind::MySql => "mysql".into(),
             EngineKind::Sqlite => "sqlite".into(),
         },
         host,
@@ -843,7 +815,7 @@ fn database_from_url(url: &str, engine: EngineKind) -> Option<String> {
                 Some(path.split('?').next().unwrap_or(path).to_string())
             }
         }
-        EngineKind::Postgres | EngineKind::Mysql => {
+        EngineKind::Postgres | EngineKind::MySql => {
             let lower = url.to_ascii_lowercase();
             let rest = if lower.starts_with("postgresql://") {
                 url.get("postgresql://".len()..)?
@@ -886,7 +858,7 @@ mod tests {
         );
         assert_eq!(
             detect_engine(None, "mysql://localhost/db").unwrap(),
-            EngineKind::Mysql
+            EngineKind::MySql
         );
         assert_eq!(
             detect_engine(None, "sqlite::memory:").unwrap(),

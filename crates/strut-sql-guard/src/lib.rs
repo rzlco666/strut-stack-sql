@@ -10,8 +10,45 @@ use sqlparser::ast::{
 use sqlparser::dialect::{Dialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect};
 use sqlparser::parser::Parser;
 
-use crate::config::WriteMode;
-use crate::db::EngineKind;
+use strut_sql_driver_api::EngineKind;
+
+/// Process-wide write authorization tier.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+pub enum WriteMode {
+    ReadOnly,
+    AllowWrites,
+    AllowDdl,
+}
+
+impl WriteMode {
+    pub fn allows_dml(self) -> bool {
+        matches!(self, Self::AllowWrites | Self::AllowDdl)
+    }
+
+    pub fn allows_ddl(self) -> bool {
+        matches!(self, Self::AllowDdl)
+    }
+
+    /// The stricter (lower) of two modes — used to cap a per-token mode by
+    /// the process-wide mode so a token can never exceed the process grant.
+    pub fn capped(self, ceiling: WriteMode) -> WriteMode {
+        self.min(ceiling)
+    }
+
+    /// Parse a token/config mode string: `readonly` | `writes` | `ddl`.
+    pub fn parse_mode(s: &str) -> anyhow::Result<WriteMode> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "readonly" | "read-only" | "read_only" | "read" | "ro" => Ok(Self::ReadOnly),
+            "writes" | "write" | "dml" => Ok(Self::AllowWrites),
+            "ddl" | "admin" => Ok(Self::AllowDdl),
+            other => {
+                anyhow::bail!("invalid write mode '{other}' (expected readonly, writes, or ddl)")
+            }
+        }
+    }
+}
 
 pub use classify::{SqlClass, StmtClass};
 pub use params::{
@@ -85,7 +122,7 @@ pub fn classify_sql(sql: &str, engine: EngineKind) -> Result<StmtClass, GuardErr
 fn dialect_for(engine: EngineKind) -> Box<dyn Dialect> {
     match engine {
         EngineKind::Postgres => Box::new(PostgreSqlDialect {}),
-        EngineKind::Mysql => Box::new(MySqlDialect {}),
+        EngineKind::MySql => Box::new(MySqlDialect {}),
         EngineKind::Sqlite => Box::new(SQLiteDialect {}),
     }
 }
@@ -377,7 +414,7 @@ const DENIED_FUNCTIONS_SQLITE: &[DeniedFunction] = &[
 fn denied_functions_for(engine: EngineKind) -> &'static [DeniedFunction] {
     match engine {
         EngineKind::Postgres => DENIED_FUNCTIONS_PG,
-        EngineKind::Mysql => DENIED_FUNCTIONS_MYSQL,
+        EngineKind::MySql => DENIED_FUNCTIONS_MYSQL,
         EngineKind::Sqlite => DENIED_FUNCTIONS_SQLITE,
     }
 }
@@ -1342,7 +1379,7 @@ mod tests {
         validate_and_prepare(
             "SHOW PROCESSLIST",
             &[],
-            EngineKind::Mysql,
+            EngineKind::MySql,
             WriteMode::ReadOnly,
             100,
         )
@@ -1354,7 +1391,7 @@ mod tests {
         let err = validate_and_prepare(
             "SELECT 1; DROP TABLE users",
             &[],
-            EngineKind::Mysql,
+            EngineKind::MySql,
             WriteMode::ReadOnly,
             100,
         )
@@ -1384,7 +1421,7 @@ mod tests {
         let p = validate_and_prepare(
             "SELECT * FROM t WHERE id = ?",
             &[Value::from(1)],
-            EngineKind::Mysql,
+            EngineKind::MySql,
             WriteMode::ReadOnly,
             100,
         )
@@ -1544,7 +1581,7 @@ mod tests {
         let err = validate_and_prepare(
             "SELECT * INTO OUTFILE '/tmp/x.txt' FROM users",
             &[],
-            EngineKind::Mysql,
+            EngineKind::MySql,
             WriteMode::ReadOnly,
             100,
         )
@@ -1610,7 +1647,7 @@ mod tests {
             ("SELECT LOAD_FILE('/etc/passwd')", "load_file"),
             ("SELECT GET_LOCK('x', 10)", "get_lock"),
         ] {
-            let err = validate_and_prepare(sql, &[], EngineKind::Mysql, WriteMode::ReadOnly, 100)
+            let err = validate_and_prepare(sql, &[], EngineKind::MySql, WriteMode::ReadOnly, 100)
                 .unwrap_err();
             assert!(err.to_string().contains(name), "{sql} → {err}");
         }
@@ -1661,7 +1698,7 @@ mod tests {
         let p = validate_and_prepare(
             "SELECT * FROM t LIMIT ?",
             &[Value::from(1000)],
-            EngineKind::Mysql,
+            EngineKind::MySql,
             WriteMode::ReadOnly,
             50,
         )

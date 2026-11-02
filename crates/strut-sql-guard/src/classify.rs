@@ -41,7 +41,7 @@ impl StmtClass {
     }
 }
 
-pub fn classify(stmt: &Statement) -> Result<StmtClass, crate::guard::GuardError> {
+pub fn classify(stmt: &Statement) -> Result<StmtClass, crate::GuardError> {
     match stmt {
         // SQL-SEC-01/02 fix: a Query is NOT automatically a read. Its CTEs and
         // body are inspected recursively — a data-modifying CTE
@@ -419,6 +419,7 @@ mod tests {
     use super::*;
     use sqlparser::dialect::PostgreSqlDialect;
     use sqlparser::parser::Parser;
+    use strut_sql_driver_api::EngineKind;
 
     fn classify_pg(sql: &str) -> StmtClass {
         let stmts = Parser::parse_sql(&PostgreSqlDialect {}, sql).unwrap();
@@ -477,9 +478,9 @@ mod tests {
         // sqlparser 0.62 cannot represent INTO OUTFILE at all, so the guard
         // rejects it pre-parse with an explicit denial (SQL-SEC-02) instead
         // of ever classifying it as a read.
-        let err = crate::guard::classify_sql(
+        let err = crate::classify_sql(
             "SELECT * FROM users INTO OUTFILE '/tmp/x.txt'",
-            crate::db::EngineKind::Mysql,
+            EngineKind::MySql,
         )
         .unwrap_err();
         assert!(err.to_string().contains("OUTFILE"), "{err}");

@@ -1,0 +1,28 @@
+[package]
+name = "strut-sql-server"
+version = "1.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "MCP stdio and HTTP server for Strut Stack SQL"
+license = "MIT"
+repository = "https://github.com/rzlco666/strut-stack-sql"
+
+[dependencies]
+strut-sql-driver-api = { path = "../strut-sql-driver-api" }
+strut-sql-core = { path = "../strut-sql-core" }
+strut-sql-guard = { path = "../strut-sql-guard" }
+strut-sql-tools = { path = "../strut-sql-tools" }
+anyhow = "1"
+axum = "0.8"
+rmcp = { version = "2", features = [
+    "server",
+    "macros",
+    "schemars",
+    "transport-io",
+    "transport-streamable-http-server",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "io-std", "io-util", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing = "0.1"

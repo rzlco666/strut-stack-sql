@@ -11,18 +11,18 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use rmcp::model::CallToolResult;
 use serde_json::{json, Value};
-use sqlx::mysql::MySqlPoolOptions;
-use sqlx::postgres::PgPoolOptions;
-use sqlx::sqlite::SqlitePoolOptions;
+use strut_sql_driver_api::{ConnectOptions, EngineDriver, EngineKind};
+use strut_sql_driver_mysql::MySqlDriver;
+use strut_sql_driver_postgres::PostgresDriver;
+use strut_sql_driver_sqlite::SqliteDriver;
 use strut_stack_sql::config::{AppConfig, ResolvedSource, WriteMode};
-use strut_stack_sql::db::ObjectType;
-use strut_stack_sql::db::{describe_table, EngineKind, EnginePool};
 use strut_stack_sql::guard::validate_and_prepare;
 use strut_stack_sql::server::build_http_router;
 use strut_stack_sql::tools::core::{
     handle_execute_sql, handle_search_objects, BatchQueryItem, ExecuteSqlParams,
     SearchObjectsParams,
 };
+use strut_stack_sql::tools::introspect::{describe_table, ObjectType};
 use tower::ServiceExt;
 
 fn force_columnar_test_format() {
@@ -31,19 +31,24 @@ fn force_columnar_test_format() {
 
 async fn sqlite_config(write_mode: WriteMode) -> AppConfig {
     force_columnar_test_format();
-    let pool = SqlitePoolOptions::new()
-        .max_connections(4)
-        .connect("sqlite::memory:")
-        .await
-        .expect("sqlite pool");
+    let driver = SqliteDriver::from_connection_string_with_options(
+        "sqlite::memory:",
+        &ConnectOptions {
+            pool_size: 1,
+            read_only: false,
+            ..ConnectOptions::default()
+        },
+    )
+    .await
+    .expect("sqlite driver");
     let mut sources = HashMap::new();
     sources.insert(
         "default".into(),
-        ResolvedSource::with_connected_pool(
+        ResolvedSource::with_driver(
             "default",
             "sqlite::memory:".into(),
             EngineKind::Sqlite,
-            EnginePool::Sqlite(pool),
+            Arc::new(*driver),
             !write_mode.allows_dml(),
         ),
     );
@@ -654,8 +659,8 @@ async fn pagination_offset_and_size() {
 async fn describe_table_returns_columns() {
     let config = Arc::new(sqlite_config(WriteMode::AllowDdl).await);
     seed_users(&config).await;
-    let pool = config.source(None).unwrap().pool().await.expect("pool");
-    let object = describe_table(&pool, None, Some("main"), "users")
+    let driver = config.source(None).unwrap().driver().await.expect("driver");
+    let object = describe_table(&driver, Some("main"), "users")
         .await
         .expect("describe");
     let cols = object.columns.expect("columns");
@@ -697,19 +702,24 @@ async fn postgres_config() -> Option<AppConfig> {
     if !url.to_lowercase().starts_with("postgres") {
         return None;
     }
-    let pool = PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&url)
-        .await
-        .ok()?;
+    let driver = PostgresDriver::from_connection_string_with_options(
+        &url,
+        &ConnectOptions {
+            pool_size: 2,
+            read_only: true,
+            ..ConnectOptions::default()
+        },
+    )
+    .await
+    .ok()?;
     let mut sources = HashMap::new();
     sources.insert(
         "default".into(),
-        ResolvedSource::with_connected_pool(
+        ResolvedSource::with_driver(
             "default",
             url.clone(),
             EngineKind::Postgres,
-            EnginePool::Postgres(pool),
+            Arc::new(*driver),
             true,
         ),
     );
@@ -781,19 +791,24 @@ async fn mysql_config() -> Option<AppConfig> {
     if !url.to_lowercase().starts_with("mysql://") {
         return None;
     }
-    let pool = MySqlPoolOptions::new()
-        .max_connections(2)
-        .connect(&url)
-        .await
-        .ok()?;
+    let driver = MySqlDriver::from_connection_string_with_options(
+        &url,
+        &ConnectOptions {
+            pool_size: 2,
+            read_only: true,
+            ..ConnectOptions::default()
+        },
+    )
+    .await
+    .ok()?;
     let mut sources = HashMap::new();
     sources.insert(
         "default".into(),
-        ResolvedSource::with_connected_pool(
+        ResolvedSource::with_driver(
             "default",
             url.clone(),
-            EngineKind::Mysql,
-            EnginePool::Mysql(pool),
+            EngineKind::MySql,
+            Arc::new(*driver),
             true,
         ),
     );
@@ -824,7 +839,7 @@ async fn mysql_show_processlist_allowed() {
     validate_and_prepare(
         "SHOW PROCESSLIST",
         &[],
-        EngineKind::Mysql,
+        EngineKind::MySql,
         WriteMode::ReadOnly,
         100,
     )
@@ -872,13 +887,9 @@ async fn mysql_count_serializes_as_number() {
 async fn mysql_describe_table_has_columns() {
     let config = Arc::new(mysql_config().await.expect("mysql dsn"));
     let source = config.source(None).unwrap();
-    let pool = source.pool().await.expect("pool");
-    let mysql = pool.mysql().unwrap();
-    let schema: String = sqlx::query_scalar("SELECT DATABASE()")
-        .fetch_one(mysql)
-        .await
-        .expect("schema");
-    let object = describe_table(&pool, Some(&source.url), Some(&schema), "users")
+    let driver = source.driver().await.expect("driver");
+    let schema = driver.resolve_schema(None).await.expect("schema");
+    let object = describe_table(&driver, Some(&schema), "users")
         .await
         .expect("describe demo.users");
     let cols = object.columns.unwrap_or_default();

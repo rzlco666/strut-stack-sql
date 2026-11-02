@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -24,25 +23,31 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{AppConfig, HttpToken};
-use crate::db::EngineKind;
-use crate::guard::validate_and_prepare;
-use crate::redact::redact_url;
-use crate::tools::core::{
+use strut_sql_core::config::{AppConfig, HttpToken, WriteMode};
+use strut_sql_core::redact::redact_url;
+use strut_sql_driver_api::EngineKind;
+use strut_sql_guard::validate_and_prepare;
+use strut_sql_tools::audit::{audit_call, sql_fingerprint};
+use strut_sql_tools::core::{
     handle_analyze_query, handle_execute_sql, handle_search_objects, AnalyzeQueryParams,
     BatchQueryItem, ExecuteSqlParams, SearchObjectsParams,
 };
-use crate::tools::ddl::{
+use strut_sql_tools::ddl::{
     handle_add_column, handle_alter_column, handle_create_table, handle_drop_column,
     handle_drop_table, handle_schema_mutate, handle_truncate_table, AddColumnParams,
     AlterColumnParams, CreateTableParams, DropColumnParams, DropTableParams, SchemaMutateParams,
     TruncateTableParams,
 };
-use crate::tools::full::{
+use strut_sql_tools::full::{
     handle_describe_table, handle_list_foreign_keys, handle_list_indexes, handle_list_schemas,
     handle_list_sources, handle_list_tables, handle_schema_overview, DescribeTableParams,
     ListForeignKeysParams, ListIndexesParams, ListTablesParams, SchemaOverviewParams, SourceParams,
 };
+
+/// Default tracing filter. The `sqlx` target directive only sets that log
+/// target's level (no sqlx dependency outside the driver crates); audit
+/// events are info-level so the default filter shows them.
+pub const DEFAULT_LOG_FILTER: &str = "info,sqlx=warn,audit=info";
 
 const CORE_TOOLS: &[&str] = &["search_objects", "execute_sql", "analyze_query_performance"];
 
@@ -67,59 +72,6 @@ const DDL_TOOLS: &[&str] = &[
     "drop_column",
     "truncate_table",
 ];
-
-// ---------------------------------------------------------------------------
-// Audit (SQL-GAP-03): one structured `target: "audit"` event per tool call.
-// Never logs raw SQL or parameters — only a non-cryptographic fingerprint
-// (`sql_fp`, std DefaultHasher) for correlation, the tool, the source name,
-// the elapsed time, and the outcome. Enable/inspect with
-// `MCP_SQL_LOG=audit=info` (audit events are info-level, so the default
-// filter shows them too).
-// ---------------------------------------------------------------------------
-
-fn sql_fingerprint(sql: &str) -> String {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    sql.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
-}
-
-async fn audit_call<Fut>(
-    tool: &'static str,
-    source: Option<String>,
-    sql_fp: Option<String>,
-    fut: Fut,
-) -> Result<CallToolResult, McpError>
-where
-    Fut: std::future::Future<Output = Result<CallToolResult, McpError>>,
-{
-    let started = Instant::now();
-    let result = fut.await;
-    let elapsed_ms = started.elapsed().as_millis() as u64;
-    let source = source.as_deref().unwrap_or("-");
-    let sql_fp = sql_fp.as_deref().unwrap_or("-");
-    match &result {
-        Ok(_) => tracing::info!(
-            target: "audit",
-            tool,
-            source_name = source,
-            sql_fp,
-            elapsed_ms,
-            ok = true,
-            "tool_call"
-        ),
-        Err(e) => tracing::info!(
-            target: "audit",
-            tool,
-            source_name = source,
-            sql_fp,
-            elapsed_ms,
-            ok = false,
-            error = %e,
-            "tool_call"
-        ),
-    }
-    result
-}
 
 #[derive(Clone)]
 pub struct McpSqlServer {
@@ -436,9 +388,9 @@ impl McpSqlServer {
 impl ServerHandler for McpSqlServer {
     fn get_info(&self) -> ServerInfo {
         let mode = match self.config.write_mode {
-            crate::config::WriteMode::ReadOnly => "read-only",
-            crate::config::WriteMode::AllowWrites => "writes",
-            crate::config::WriteMode::AllowDdl => "ddl",
+            WriteMode::ReadOnly => "read-only",
+            WriteMode::AllowWrites => "writes",
+            WriteMode::AllowDdl => "ddl",
         };
         let mut instructions = format!(
             "strut-stack-sql {} ({mode}). Core tools: search_objects, execute_sql, analyze_query_performance. \
@@ -521,7 +473,7 @@ struct LiveResponse {
 fn engine_label(engine: EngineKind) -> &'static str {
     match engine {
         EngineKind::Postgres => "postgres",
-        EngineKind::Mysql => "mysql",
+        EngineKind::MySql => "mysql",
         EngineKind::Sqlite => "sqlite",
     }
 }
@@ -548,8 +500,11 @@ async fn readyz(State(state): State<HttpState>) -> impl IntoResponse {
     for name in names {
         let source = &state.config.sources[&name];
         let check = async {
-            let pool = source.pool().await?;
-            pool.ping().await
+            let driver = source.driver().await?;
+            driver
+                .ping()
+                .await
+                .map_err(|e| anyhow::anyhow!(e.to_string()))
         };
         let ok = match tokio::time::timeout(Duration::from_secs(2), check).await {
             Ok(Ok(())) => true,

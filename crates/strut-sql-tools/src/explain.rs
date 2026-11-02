@@ -1,20 +1,19 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::Value;
-use sqlx::{Column, Row};
+use strut_sql_driver_api::{BoundQuery, EngineDriver, EngineKind, SqlValue};
+use strut_sql_guard::{validate_and_prepare, GuardError, WriteMode};
 
-use crate::config::WriteMode;
-use crate::db::bind::{bind_mysql_params, bind_pg_params, bind_sqlite_params};
-use crate::db::{EngineKind, EnginePool};
-use crate::guard::{validate_and_prepare, GuardError};
+use crate::bind::to_sql_values;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ExplainError {
     #[error(transparent)]
     Guard(#[from] GuardError),
     #[error("database error: {0}")]
-    Database(#[from] sqlx::Error),
+    Database(String),
     #[error("{0}")]
     Other(String),
 }
@@ -44,13 +43,13 @@ pub struct PlanNode {
 }
 
 pub async fn analyze_query(
-    pool: &EnginePool,
+    driver: &Arc<dyn EngineDriver>,
     sql: &str,
     params: &[Value],
     write_mode: WriteMode,
     timeout: Duration,
 ) -> Result<ExplainSummary, ExplainError> {
-    let engine = pool.engine();
+    let engine = driver.kind();
     let prepared = validate_and_prepare(sql, params, engine, write_mode, 100)?;
 
     if !prepared.class.is_select_like() && prepared.class.label() != "SELECT" {
@@ -64,103 +63,72 @@ pub async fn analyze_query(
 
     let explain_sql = match engine {
         EngineKind::Postgres => format!("EXPLAIN (FORMAT JSON) {}", prepared.sql),
-        EngineKind::Mysql => format!("EXPLAIN FORMAT=JSON {}", prepared.sql),
+        EngineKind::MySql => format!("EXPLAIN FORMAT=JSON {}", prepared.sql),
         EngineKind::Sqlite => format!("EXPLAIN QUERY PLAN {}", prepared.sql),
     };
 
-    if engine == EngineKind::Sqlite {
-        let rows = tokio::time::timeout(
-            timeout,
-            fetch_explain_sqlite(pool, &explain_sql, &prepared.params),
-        )
+    let bound = BoundQuery {
+        sql: explain_sql,
+        params: to_sql_values(&prepared.params).map_err(ExplainError::Other)?,
+        row_cap: None,
+        fetch_rows: true,
+    };
+    let result = tokio::time::timeout(timeout, driver.execute(&bound))
         .await
-        .map_err(|_| ExplainError::Other("explain timeout".into()))??;
-        return Ok(normalize_sqlite(&prepared.sql, rows));
-    }
+        .map_err(|_| ExplainError::Other("explain timeout".into()))?
+        .map_err(|e| ExplainError::Database(e.to_string()))?;
 
-    let json = tokio::time::timeout(
-        timeout,
-        fetch_explain_json(pool, &explain_sql, engine, &prepared.params),
-    )
-    .await
-    .map_err(|_| ExplainError::Other("explain timeout".into()))??;
-
-    Ok(normalize_explain(engine, &prepared.sql, json))
-}
-
-async fn fetch_explain_json(
-    pool: &EnginePool,
-    explain_sql: &str,
-    engine: EngineKind,
-    params: &[Value],
-) -> Result<Value, ExplainError> {
     match engine {
+        EngineKind::Sqlite => {
+            let rows = sqlite_details(
+                result.cols.iter().map(|c| c.name.as_str()).collect(),
+                result.rows,
+            );
+            Ok(normalize_sqlite(&prepared.sql, rows))
+        }
         EngineKind::Postgres => {
-            let pool = pool
-                .postgres()
-                .map_err(|e| ExplainError::Other(e.to_string()))?;
-            let row = bind_pg_params(explain_sql, params)
-                .map_err(|e| ExplainError::Other(e.to_string()))?
-                .fetch_one(pool)
-                .await?;
-            let val: Value = row.try_get(0)?;
-            Ok(val)
+            let json = explain_json(&result.rows, engine)?;
+            Ok(normalize_explain(engine, &prepared.sql, json))
         }
-        EngineKind::Mysql => {
-            let pool = pool
-                .mysql()
-                .map_err(|e| ExplainError::Other(e.to_string()))?;
-            let row = bind_mysql_params(explain_sql, params)
-                .map_err(|e| ExplainError::Other(e.to_string()))?
-                .fetch_one(pool)
-                .await?;
-            let text: String = row.try_get(0)?;
-            let val: Value = serde_json::from_str(&text)
-                .map_err(|e| ExplainError::Other(format!("invalid explain json: {e}")))?;
-            Ok(val)
+        EngineKind::MySql => {
+            let json = explain_json(&result.rows, engine)?;
+            Ok(normalize_explain(engine, &prepared.sql, json))
         }
-        EngineKind::Sqlite => Err(ExplainError::Other(
-            "sqlite explain uses row-based path".into(),
-        )),
     }
 }
 
-async fn fetch_explain_sqlite(
-    pool: &EnginePool,
-    explain_sql: &str,
-    params: &[Value],
-) -> Result<Vec<String>, ExplainError> {
-    let pool = pool
-        .sqlite()
-        .map_err(|e| ExplainError::Other(e.to_string()))?;
-    let rows = bind_sqlite_params(explain_sql, params)
-        .map_err(|e| ExplainError::Other(e.to_string()))?
-        .fetch_all(pool)
-        .await?;
-    // SQL-BUG-15: do not hardcode column index 3. `EXPLAIN QUERY PLAN`
-    // returns (id, parent, notused, detail) — locate `detail` by name and
-    // fall back gracefully (`opcode` for plain EXPLAIN, else last column).
-    let detail_idx = rows.first().and_then(sqlite_detail_column_index);
-    rows.iter()
-        .map(|row| match detail_idx {
-            Some(idx) => row.try_get::<String, _>(idx).map_err(ExplainError::from),
-            None => Ok(String::new()),
+fn explain_json(rows: &[Vec<SqlValue>], engine: EngineKind) -> Result<Value, ExplainError> {
+    let cell = rows
+        .first()
+        .and_then(|r| r.first())
+        .ok_or_else(|| ExplainError::Other("explain returned no rows".into()))?;
+    match cell {
+        SqlValue::Json(v) => Ok(v.clone()),
+        SqlValue::String(s) if engine == EngineKind::MySql => serde_json::from_str(s)
+            .map_err(|e| ExplainError::Other(format!("invalid explain json: {e}"))),
+        SqlValue::String(s) => serde_json::from_str(s)
+            .map_err(|e| ExplainError::Other(format!("invalid explain json: {e}"))),
+        other => Err(ExplainError::Other(format!(
+            "unexpected explain value: {other:?}"
+        ))),
+    }
+}
+
+/// Human-readable plan lines from a SQLite EXPLAIN result, located by column
+/// name (`detail`, then `opcode`, else the last column) — SQL-BUG-15.
+fn sqlite_details(cols: Vec<&str>, rows: Vec<Vec<SqlValue>>) -> Vec<String> {
+    let detail_idx = cols
+        .iter()
+        .position(|c| c.eq_ignore_ascii_case("detail"))
+        .or_else(|| cols.iter().position(|c| c.eq_ignore_ascii_case("opcode")))
+        .or_else(|| cols.len().checked_sub(1));
+    rows.into_iter()
+        .map(|row| match detail_idx.and_then(|i| row.get(i)) {
+            Some(SqlValue::String(s)) => s.clone(),
+            Some(SqlValue::I64(n)) => n.to_string(),
+            _ => String::new(),
         })
         .collect()
-}
-
-/// Index of the human-readable plan column in a SQLite EXPLAIN result row.
-fn sqlite_detail_column_index(row: &sqlx::sqlite::SqliteRow) -> Option<usize> {
-    let cols = row.columns();
-    for wanted in ["detail", "opcode"] {
-        if let Some(idx) = cols
-            .iter()
-            .position(|c| c.name().eq_ignore_ascii_case(wanted))
-        {
-            return Some(idx);
-        }
-    }
-    cols.len().checked_sub(1)
 }
 
 fn normalize_sqlite(query: &str, details: Vec<String>) -> ExplainSummary {
@@ -225,7 +193,7 @@ fn sqlite_relation_from_detail(detail: &str) -> Option<String> {
 fn normalize_explain(engine: EngineKind, query: &str, json: Value) -> ExplainSummary {
     match engine {
         EngineKind::Postgres => normalize_postgres(query, json),
-        EngineKind::Mysql => normalize_mysql(query, json),
+        EngineKind::MySql => normalize_mysql(query, json),
         EngineKind::Sqlite => ExplainSummary {
             engine: "sqlite".into(),
             query: query.into(),

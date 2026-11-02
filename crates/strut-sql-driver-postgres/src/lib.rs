@@ -7,8 +7,9 @@ use sqlx::{Column, Row, TypeInfo, ValueRef};
 use std::collections::BTreeMap;
 use std::time::Duration;
 use strut_sql_driver_api::{
-    BoundQuery, ColumnInfo, ColumnMeta, DriverError, EngineDriver, EngineKind, ForeignKeyInfo,
-    IndexInfo, ObjectType, QueryMeta, QueryResult, RoutineInfo, SchemaObject, SqlValue, TableInfo,
+    BoundQuery, ColumnInfo, ColumnMeta, ConnectOptions, DriverError, EngineDriver, EngineKind,
+    ForeignKeyInfo, IndexInfo, ObjectType, QueryMeta, QueryResult, RoutineInfo, SchemaObject,
+    SqlValue, TableInfo, TableRowCount,
 };
 use uuid::Uuid;
 
@@ -18,9 +19,35 @@ pub struct PostgresDriver {
 
 impl PostgresDriver {
     pub async fn new(connection_string: &str) -> Result<Self, DriverError> {
-        let pool = PgPoolOptions::new()
-            .max_connections(5)
-            .acquire_timeout(Duration::from_secs(2))
+        Self::new_with_options(connection_string, &ConnectOptions::default()).await
+    }
+
+    pub async fn new_with_options(
+        connection_string: &str,
+        options: &ConnectOptions,
+    ) -> Result<Self, DriverError> {
+        let stmt_ms = options.statement_timeout.as_millis().max(1) as u64;
+        let mut pool_options = PgPoolOptions::new()
+            .max_connections(options.pool_size)
+            .acquire_timeout(options.connect_timeout)
+            .idle_timeout(Duration::from_secs(45))
+            .max_lifetime(Duration::from_secs(300))
+            .test_before_acquire(true);
+        let read_only = options.read_only;
+        pool_options = pool_options.after_connect(move |conn, _meta| {
+            Box::pin(async move {
+                sqlx::query(&format!("SET statement_timeout = '{stmt_ms}ms'"))
+                    .execute(&mut *conn)
+                    .await?;
+                if read_only {
+                    sqlx::query("SET default_transaction_read_only = on")
+                        .execute(&mut *conn)
+                        .await?;
+                }
+                Ok(())
+            })
+        });
+        let pool = pool_options
             .connect(connection_string)
             .await
             .map_err(|e| DriverError::Connection(e.to_string()))?;
@@ -34,8 +61,13 @@ impl EngineDriver for PostgresDriver {
         EngineKind::Postgres
     }
 
-    async fn from_connection_string(connection_string: &str) -> Result<Box<Self>, DriverError> {
-        Ok(Box::new(PostgresDriver::new(connection_string).await?))
+    async fn from_connection_string_with_options(
+        connection_string: &str,
+        options: &ConnectOptions,
+    ) -> Result<Box<Self>, DriverError> {
+        Ok(Box::new(
+            PostgresDriver::new_with_options(connection_string, options).await?,
+        ))
     }
 
     async fn execute(&self, query: &BoundQuery) -> Result<QueryResult, DriverError> {
@@ -48,43 +80,123 @@ impl EngineDriver for PostgresDriver {
             sqlx_query = bind_pg_value(sqlx_query, param)?;
         }
 
-        let mut rows = sqlx_query
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| DriverError::Execution(e.to_string()))?;
-
-        let mut truncated = false;
-        if let Some(cap) = query.row_cap {
-            if rows.len() > cap {
-                rows.truncate(cap);
-                truncated = true;
-            }
+        if !query.fetch_rows {
+            let result = sqlx_query
+                .execute(&self.pool)
+                .await
+                .map_err(|e| DriverError::Execution(e.to_string()))?;
+            return Ok(command_result(result.rows_affected()));
         }
+
+        let (rows, truncated) = if let Some(cap) = query.row_cap {
+            let mut stream = sqlx_query.fetch(&self.pool);
+            let mut rows = Vec::new();
+            let mut overflow = false;
+            use futures_util::StreamExt;
+            while let Some(item) = stream.next().await {
+                let row = item.map_err(|e| DriverError::Execution(e.to_string()))?;
+                if rows.len() >= cap {
+                    overflow = true;
+                    break;
+                }
+                rows.push(row);
+            }
+            (rows, overflow)
+        } else {
+            let rows = sqlx_query
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| DriverError::Execution(e.to_string()))?;
+            (rows, false)
+        };
 
         pg_rows_to_result(&rows, truncated)
     }
 
-    async fn list_tables(&self) -> Result<Vec<SchemaObject>, DriverError> {
+    async fn list_schemas(&self) -> Result<Vec<SchemaObject>, DriverError> {
         let rows = sqlx::query(
-            r#"
-            SELECT table_schema, table_name
-            FROM information_schema.tables
-            WHERE table_type = 'BASE TABLE'
-            ORDER BY table_schema, table_name
-            "#,
+            "SELECT schema_name FROM information_schema.schemata \
+             WHERE schema_name NOT IN ('pg_catalog', 'information_schema', 'pg_toast') \
+             ORDER BY schema_name",
         )
         .fetch_all(&self.pool)
         .await
         .map_err(|e| DriverError::Introspection(e.to_string()))?;
+        Ok(rows
+            .iter()
+            .filter_map(|r| {
+                Some(SchemaObject {
+                    object_type: ObjectType::Schema,
+                    schema: None,
+                    name: r.try_get(0).ok()?,
+                    table: None,
+                    data_type: None,
+                    nullable: None,
+                })
+            })
+            .collect())
+    }
 
+    async fn resolve_schema(&self, schema: Option<&str>) -> Result<String, DriverError> {
+        Ok(schema
+            .filter(|s| !s.is_empty())
+            .unwrap_or("public")
+            .to_string())
+    }
+
+    async fn list_tables(&self, schema: Option<&str>) -> Result<Vec<SchemaObject>, DriverError> {
+        let schema = schema.filter(|s| !s.is_empty()).unwrap_or("public");
+        let rows = sqlx::query(
+            "SELECT table_name FROM information_schema.tables \
+             WHERE table_schema = $1 AND table_type = 'BASE TABLE' \
+             ORDER BY table_name",
+        )
+        .bind(schema)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DriverError::Introspection(e.to_string()))?;
         Ok(rows
             .iter()
             .filter_map(|r| {
                 Some(SchemaObject {
                     object_type: ObjectType::Table,
-                    schema: r.try_get("table_schema").ok(),
-                    name: r.try_get("table_name").ok()?,
-                    display_name: None,
+                    schema: Some(schema.to_string()),
+                    name: r.try_get(0).ok()?,
+                    table: None,
+                    data_type: None,
+                    nullable: None,
+                })
+            })
+            .collect())
+    }
+
+    async fn list_columns(&self, schema: Option<&str>) -> Result<Vec<SchemaObject>, DriverError> {
+        let schema = schema.filter(|s| !s.is_empty()).unwrap_or("public");
+        let rows = sqlx::query(
+            "SELECT table_name, column_name, \
+             CASE WHEN data_type = 'USER-DEFINED' THEN udt_name ELSE data_type END, \
+             is_nullable \
+             FROM information_schema.columns \
+             WHERE table_schema = $1 ORDER BY table_name, ordinal_position",
+        )
+        .bind(schema)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DriverError::Introspection(e.to_string()))?;
+        Ok(rows
+            .iter()
+            .filter_map(|r| {
+                let table: String = r.try_get(0).ok()?;
+                let name: String = r.try_get(1).ok()?;
+                let data_type: String = r.try_get(2).ok()?;
+                let nullable: String = r.try_get(3).ok()?;
+                Some(SchemaObject {
+                    object_type: ObjectType::Column,
+                    schema: Some(schema.to_string()),
+                    name,
+                    table: Some(table),
+                    data_type: Some(data_type),
+                    nullable: Some(nullable == "YES"),
                 })
             })
             .collect())
@@ -95,52 +207,26 @@ impl EngineDriver for PostgresDriver {
         schema: Option<&str>,
         table: &str,
     ) -> Result<TableInfo, DriverError> {
-        // Resolve the schema of the table when the caller did not name
-        // one: an unqualified CREATE lands in the first search_path schema
-        // (often the per-user schema), not necessarily "public".
-        let schema_name: String = match schema.filter(|s| !s.is_empty()) {
-            Some(s) => s.to_string(),
-            None => sqlx::query_scalar(
-                "SELECT table_schema FROM information_schema.tables \
-                 WHERE table_name = $1 \
-                   AND table_schema NOT IN ('pg_catalog', 'information_schema') \
-                 ORDER BY (table_schema = current_schema()) DESC, table_schema \
-                 LIMIT 1",
-            )
-            .bind(table)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(|e| DriverError::Introspection(e.to_string()))?
-            .unwrap_or_else(|| "public".to_string()),
-        };
-
-        // Bind the schema (never interpolate caller input). The EXISTS
-        // subquery marks primary-key columns from the catalog.
+        let schema_name = schema.filter(|s| !s.is_empty()).unwrap_or("public");
         let rows = sqlx::query(
-            r#"
-            SELECT
-                c.column_name,
-                CASE WHEN c.data_type = 'USER-DEFINED' THEN c.udt_name ELSE c.data_type END
-                    AS data_type,
-                c.is_nullable,
-                c.column_default,
-                EXISTS (
-                    SELECT 1
-                    FROM information_schema.table_constraints tc
-                    JOIN information_schema.key_column_usage kcu
-                      ON kcu.constraint_name = tc.constraint_name
-                     AND kcu.constraint_schema = tc.constraint_schema
-                    WHERE tc.constraint_type = 'PRIMARY KEY'
-                      AND tc.table_schema = c.table_schema
-                      AND tc.table_name = c.table_name
-                      AND kcu.column_name = c.column_name
-                ) AS is_primary_key
-            FROM information_schema.columns c
-            WHERE c.table_schema = $1 AND c.table_name = $2
-            ORDER BY c.ordinal_position
-            "#,
+            "SELECT column_name, \
+             CASE WHEN data_type = 'USER-DEFINED' THEN udt_name ELSE data_type END, \
+             is_nullable, column_default, \
+             EXISTS ( \
+                 SELECT 1 FROM information_schema.table_constraints tc \
+                 JOIN information_schema.key_column_usage kcu \
+                   ON kcu.constraint_name = tc.constraint_name \
+                  AND kcu.constraint_schema = tc.constraint_schema \
+                 WHERE tc.constraint_type = 'PRIMARY KEY' \
+                   AND tc.table_schema = c.table_schema \
+                   AND tc.table_name = c.table_name \
+                   AND kcu.column_name = c.column_name \
+             ) AS is_primary_key \
+             FROM information_schema.columns c \
+             WHERE c.table_schema = $1 AND c.table_name = $2 \
+             ORDER BY c.ordinal_position",
         )
-        .bind(&schema_name)
+        .bind(schema_name)
         .bind(table)
         .fetch_all(&self.pool)
         .await
@@ -150,37 +236,169 @@ impl EngineDriver for PostgresDriver {
             .iter()
             .filter_map(|r| {
                 Some(ColumnInfo {
-                    name: r.try_get("column_name").ok()?,
-                    data_type: r.try_get("data_type").ok()?,
+                    name: r.try_get(0).ok()?,
+                    data_type: r.try_get(1).ok()?,
                     nullable: r
-                        .try_get::<String, _>("is_nullable")
+                        .try_get::<String, _>(2)
                         .map(|v| v == "YES")
                         .unwrap_or(false),
-                    default_value: r.try_get("column_default").ok(),
-                    is_primary_key: r.try_get("is_primary_key").unwrap_or(false),
+                    default_value: r.try_get(3).ok(),
+                    is_primary_key: r.try_get(4).unwrap_or(false),
+                    key: None,
+                    extra: None,
+                    comment: None,
                 })
             })
             .collect();
 
         Ok(TableInfo {
-            schema: Some(schema_name),
+            schema: Some(schema_name.to_string()),
             name: table.to_string(),
             columns,
         })
     }
 
-    async fn list_indexes(&self) -> Result<Vec<IndexInfo>, DriverError> {
+    async fn list_indexes(
+        &self,
+        schema: Option<&str>,
+        table: Option<&str>,
+    ) -> Result<Vec<IndexInfo>, DriverError> {
+        let schema = schema.filter(|s| !s.is_empty()).unwrap_or("public");
+        let rows = if let Some(table) = table {
+            sqlx::query(
+                "SELECT indexname, indexdef, tablename FROM pg_indexes \
+                 WHERE schemaname = $1 AND tablename = $2 ORDER BY indexname",
+            )
+            .bind(schema)
+            .bind(table)
+            .fetch_all(&self.pool)
+            .await
+        } else {
+            sqlx::query(
+                "SELECT indexname, indexdef, tablename FROM pg_indexes \
+                 WHERE schemaname = $1 ORDER BY indexname",
+            )
+            .bind(schema)
+            .fetch_all(&self.pool)
+            .await
+        }
+        .map_err(|e| DriverError::Introspection(e.to_string()))?;
+
+        Ok(rows
+            .iter()
+            .filter_map(|r| {
+                let name: String = r.try_get(0).ok()?;
+                let def: String = r.try_get(1).ok()?;
+                let table: String = r.try_get(2).ok()?;
+                Some(IndexInfo {
+                    schema: Some(schema.to_string()),
+                    table,
+                    name,
+                    columns: pg_indexdef_columns(&def),
+                    unique: pg_indexdef_is_unique(&def),
+                    primary: false,
+                })
+            })
+            .collect())
+    }
+
+    async fn list_foreign_keys(
+        &self,
+        schema: Option<&str>,
+        table: Option<&str>,
+    ) -> Result<Vec<ForeignKeyInfo>, DriverError> {
+        let schema_name = schema.filter(|s| !s.is_empty()).unwrap_or("public");
+        let rows = if let Some(table) = table {
+            sqlx::query(
+                "SELECT tc.constraint_name, kcu.table_name, kcu.column_name, \
+                 ccu.table_name AS foreign_table_name, ccu.column_name AS foreign_column_name, \
+                 rc.delete_rule, rc.update_rule \
+                 FROM information_schema.table_constraints AS tc \
+                 JOIN information_schema.key_column_usage AS kcu \
+                   ON tc.constraint_name = kcu.constraint_name \
+                  AND tc.table_schema = kcu.table_schema \
+                 JOIN information_schema.constraint_column_usage AS ccu \
+                   ON ccu.constraint_name = tc.constraint_name \
+                  AND ccu.table_schema = tc.table_schema \
+                 JOIN information_schema.referential_constraints AS rc \
+                   ON rc.constraint_name = tc.constraint_name \
+                  AND rc.constraint_schema = tc.table_schema \
+                 WHERE tc.constraint_type = 'FOREIGN KEY' \
+                   AND tc.table_schema = $1 AND kcu.table_name = $2 \
+                 ORDER BY tc.constraint_name, kcu.ordinal_position",
+            )
+            .bind(schema_name)
+            .bind(table)
+            .fetch_all(&self.pool)
+            .await
+        } else {
+            sqlx::query(
+                "SELECT tc.constraint_name, kcu.table_name, kcu.column_name, \
+                 ccu.table_name AS foreign_table_name, ccu.column_name AS foreign_column_name, \
+                 rc.delete_rule, rc.update_rule \
+                 FROM information_schema.table_constraints AS tc \
+                 JOIN information_schema.key_column_usage AS kcu \
+                   ON tc.constraint_name = kcu.constraint_name \
+                  AND tc.table_schema = kcu.table_schema \
+                 JOIN information_schema.constraint_column_usage AS ccu \
+                   ON ccu.constraint_name = tc.constraint_name \
+                  AND ccu.table_schema = tc.table_schema \
+                 JOIN information_schema.referential_constraints AS rc \
+                   ON rc.constraint_name = tc.constraint_name \
+                  AND rc.constraint_schema = tc.table_schema \
+                 WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = $1 \
+                 ORDER BY tc.constraint_name, kcu.ordinal_position",
+            )
+            .bind(schema_name)
+            .fetch_all(&self.pool)
+            .await
+        }
+        .map_err(|e| DriverError::Introspection(e.to_string()))?;
+
+        let mut map: BTreeMap<(String, String, String), ForeignKeyInfo> = BTreeMap::new();
+        for row in &rows {
+            let name: String = row.try_get(0).unwrap_or_default();
+            let table: String = row.try_get(1).unwrap_or_default();
+            let column: String = row.try_get(2).unwrap_or_default();
+            let ref_table: String = row.try_get(3).unwrap_or_default();
+            let ref_column: String = row.try_get(4).unwrap_or_default();
+            let on_delete: String = row.try_get(5).unwrap_or_default();
+            let on_update: String = row.try_get(6).unwrap_or_default();
+            let key = fk_key(schema_name, &table, &name);
+            map.entry(key)
+                .and_modify(|fk| {
+                    fk.columns.push(column.clone());
+                    fk.ref_columns.push(ref_column.clone());
+                })
+                .or_insert(ForeignKeyInfo {
+                    schema: Some(schema_name.to_string()),
+                    table,
+                    name,
+                    columns: vec![column],
+                    ref_schema: None,
+                    ref_table,
+                    ref_columns: vec![ref_column],
+                    on_delete: Some(on_delete),
+                    on_update: Some(on_update),
+                });
+        }
+        Ok(map.into_values().collect())
+    }
+
+    async fn approximate_row_counts(
+        &self,
+        schema: Option<&str>,
+    ) -> Result<Vec<TableRowCount>, DriverError> {
+        let schema_name = schema.filter(|s| !s.is_empty()).unwrap_or("public");
         let rows = sqlx::query(
-            r#"
-            SELECT
-                schemaname as schema,
-                tablename as table,
-                indexname as name,
-                indexdef
-            FROM pg_indexes
-            ORDER BY schemaname, tablename, indexname
-            "#,
+            "SELECT c.relname, s.n_live_tup, c.reltuples::float8 \
+             FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid \
+             WHERE n.nspname = $1 AND c.relkind = 'r' \
+             ORDER BY c.relname",
         )
+        .bind(schema_name)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| DriverError::Introspection(e.to_string()))?;
@@ -188,190 +406,38 @@ impl EngineDriver for PostgresDriver {
         Ok(rows
             .iter()
             .filter_map(|r| {
-                let indexdef: String = r.try_get("indexdef").ok()?;
-                let table: String = r.try_get("table").ok()?;
-                let name: String = r.try_get("name").ok()?;
-                Some(IndexInfo {
-                    schema: r.try_get("schema").ok(),
-                    primary: name == format!("{table}_pkey"),
-                    columns: pg_indexdef_columns(&indexdef),
-                    unique: pg_indexdef_is_unique(&indexdef),
-                    table,
+                let name: String = r.try_get(0).ok()?;
+                let live: Option<i64> = r.try_get(1).ok().flatten();
+                let reltuples =
+                    pg_decode_reltuples(r.try_get::<f32, _>(2).ok(), r.try_get::<f64, _>(2).ok());
+                Some(TableRowCount {
                     name,
+                    approx_rows: pg_approx_rows(live, reltuples),
                 })
             })
             .collect())
-    }
-
-    async fn list_foreign_keys(&self) -> Result<Vec<ForeignKeyInfo>, DriverError> {
-        let rows = sqlx::query(
-            r#"
-            SELECT
-                tc.table_schema,
-                tc.table_name,
-                tc.constraint_name,
-                kcu.column_name,
-                ccu.table_schema AS foreign_table_schema,
-                ccu.table_name AS foreign_table_name,
-                ccu.column_name AS foreign_column_name,
-                rc.delete_rule,
-                rc.update_rule
-            FROM information_schema.table_constraints AS tc
-            JOIN information_schema.key_column_usage AS kcu
-                ON tc.constraint_name = kcu.constraint_name
-                AND tc.table_schema = kcu.table_schema
-            JOIN information_schema.constraint_column_usage AS ccu
-                ON ccu.constraint_name = tc.constraint_name
-                AND ccu.table_schema = tc.table_schema
-            JOIN information_schema.referential_constraints AS rc
-                ON tc.constraint_name = rc.constraint_name
-                AND tc.table_schema = rc.constraint_schema
-            WHERE tc.constraint_type = 'FOREIGN KEY'
-            ORDER BY tc.table_schema, tc.table_name, tc.constraint_name, kcu.ordinal_position
-            "#,
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| DriverError::Introspection(e.to_string()))?;
-
-        // Group by the composite (schema, table, constraint): same-named
-        // constraints on different tables are distinct facts.
-        let mut fk_map: BTreeMap<(String, String, String), ForeignKeyInfo> = BTreeMap::new();
-        for row in &rows {
-            let Ok(schema) = row.try_get::<String, _>("table_schema") else {
-                continue;
-            };
-            let Ok(table) = row.try_get::<String, _>("table_name") else {
-                continue;
-            };
-            let Ok(constraint) = row.try_get::<String, _>("constraint_name") else {
-                continue;
-            };
-            let Ok(column) = row.try_get::<String, _>("column_name") else {
-                continue;
-            };
-            let Ok(ref_schema) = row.try_get::<String, _>("foreign_table_schema") else {
-                continue;
-            };
-            let Ok(ref_table) = row.try_get::<String, _>("foreign_table_name") else {
-                continue;
-            };
-            let ref_column = row.try_get::<String, _>("foreign_column_name").ok();
-            let on_delete = row.try_get::<String, _>("delete_rule").ok();
-            let on_update = row.try_get::<String, _>("update_rule").ok();
-
-            let key = (schema.clone(), table.clone(), constraint.clone());
-            let entry = fk_map.entry(key).or_insert_with(|| ForeignKeyInfo {
-                schema: Some(schema),
-                table,
-                name: constraint,
-                columns: Vec::new(),
-                ref_schema: Some(ref_schema),
-                ref_table,
-                ref_columns: Vec::new(),
-                on_delete,
-                on_update,
-            });
-            entry.columns.push(column);
-            entry.ref_columns.push(ref_column.unwrap_or_default());
-        }
-
-        Ok(fk_map.into_values().collect())
     }
 
     async fn list_routines(&self) -> Result<Vec<RoutineInfo>, DriverError> {
         let rows = sqlx::query(
-            r#"
-            SELECT
-                routine_schema,
-                routine_name,
-                routine_type,
-                data_type
-            FROM information_schema.routines
-            ORDER BY routine_schema, routine_name
-            "#,
+            "SELECT routine_schema, routine_name, routine_type, data_type \
+             FROM information_schema.routines \
+             ORDER BY routine_schema, routine_name",
         )
         .fetch_all(&self.pool)
         .await
         .map_err(|e| DriverError::Introspection(e.to_string()))?;
-
         Ok(rows
             .iter()
             .filter_map(|r| {
                 Some(RoutineInfo {
-                    schema: r.try_get("routine_schema").ok(),
-                    name: r.try_get("routine_name").ok()?,
-                    routine_type: r
-                        .try_get("routine_type")
-                        .unwrap_or_else(|_| "FUNCTION".to_string()),
-                    return_type: r.try_get("data_type").ok(),
+                    schema: r.try_get(0).ok(),
+                    name: r.try_get(1).ok()?,
+                    routine_type: r.try_get(2).unwrap_or_else(|_| "FUNCTION".to_string()),
+                    return_type: r.try_get(3).ok(),
                 })
             })
             .collect())
-    }
-
-    async fn search_objects(
-        &self,
-        keyword: Option<&str>,
-        object_type: Option<ObjectType>,
-    ) -> Result<Vec<SchemaObject>, DriverError> {
-        // Filter in Rust so the keyword never becomes SQL text.
-        let needle = keyword.map(|k| k.to_ascii_lowercase());
-
-        let objects: Vec<SchemaObject> = if object_type == Some(ObjectType::Schema) {
-            let rows = sqlx::query(
-                r#"
-                SELECT schema_name
-                FROM information_schema.schemata
-                WHERE schema_name NOT LIKE 'pg\_%'
-                  AND schema_name != 'information_schema'
-                ORDER BY schema_name
-                "#,
-            )
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| DriverError::Introspection(e.to_string()))?;
-            rows.iter()
-                .filter_map(|r| {
-                    Some(SchemaObject {
-                        object_type: ObjectType::Schema,
-                        schema: None,
-                        name: r.try_get("schema_name").ok()?,
-                        display_name: None,
-                    })
-                })
-                .collect()
-        } else {
-            let rows = sqlx::query(
-                r#"
-                SELECT table_schema, table_name
-                FROM information_schema.tables
-                WHERE table_type = 'BASE TABLE'
-                ORDER BY table_schema, table_name
-                "#,
-            )
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| DriverError::Introspection(e.to_string()))?;
-            rows.iter()
-                .filter_map(|r| {
-                    Some(SchemaObject {
-                        object_type: ObjectType::Table,
-                        schema: r.try_get("table_schema").ok(),
-                        name: r.try_get("table_name").ok()?,
-                        display_name: None,
-                    })
-                })
-                .collect()
-        };
-
-        Ok(match needle {
-            Some(needle) => objects
-                .into_iter()
-                .filter(|o| o.name.to_ascii_lowercase().contains(&needle))
-                .collect(),
-            None => objects,
-        })
     }
 
     async fn ping(&self) -> Result<(), DriverError> {
@@ -380,6 +446,39 @@ impl EngineDriver for PostgresDriver {
             .await
             .map_err(|e| DriverError::Execution(e.to_string()))?;
         Ok(())
+    }
+}
+
+fn command_result(rows_affected: u64) -> QueryResult {
+    QueryResult {
+        cols: Vec::new(),
+        rows: Vec::new(),
+        meta: QueryMeta {
+            row_count: 0,
+            truncated: false,
+            rows_affected: Some(rows_affected),
+        },
+    }
+}
+
+/// Postgres planner/stats → optional approx row count for `schema_overview`.
+/// `pg_class.reltuples` is Postgres `real` (FLOAT4 / f32). Prefer f32 decode; accept f64
+/// if the query casts to `float8`. Silent f64-only decode used to drop never-analyzed (-1).
+fn pg_decode_reltuples(as_f32: Option<f32>, as_f64: Option<f64>) -> Option<f64> {
+    as_f32.map(f64::from).or(as_f64)
+}
+
+/// Composite key for FK grouping: same-named constraints on different tables
+/// are distinct facts (SQL-BUG-02).
+fn fk_key(schema: &str, table: &str, name: &str) -> (String, String, String) {
+    (schema.to_string(), table.to_string(), name.to_string())
+}
+
+fn pg_approx_rows(live: Option<i64>, reltuples: Option<f64>) -> Option<i64> {
+    match reltuples {
+        Some(t) if t < 0.0 => live.filter(|&n| n > 0),
+        Some(t) => live.or(Some(t.round() as i64)),
+        None => live,
     }
 }
 
@@ -415,6 +514,7 @@ fn pg_rows_to_result(rows: &[PgRow], truncated: bool) -> Result<QueryResult, Dri
             meta: QueryMeta {
                 row_count: 0,
                 truncated,
+                rows_affected: None,
             },
         });
     }
@@ -446,8 +546,13 @@ fn pg_rows_to_result(rows: &[PgRow], truncated: bool) -> Result<QueryResult, Dri
         meta: QueryMeta {
             row_count,
             truncated,
+            rows_affected: None,
         },
     })
+}
+
+fn bytes_to_hex(v: &[u8]) -> String {
+    v.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn decode_pg_cell(row: &PgRow, index: usize) -> Result<SqlValue, DriverError> {
@@ -485,8 +590,10 @@ fn decode_pg_cell(row: &PgRow, index: usize) -> Result<SqlValue, DriverError> {
     if let Ok(v) = row.try_get::<Uuid, _>(index) {
         return Ok(SqlValue::Uuid(v));
     }
+    // timestamptz surfaces as RFC 3339 text (legacy behavior); timestamp
+    // without time zone stays a naive datetime.
     if let Ok(v) = row.try_get::<DateTime<Utc>, _>(index) {
-        return Ok(SqlValue::DateTime(v.naive_utc()));
+        return Ok(SqlValue::String(v.to_rfc3339()));
     }
     if let Ok(v) = row.try_get::<NaiveDateTime, _>(index) {
         return Ok(SqlValue::DateTime(v));
@@ -506,10 +613,12 @@ fn decode_pg_cell(row: &PgRow, index: usize) -> Result<SqlValue, DriverError> {
     }
     if pg_type_is_array(type_name) {
         if let Some(v) = decode_pg_array(row, index) {
-            return Ok(SqlValue::Array(v));
+            return Ok(v);
         }
         if let Ok(bytes) = raw.as_bytes() {
-            return Ok(SqlValue::Binary(bytes.to_vec()));
+            return Ok(SqlValue::Json(serde_json::json!({
+                "$raw_hex": bytes_to_hex(bytes)
+            })));
         }
         return Ok(SqlValue::String(format!("<undecoded {type_name} value>")));
     }
@@ -535,7 +644,7 @@ fn decode_pg_cell(row: &PgRow, index: usize) -> Result<SqlValue, DriverError> {
     if let Ok(v) = row.try_get::<Vec<u8>, _>(index) {
         return Ok(match String::from_utf8(v) {
             Ok(s) => SqlValue::String(s),
-            Err(e) => SqlValue::Binary(e.into_bytes()),
+            Err(e) => SqlValue::String(bytes_to_hex(e.as_bytes())),
         });
     }
     Ok(SqlValue::Null)
@@ -578,27 +687,33 @@ fn pg_type_is_array(type_name: &str) -> bool {
 }
 
 /// Element-wise array decode for the common element types.
-fn decode_pg_array(row: &PgRow, index: usize) -> Option<Vec<SqlValue>> {
+fn decode_pg_array(row: &PgRow, index: usize) -> Option<SqlValue> {
     if let Ok(v) = row.try_get::<Vec<String>, _>(index) {
-        return Some(v.into_iter().map(SqlValue::String).collect());
+        return Some(SqlValue::Array(
+            v.into_iter().map(SqlValue::String).collect(),
+        ));
     }
     if let Ok(v) = row.try_get::<Vec<i64>, _>(index) {
-        return Some(v.into_iter().map(SqlValue::I64).collect());
+        return Some(SqlValue::Array(v.into_iter().map(SqlValue::I64).collect()));
     }
     if let Ok(v) = row.try_get::<Vec<i32>, _>(index) {
-        return Some(v.into_iter().map(|n| SqlValue::I64(i64::from(n))).collect());
+        return Some(SqlValue::Array(
+            v.into_iter().map(|n| SqlValue::I64(i64::from(n))).collect(),
+        ));
     }
     if let Ok(v) = row.try_get::<Vec<f64>, _>(index) {
-        return Some(v.into_iter().map(SqlValue::F64).collect());
+        return Some(SqlValue::Array(v.into_iter().map(SqlValue::F64).collect()));
     }
     if let Ok(v) = row.try_get::<Vec<bool>, _>(index) {
-        return Some(v.into_iter().map(SqlValue::Bool).collect());
+        return Some(SqlValue::Array(v.into_iter().map(SqlValue::Bool).collect()));
     }
     if let Ok(v) = row.try_get::<Vec<Uuid>, _>(index) {
-        return Some(v.into_iter().map(SqlValue::Uuid).collect());
+        return Some(SqlValue::Array(v.into_iter().map(SqlValue::Uuid).collect()));
     }
     if let Ok(v) = row.try_get::<Vec<BigDecimal>, _>(index) {
-        return Some(v.into_iter().map(SqlValue::BigDecimal).collect());
+        return Some(SqlValue::Array(
+            v.into_iter().map(SqlValue::BigDecimal).collect(),
+        ));
     }
     None
 }
@@ -903,6 +1018,100 @@ mod tests {
         assert_eq!(
             rewrite_placeholders_for_postgres("SELECT 1 -- ?\n, $$??$$, ?"),
             "SELECT 1 -- ?\n, $$??$$, $1"
+        );
+    }
+
+    #[test]
+    fn pg_indexdef_detects_unique() {
+        assert!(pg_indexdef_is_unique(
+            "CREATE UNIQUE INDEX users_username_key ON public.users USING btree (username)"
+        ));
+        assert!(!pg_indexdef_is_unique(
+            "CREATE INDEX users_email_idx ON public.users USING btree (email)"
+        ));
+    }
+
+    #[test]
+    fn pg_indexdef_columns_parses_simple_and_composite() {
+        assert_eq!(
+            pg_indexdef_columns(
+                "CREATE UNIQUE INDEX users_email_key ON public.users USING btree (email)"
+            ),
+            vec!["email"]
+        );
+        assert_eq!(
+            pg_indexdef_columns(
+                "CREATE INDEX idx_u ON public.users USING btree (email, username DESC)"
+            ),
+            vec!["email", "username"]
+        );
+    }
+
+    #[test]
+    fn pg_approx_rows_never_analyzed_omits_stale_zero() {
+        assert_eq!(pg_approx_rows(Some(0), Some(-1.0)), None);
+        assert_eq!(pg_approx_rows(None, Some(-1.0)), None);
+        assert_eq!(pg_approx_rows(Some(2), Some(-1.0)), Some(2));
+    }
+
+    #[test]
+    fn pg_approx_rows_analyzed_prefers_live_then_reltuples() {
+        assert_eq!(pg_approx_rows(Some(0), Some(0.0)), Some(0));
+        assert_eq!(pg_approx_rows(None, Some(100.0)), Some(100));
+        assert_eq!(pg_approx_rows(Some(5), Some(100.0)), Some(5));
+        assert_eq!(pg_approx_rows(Some(3), None), Some(3));
+    }
+
+    #[test]
+    fn pg_decode_reltuples_real_f32_feeds_omit_path() {
+        // Production bug: try_get::<f64> on `real` failed → None → live Some(0) kept.
+        let decoded = pg_decode_reltuples(Some(-1.0_f32), None);
+        assert_eq!(decoded, Some(-1.0));
+        assert_eq!(pg_approx_rows(Some(0), decoded), None);
+        assert_eq!(
+            pg_decode_reltuples(None, Some(42.0_f64)),
+            Some(42.0),
+            "float8 cast path"
+        );
+    }
+
+    #[test]
+    fn pg_type_is_array_detects_forms() {
+        assert!(pg_type_is_array("text[]"));
+        assert!(pg_type_is_array("int4[]"));
+        assert!(pg_type_is_array("_text"));
+        assert!(!pg_type_is_array("text"));
+        assert!(!pg_type_is_array("bytea"));
+    }
+
+    #[test]
+    fn pg_type_is_textish_covers_agent_pain_types() {
+        for t in [
+            "uuid",
+            "timestamptz",
+            "timestamp",
+            "inet",
+            "cidr",
+            "citext",
+            "text",
+            "varchar",
+            "macaddr",
+        ] {
+            assert!(pg_type_is_textish(t), "{t} should be textish");
+        }
+        assert!(!pg_type_is_textish("int4"));
+        assert!(!pg_type_is_textish("bytea"));
+    }
+
+    #[test]
+    fn fk_group_key_separates_same_name_on_different_tables() {
+        assert_ne!(
+            fk_key("public", "orders", "fk_parent"),
+            fk_key("public", "invoices", "fk_parent")
+        );
+        assert_eq!(
+            fk_key("public", "orders", "fk_parent"),
+            ("public".into(), "orders".into(), "fk_parent".into())
         );
     }
 

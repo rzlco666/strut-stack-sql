@@ -987,15 +987,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ipnetwork"
-version = "0.20.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf466541e9d546596ee94f9f69590f89473455f88372423e0008fc1a7daf100e"
-dependencies = [
- "serde",
-]
-
-[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1885,7 +1876,6 @@ dependencies = [
  "hashbrown 0.15.5",
  "hashlink",
  "indexmap",
- "ipnetwork",
  "log",
  "memchr",
  "once_cell",
@@ -2009,7 +1999,6 @@ dependencies = [
  "hkdf",
  "hmac",
  "home",
- "ipnetwork",
  "itoa",
  "log",
  "md-5",
@@ -2105,6 +2094,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
+name = "strut-sql-core"
+version = "1.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "dotenvy",
+ "serde",
+ "strut-sql-driver-api",
+ "strut-sql-driver-mysql",
+ "strut-sql-driver-postgres",
+ "strut-sql-driver-sqlite",
+ "strut-sql-guard",
+ "tokio",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "strut-sql-driver-api"
 version = "1.1.0"
 dependencies = [
@@ -2132,12 +2139,13 @@ dependencies = [
  "async-trait",
  "bigdecimal",
  "chrono",
- "serde_json",
+ "futures-util",
  "sqlx",
  "strut-sql-driver-api",
  "strut-sql-driver-conformance",
  "thiserror",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2147,6 +2155,7 @@ dependencies = [
  "async-trait",
  "bigdecimal",
  "chrono",
+ "futures-util",
  "serde_json",
  "sqlx",
  "strut-sql-driver-api",
@@ -2162,6 +2171,7 @@ version = "1.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "futures-util",
  "serde_json",
  "sqlx",
  "strut-sql-driver-api",
@@ -2169,6 +2179,67 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "strut-sql-format"
+version = "1.1.0"
+dependencies = [
+ "schemars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "strut-sql-guard"
+version = "1.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "sqlparser",
+ "strut-sql-driver-api",
+ "thiserror",
+]
+
+[[package]]
+name = "strut-sql-server"
+version = "1.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "strut-sql-core",
+ "strut-sql-driver-api",
+ "strut-sql-guard",
+ "strut-sql-tools",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "strut-sql-tools"
+version = "1.1.0"
+dependencies = [
+ "bigdecimal",
+ "chrono",
+ "futures",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "strut-sql-core",
+ "strut-sql-driver-api",
+ "strut-sql-format",
+ "strut-sql-guard",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -2177,27 +2248,22 @@ version = "1.1.0"
 dependencies = [
  "anyhow",
  "axum",
- "bigdecimal",
- "chrono",
  "clap",
- "dotenvy",
- "futures",
- "ipnetwork",
  "rmcp",
- "schemars",
- "serde",
  "serde_json",
- "sqlparser",
- "sqlx",
+ "strut-sql-core",
+ "strut-sql-driver-api",
+ "strut-sql-driver-mysql",
+ "strut-sql-driver-postgres",
+ "strut-sql-driver-sqlite",
+ "strut-sql-format",
+ "strut-sql-guard",
+ "strut-sql-server",
+ "strut-sql-tools",
  "tempfile",
- "thiserror",
  "tokio",
- "tokio-util",
- "toml",
  "tower",
- "tracing",
  "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]

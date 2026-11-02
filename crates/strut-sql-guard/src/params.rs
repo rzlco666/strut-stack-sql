@@ -1,7 +1,7 @@
 use serde_json::Value;
 
-use crate::db::EngineKind;
-use crate::guard::GuardError;
+use crate::GuardError;
+use strut_sql_driver_api::EngineKind;
 
 // SQL-BUG-13 fix: there is exactly ONE scanner in this module now. Counting,
 // validation and the PostgreSQL `?` → `$N` rewrite all derive from the same
@@ -330,13 +330,13 @@ mod tests {
 
     #[test]
     fn validates_param_count() {
-        validate_param_count("SELECT 1", &[], EngineKind::Mysql).unwrap();
-        validate_param_count("SELECT ? AS v", &[Value::from(1)], EngineKind::Mysql).unwrap();
+        validate_param_count("SELECT 1", &[], EngineKind::MySql).unwrap();
+        validate_param_count("SELECT ? AS v", &[Value::from(1)], EngineKind::MySql).unwrap();
         validate_param_count("SELECT ? AS v", &[Value::from(1)], EngineKind::Sqlite).unwrap();
         let err =
-            validate_param_count("SELECT 1", &[Value::from(1)], EngineKind::Mysql).unwrap_err();
+            validate_param_count("SELECT 1", &[Value::from(1)], EngineKind::MySql).unwrap_err();
         assert!(err.to_string().contains("unexpected params"));
-        let err = validate_param_count("SELECT ?", &[], EngineKind::Mysql).unwrap_err();
+        let err = validate_param_count("SELECT ?", &[], EngineKind::MySql).unwrap_err();
         assert!(err.to_string().contains("mismatch"));
     }
 

@@ -3,13 +3,11 @@ use std::sync::Arc;
 use rmcp::model::{CallToolResult, ContentBlock};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use strut_sql_core::config::{source_endpoint, AppConfig};
+use strut_sql_driver_api::EngineDriver;
 
-use crate::config::{source_endpoint, AppConfig};
-use crate::db::{
-    describe_table, list_foreign_keys, list_indexes, list_schemas, list_tables,
-    listed_index_from_schema_object, schema_overview,
-};
-use crate::tools::core::{json_result, tool_error};
+use crate::core::{json_result, tool_error};
+use crate::introspect;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SourceParams {
@@ -62,8 +60,22 @@ struct ListTablesMeta {
 
 #[derive(Debug, Clone, Serialize)]
 struct ListTablesResult {
-    objects: Vec<crate::db::SchemaObject>,
+    objects: Vec<introspect::SchemaObject>,
     meta: ListTablesMeta,
+}
+
+async fn source_driver(
+    config: &Arc<AppConfig>,
+    source: Option<&str>,
+) -> Result<(Arc<dyn EngineDriver>, String), rmcp::ErrorData> {
+    let source = config
+        .source(source)
+        .map_err(|e| tool_error(e.to_string()))?;
+    let driver = source
+        .driver()
+        .await
+        .map_err(|e| tool_error(e.to_string()))?;
+    Ok((driver, source.url.clone()))
 }
 
 pub async fn handle_list_sources(
@@ -113,11 +125,8 @@ pub async fn handle_list_schemas(
     config: &Arc<AppConfig>,
     params: SourceParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    let source = config
-        .source(params.source.as_deref())
-        .map_err(|e| tool_error(e.to_string()))?;
-    let pool = source.pool().await.map_err(|e| tool_error(e.to_string()))?;
-    let objects = list_schemas(&pool, None)
+    let (driver, _) = source_driver(config, params.source.as_deref()).await?;
+    let objects = introspect::list_schemas(&driver, None)
         .await
         .map_err(|e| tool_error(e.to_string()))?;
     json_result(&objects)
@@ -127,24 +136,19 @@ pub async fn handle_list_tables(
     config: &Arc<AppConfig>,
     params: ListTablesParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    let source = config
-        .source(params.source.as_deref())
-        .map_err(|e| tool_error(e.to_string()))?;
-    let pool = source.pool().await.map_err(|e| tool_error(e.to_string()))?;
+    let (driver, url) = source_driver(config, params.source.as_deref()).await?;
     let offset = params.offset.unwrap_or(0);
     let limit = params.limit.unwrap_or(50).min(200);
-    let mut objects = list_tables(
-        &pool,
-        Some(&source.url),
+    let objects = introspect::list_tables(
+        &driver,
+        Some(&url),
         params.schema.as_deref(),
         params.keyword.as_deref(),
     )
     .await
     .map_err(|e| tool_error(e.to_string()))?;
     let total = objects.len();
-    let slice = objects
-        .drain(offset..total.min(offset + limit))
-        .collect::<Vec<_>>();
+    let slice = introspect::paginate_objects(objects, offset, limit);
     json_result(&ListTablesResult {
         meta: ListTablesMeta {
             n: slice.len(),
@@ -160,18 +164,10 @@ pub async fn handle_describe_table(
     config: &Arc<AppConfig>,
     params: DescribeTableParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    let source = config
-        .source(params.source.as_deref())
+    let (driver, _) = source_driver(config, params.source.as_deref()).await?;
+    let object = introspect::describe_table(&driver, params.schema.as_deref(), &params.table)
+        .await
         .map_err(|e| tool_error(e.to_string()))?;
-    let pool = source.pool().await.map_err(|e| tool_error(e.to_string()))?;
-    let object = describe_table(
-        &pool,
-        Some(&source.url),
-        params.schema.as_deref(),
-        &params.table,
-    )
-    .await
-    .map_err(|e| tool_error(e.to_string()))?;
     json_result(&object)
 }
 
@@ -179,23 +175,15 @@ pub async fn handle_list_indexes(
     config: &Arc<AppConfig>,
     params: ListIndexesParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    let source = config
-        .source(params.source.as_deref())
-        .map_err(|e| tool_error(e.to_string()))?;
-    let pool = source.pool().await.map_err(|e| tool_error(e.to_string()))?;
-    let objects = list_indexes(
-        &pool,
-        Some(&source.url),
+    let (driver, _) = source_driver(config, params.source.as_deref()).await?;
+    let listed = introspect::list_indexes(
+        &driver,
         params.schema.as_deref(),
         params.table.as_deref(),
         params.keyword.as_deref(),
     )
     .await
     .map_err(|e| tool_error(e.to_string()))?;
-    let listed: Vec<_> = objects
-        .into_iter()
-        .map(listed_index_from_schema_object)
-        .collect();
     json_result(&listed)
 }
 
@@ -221,18 +209,11 @@ pub async fn handle_list_foreign_keys(
     config: &Arc<AppConfig>,
     params: ListForeignKeysParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    let source = config
-        .source(params.source.as_deref())
-        .map_err(|e| tool_error(e.to_string()))?;
-    let pool = source.pool().await.map_err(|e| tool_error(e.to_string()))?;
-    let fks = list_foreign_keys(
-        &pool,
-        Some(&source.url),
-        params.schema.as_deref(),
-        params.table.as_deref(),
-    )
-    .await
-    .map_err(|e| tool_error(e.to_string()))?;
+    let (driver, _) = source_driver(config, params.source.as_deref()).await?;
+    let fks =
+        introspect::list_foreign_keys(&driver, params.schema.as_deref(), params.table.as_deref())
+            .await
+            .map_err(|e| tool_error(e.to_string()))?;
     json_result(&fks)
 }
 
@@ -240,11 +221,8 @@ pub async fn handle_schema_overview(
     config: &Arc<AppConfig>,
     params: SchemaOverviewParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    let source = config
-        .source(params.source.as_deref())
-        .map_err(|e| tool_error(e.to_string()))?;
-    let pool = source.pool().await.map_err(|e| tool_error(e.to_string()))?;
-    let overview = schema_overview(&pool, Some(&source.url), params.schema.as_deref())
+    let (driver, url) = source_driver(config, params.source.as_deref()).await?;
+    let overview = introspect::schema_overview(&driver, Some(&url), params.schema.as_deref())
         .await
         .map_err(|e| tool_error(e.to_string()))?;
     json_result(&overview)

@@ -5,13 +5,12 @@ use rmcp::ErrorData as McpError;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
+use strut_sql_core::config::AppConfig;
+use strut_sql_core::redact::redact_url;
+use strut_sql_format::{format_columnar, resolve_result_format, to_json_text, ResultFormat};
 
-use crate::config::AppConfig;
-use crate::db::{
-    analyze_query, execute_batch, execute_query, search_objects, ExecError, ExecOptions, ObjectType,
-};
-use crate::format::{format_columnar, resolve_result_format, to_json_text, ResultFormat};
-use crate::redact::redact_url;
+use crate::exec::{execute_batch, execute_query, BatchResult, ExecError, ExecOptions, QueryResult};
+use crate::introspect::{search_objects, ObjectType};
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchObjectsParams {
@@ -141,7 +140,7 @@ pub fn json_result<T: serde::Serialize>(value: &T) -> Result<CallToolResult, Mcp
     )]))
 }
 
-fn format_query_result(result: &crate::db::QueryResult, format: ResultFormat) -> serde_json::Value {
+fn format_query_result(result: &QueryResult, format: ResultFormat) -> serde_json::Value {
     let mut out = serde_json::json!({
         "ok": result.ok,
         "error": result.error,
@@ -152,7 +151,7 @@ fn format_query_result(result: &crate::db::QueryResult, format: ResultFormat) ->
     out
 }
 
-fn format_batch_result(batch: &crate::db::BatchResult, format: ResultFormat) -> serde_json::Value {
+fn format_batch_result(batch: &BatchResult, format: ResultFormat) -> serde_json::Value {
     serde_json::json!({
         "results": batch
             .results
@@ -169,15 +168,15 @@ pub async fn handle_search_objects(
     let source = config
         .source(params.source.as_deref())
         .map_err(|e| tool_error(e.to_string()))?;
-    let pool = source
-        .pool()
+    let driver = source
+        .driver()
         .await
         .map_err(|e| tool_error_code(e.to_string(), ToolErrorKind::Db))?;
     let offset = params.offset.unwrap_or(0);
     let limit = params.limit.unwrap_or(50).min(200);
 
     let result = search_objects(
-        &pool,
+        &driver,
         Some(&source.url),
         params.object_type,
         params.keyword.as_deref(),
@@ -186,7 +185,7 @@ pub async fn handle_search_objects(
         limit,
     )
     .await
-    .map_err(|e| tool_error_code(e.to_string(), ToolErrorKind::Db))?;
+    .map_err(|e| tool_error_code(e, ToolErrorKind::Db))?;
 
     json_result(&result)
 }
@@ -218,14 +217,14 @@ pub async fn handle_execute_sql(
         if queries.is_empty() {
             return Err(tool_error("queries array is empty"));
         }
-        let pool = source
-            .pool()
+        let driver = source
+            .driver()
             .await
             .map_err(|e| tool_error_code(e.to_string(), ToolErrorKind::Db))?;
         let batch_items: Vec<(String, Vec<Value>)> =
             queries.into_iter().map(|q| q.into_sql_params()).collect();
         let batch = execute_batch(
-            &pool,
+            &driver,
             batch_items,
             &opts,
             config.batch_concurrency,
@@ -245,11 +244,11 @@ pub async fn handle_execute_sql(
     opts.page_offset = params.page_offset.unwrap_or(0);
     opts.page_size = params.page_size;
 
-    let pool = source
-        .pool()
+    let driver = source
+        .driver()
         .await
         .map_err(|e| tool_error_code(e.to_string(), ToolErrorKind::Db))?;
-    let result = execute_query(&pool, &sql, &query_params, &opts)
+    let result = execute_query(&driver, &sql, &query_params, &opts)
         .await
         .map_err(|e| tool_error_code(e.to_string(), exec_error_kind(&e)))?;
     Ok(CallToolResult::success(vec![ContentBlock::text(
@@ -272,13 +271,13 @@ pub async fn handle_analyze_query(
         .source(params.source.as_deref())
         .map_err(|e| tool_error(e.to_string()))?;
 
-    let pool = source
-        .pool()
+    let driver = source
+        .driver()
         .await
         .map_err(|e| tool_error_code(e.to_string(), ToolErrorKind::Db))?;
 
-    let summary = analyze_query(
-        &pool,
+    let summary = crate::explain::analyze_query(
+        &driver,
         &params.sql,
         &params.params.unwrap_or_default(),
         config.write_mode,

@@ -1,18 +1,16 @@
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::stream::{self, StreamExt};
 use serde::Serialize;
 use serde_json::Value;
-use sqlx::{mysql::MySqlRow, postgres::PgRow, sqlite::SqliteRow, Column, Row};
-
-use crate::config::WriteMode;
-use crate::db::bind::{bind_mysql_params, bind_pg_params, bind_sqlite_params};
-use crate::db::value::{decode_mysql_cell, decode_pg_cell, decode_sqlite_cell};
-use crate::db::{EngineKind, EnginePool};
-use crate::format::{truncate_to_bytes, ColumnarMeta, ColumnarResult};
-use crate::guard::{
-    validate_and_prepare_with_options, GuardError, PrepareOptions, SqlClass, StmtClass,
+use strut_sql_driver_api::{BoundQuery, DriverError, EngineDriver, EngineKind, SqlValue};
+use strut_sql_format::{truncate_to_bytes, ColumnarMeta, ColumnarResult};
+use strut_sql_guard::{
+    validate_and_prepare_with_options, GuardError, PrepareOptions, SqlClass, StmtClass, WriteMode,
 };
+
+use crate::bind::to_sql_values;
 
 /// Whether a guard-classified statement yields rows and must go through the
 /// fetch path (SQL-BUG-05). This replaces the old string-prefix heuristic
@@ -21,7 +19,7 @@ use crate::guard::{
 /// other row-returning Read statements (SHOW / EXPLAIN / DESCRIBE), which the
 /// guard labels separately. A writing CTE classified as DML by the guard now
 /// correctly takes the execute path.
-fn class_fetches_rows(class: &StmtClass) -> bool {
+pub(crate) fn class_fetches_rows(class: &StmtClass) -> bool {
     class.is_select_like() || class.sql_class() == SqlClass::Read
 }
 
@@ -30,9 +28,15 @@ pub enum ExecError {
     #[error(transparent)]
     Guard(#[from] GuardError),
     #[error("database error: {0}")]
-    Database(#[from] sqlx::Error),
+    Database(String),
     #[error("{0}")]
     Other(String),
+}
+
+impl From<DriverError> for ExecError {
+    fn from(e: DriverError) -> Self {
+        ExecError::Database(e.to_string())
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -63,12 +67,12 @@ pub struct ExecOptions {
 }
 
 pub async fn execute_query(
-    pool: &EnginePool,
+    driver: &Arc<dyn EngineDriver>,
     sql: &str,
     params: &[Value],
     opts: &ExecOptions,
 ) -> Result<QueryResult, ExecError> {
-    let engine = pool.engine();
+    let engine = driver.kind();
     let prepared = validate_and_prepare_with_options(
         sql,
         params,
@@ -117,7 +121,7 @@ pub async fn execute_query(
     let result = match tokio::time::timeout(
         opts.timeout,
         run_sql(
-            pool,
+            driver,
             &prepared.sql,
             &prepared.params,
             engine,
@@ -197,7 +201,7 @@ pub async fn execute_query(
 }
 
 pub async fn execute_batch(
-    pool: &EnginePool,
+    driver: &Arc<dyn EngineDriver>,
     queries: Vec<(String, Vec<Value>)>,
     opts: &ExecOptions,
     concurrency: usize,
@@ -205,10 +209,10 @@ pub async fn execute_batch(
 ) -> BatchResult {
     let results = stream::iter(queries)
         .map(|(sql, params)| {
-            let pool = pool.clone();
+            let driver = driver.clone();
             let opts = opts.clone();
             async move {
-                match execute_query(&pool, &sql, &params, &opts).await {
+                match execute_query(&driver, &sql, &params, &opts).await {
                     Ok(r) => r,
                     Err(e) => QueryResult {
                         ok: false,
@@ -233,139 +237,45 @@ pub async fn execute_batch(
     BatchResult { results }
 }
 
-/// Stream rows from a bound query, stopping after `cap` kept rows plus one
-/// probe row. Returns the kept rows and whether a probe row existed (i.e. the
-/// result was truncated at `cap`).
-macro_rules! fetch_rows_capped {
-    ($query:expr, $pool:expr, $cap:expr) => {{
-        let mut stream = $query.fetch($pool);
-        let mut rows = Vec::new();
-        let mut overflow = false;
-        while let Some(item) = stream.next().await {
-            let row = item?;
-            if rows.len() >= $cap {
-                overflow = true;
-                break;
-            }
-            rows.push(row);
-        }
-        (rows, overflow)
-    }};
-}
-
 async fn run_sql(
-    pool: &EnginePool,
+    driver: &Arc<dyn EngineDriver>,
     sql: &str,
     params: &[Value],
     engine: EngineKind,
     fetch_rows: bool,
     row_cap: Option<usize>,
 ) -> Result<ColumnarResult, ExecError> {
-    match engine {
-        EngineKind::Postgres => {
-            let pool = pool
-                .postgres()
-                .map_err(|e| ExecError::Other(e.to_string()))?;
-            if fetch_rows {
-                let query =
-                    bind_pg_params(sql, params).map_err(|e| ExecError::Other(e.to_string()))?;
-                if let Some(cap) = row_cap {
-                    let (rows, overflow) = fetch_rows_capped!(query, pool, cap);
-                    let mut columnar = pg_rows_to_columnar(&rows)?;
-                    if overflow {
-                        columnar.meta.truncated = true;
-                    }
-                    Ok(columnar)
-                } else {
-                    let rows = query.fetch_all(pool).await?;
-                    pg_rows_to_columnar(&rows)
-                }
-            } else {
-                let result = bind_pg_params(sql, params)
-                    .map_err(|e| ExecError::Other(e.to_string()))?
-                    .execute(pool)
-                    .await?;
-                Ok(ColumnarResult::empty_command(result.rows_affected()))
-            }
-        }
-        EngineKind::Mysql => {
-            let pool = pool.mysql().map_err(|e| ExecError::Other(e.to_string()))?;
-            if fetch_rows {
-                let query =
-                    bind_mysql_params(sql, params).map_err(|e| ExecError::Other(e.to_string()))?;
-                if let Some(cap) = row_cap {
-                    let (rows, overflow) = fetch_rows_capped!(query, pool, cap);
-                    let mut columnar = mysql_rows_to_columnar(&rows)?;
-                    if overflow {
-                        columnar.meta.truncated = true;
-                    }
-                    Ok(columnar)
-                } else {
-                    let rows = query.fetch_all(pool).await?;
-                    mysql_rows_to_columnar(&rows)
-                }
-            } else {
-                let result = bind_mysql_params(sql, params)
-                    .map_err(|e| ExecError::Other(e.to_string()))?
-                    .execute(pool)
-                    .await?;
-                Ok(ColumnarResult::empty_command(result.rows_affected()))
-            }
-        }
-        EngineKind::Sqlite => {
-            let pool = pool.sqlite().map_err(|e| ExecError::Other(e.to_string()))?;
-            if fetch_rows {
-                let query =
-                    bind_sqlite_params(sql, params).map_err(|e| ExecError::Other(e.to_string()))?;
-                if let Some(cap) = row_cap {
-                    let (rows, overflow) = fetch_rows_capped!(query, pool, cap);
-                    let mut columnar = sqlite_rows_to_columnar(&rows)?;
-                    if overflow {
-                        columnar.meta.truncated = true;
-                    }
-                    Ok(columnar)
-                } else {
-                    let rows = query.fetch_all(pool).await?;
-                    sqlite_rows_to_columnar(&rows)
-                }
-            } else {
-                let result = bind_sqlite_params(sql, params)
-                    .map_err(|e| ExecError::Other(e.to_string()))?
-                    .execute(pool)
-                    .await?;
-                Ok(ColumnarResult::empty_command(result.rows_affected()))
-            }
-        }
-    }
-}
+    let bound = BoundQuery {
+        sql: sql.to_string(),
+        params: to_sql_values(params).map_err(ExecError::Other)?,
+        row_cap,
+        fetch_rows,
+    };
+    let result = driver.execute(&bound).await?;
 
-fn pg_rows_to_columnar(rows: &[PgRow]) -> Result<ColumnarResult, ExecError> {
-    if rows.is_empty() {
-        return Ok(empty_columnar());
+    if !fetch_rows {
+        return Ok(ColumnarResult::empty_command(
+            result.meta.rows_affected.unwrap_or(0),
+        ));
     }
 
-    let cols: Vec<String> = rows[0]
-        .columns()
-        .iter()
-        .map(|c| c.name().to_string())
-        .collect();
-
-    let mut out_rows = Vec::with_capacity(rows.len());
-    for row in rows {
-        let mut values = Vec::with_capacity(cols.len());
-        for (i, _) in row.columns().iter().enumerate() {
-            values.push(decode_pg_cell(row, i).map_err(ExecError::Database)?);
-        }
-        out_rows.push(values);
-    }
-
-    let n = out_rows.len();
+    let cols = result.cols.into_iter().map(|c| c.name).collect();
+    let rows = result
+        .rows
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|v| sql_value_to_json(v, engine))
+                .collect()
+        })
+        .collect::<Vec<Vec<Value>>>();
+    let n = rows.len();
     Ok(ColumnarResult {
         cols,
-        rows: out_rows,
+        rows,
         meta: ColumnarMeta {
             n,
-            truncated: false,
+            truncated: result.meta.truncated,
             rows_affected: None,
             limit_injected: None,
             limit_clamped: None,
@@ -378,100 +288,60 @@ fn pg_rows_to_columnar(rows: &[PgRow]) -> Result<ColumnarResult, ExecError> {
     })
 }
 
-fn mysql_rows_to_columnar(rows: &[MySqlRow]) -> Result<ColumnarResult, ExecError> {
-    if rows.is_empty() {
-        return Ok(empty_columnar());
-    }
-
-    let cols: Vec<String> = rows[0]
-        .columns()
-        .iter()
-        .map(|c| c.name().to_string())
-        .collect();
-
-    let mut out_rows = Vec::with_capacity(rows.len());
-    for row in rows {
-        let mut values = Vec::with_capacity(cols.len());
-        for (i, _) in row.columns().iter().enumerate() {
-            values.push(decode_mysql_cell(row, i).map_err(ExecError::Database)?);
+fn bigdecimal_to_json(v: &bigdecimal::BigDecimal) -> Value {
+    // SQL-BUG-06(c): never lose precision silently. Emit a JSON number only
+    // when the value survives a decimal → f64 → decimal round-trip exactly;
+    // otherwise emit the exact decimal as a JSON string.
+    if v.fractional_digit_count() == 0 {
+        if let Ok(i) = v.to_string().parse::<i64>() {
+            if (-(1i64 << 53)..=(1i64 << 53)).contains(&i) {
+                return Value::from(i);
+            }
         }
-        out_rows.push(values);
     }
-
-    let n = out_rows.len();
-    Ok(ColumnarResult {
-        cols,
-        rows: out_rows,
-        meta: ColumnarMeta {
-            n,
-            truncated: false,
-            rows_affected: None,
-            limit_injected: None,
-            limit_clamped: None,
-            page_offset: None,
-            page_size: None,
-            has_more: None,
-            total_fetched: None,
-            redacted_columns: None,
-        },
-    })
+    let s = v.to_string();
+    if let Ok(f) = s.parse::<f64>() {
+        if f.is_finite() {
+            if let Ok(back) = f.to_string().parse::<bigdecimal::BigDecimal>() {
+                if back == *v {
+                    return Value::from(f);
+                }
+            }
+        }
+    }
+    Value::String(s)
 }
 
-fn sqlite_rows_to_columnar(rows: &[SqliteRow]) -> Result<ColumnarResult, ExecError> {
-    if rows.is_empty() {
-        return Ok(empty_columnar());
-    }
-
-    let cols: Vec<String> = rows[0]
-        .columns()
-        .iter()
-        .map(|c| c.name().to_string())
-        .collect();
-
-    let mut out_rows = Vec::with_capacity(rows.len());
-    for row in rows {
-        let mut values = Vec::with_capacity(cols.len());
-        for (i, _) in row.columns().iter().enumerate() {
-            values.push(decode_sqlite_cell(row, i).map_err(ExecError::Database)?);
-        }
-        out_rows.push(values);
-    }
-
-    let n = out_rows.len();
-    Ok(ColumnarResult {
-        cols,
-        rows: out_rows,
-        meta: ColumnarMeta {
-            n,
-            truncated: false,
-            rows_affected: None,
-            limit_injected: None,
-            limit_clamped: None,
-            page_offset: None,
-            page_size: None,
-            has_more: None,
-            total_fetched: None,
-            redacted_columns: None,
-        },
-    })
+fn bytes_to_hex(v: &[u8]) -> String {
+    v.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn empty_columnar() -> ColumnarResult {
-    ColumnarResult {
-        cols: vec![],
-        rows: vec![],
-        meta: ColumnarMeta {
-            n: 0,
-            truncated: false,
-            rows_affected: None,
-            limit_injected: None,
-            limit_clamped: None,
-            page_offset: None,
-            page_size: None,
-            has_more: None,
-            total_fetched: None,
-            redacted_columns: None,
+pub(crate) fn sql_value_to_json(value: SqlValue, engine: EngineKind) -> Value {
+    match value {
+        SqlValue::Null => Value::Null,
+        SqlValue::Bool(b) => Value::Bool(b),
+        SqlValue::I64(n) => Value::from(n),
+        SqlValue::F64(f) => Value::from(f),
+        SqlValue::String(s) => Value::String(s),
+        SqlValue::Uuid(u) => Value::String(u.to_string()),
+        SqlValue::BigDecimal(d) => bigdecimal_to_json(&d),
+        SqlValue::Date(d) => Value::String(d.to_string()),
+        SqlValue::DateTime(dt) => Value::String(dt.to_string()),
+        SqlValue::Binary(b) => match engine {
+            EngineKind::Postgres | EngineKind::Sqlite => {
+                let mut map = serde_json::Map::new();
+                map.insert("$blob_hex".into(), Value::String(bytes_to_hex(&b)));
+                Value::Object(map)
+            }
+            EngineKind::MySql => Value::String(bytes_to_hex(&b)),
         },
+        SqlValue::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .map(|v| sql_value_to_json(v, engine))
+                .collect(),
+        ),
+        SqlValue::Json(j) => j,
     }
 }
 
@@ -480,8 +350,6 @@ fn empty_columnar() -> ColumnarResult {
 /// SQL-SEC-16: this redaction is **name-based and best-effort only**. Matching
 /// uses the column names as returned by the database — i.e. the alias when
 /// the query supplies one (`SELECT password AS p` evades a `password` entry).
-/// sqlx 0.8's portable `Column` API exposes only the returned name, not a
-/// pre-alias origin name, so origin-based matching is not available here.
 /// Treat `deny_columns` as a seat-belt for accidental exposure, never as an
 /// access-control boundary; real protection is a read-only DB user and views
 /// that exclude sensitive columns.
@@ -525,12 +393,55 @@ pub fn redact_denied_columns(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::guard::validate_and_prepare;
+    use strut_sql_guard::validate_and_prepare;
 
     fn class_of(sql: &str, engine: EngineKind, mode: WriteMode) -> StmtClass {
         validate_and_prepare(sql, &[], engine, mode, 100)
             .expect("guard accepts")
             .class
+    }
+
+    #[test]
+    fn bigdecimal_integer_fits_as_number() {
+        let v: bigdecimal::BigDecimal = "184".parse().unwrap();
+        assert_eq!(bigdecimal_to_json(&v), Value::from(184));
+    }
+
+    #[test]
+    fn bigdecimal_decimal_as_float() {
+        let v: bigdecimal::BigDecimal = "107744.5".parse().unwrap();
+        assert!(bigdecimal_to_json(&v).is_number());
+    }
+
+    #[test]
+    fn bigdecimal_high_precision_falls_back_to_string() {
+        // f64 cannot represent this exactly — precision must not be lost.
+        let v: bigdecimal::BigDecimal = "12345678901234567890.123456789".parse().unwrap();
+        assert_eq!(
+            bigdecimal_to_json(&v),
+            Value::String("12345678901234567890.123456789".into())
+        );
+    }
+
+    #[test]
+    fn bigdecimal_exact_binary_friendly_stays_number() {
+        let v: bigdecimal::BigDecimal = "0.1".parse().unwrap();
+        assert!(bigdecimal_to_json(&v).is_number());
+        let v: bigdecimal::BigDecimal = "9007199254740993".parse().unwrap(); // 2^53 + 1
+        assert!(
+            bigdecimal_to_json(&v).is_string(),
+            "unsafe integer → string"
+        );
+    }
+
+    #[test]
+    fn binary_cells_are_tagged_hex_for_postgres_and_sqlite() {
+        let v = sql_value_to_json(SqlValue::Binary(b"edoc".to_vec()), EngineKind::Sqlite);
+        assert_eq!(v, serde_json::json!({"$blob_hex": "65646f63"}));
+        let v = sql_value_to_json(SqlValue::Binary(b"edoc".to_vec()), EngineKind::Postgres);
+        assert_eq!(v, serde_json::json!({"$blob_hex": "65646f63"}));
+        let v = sql_value_to_json(SqlValue::Binary(b"edoc".to_vec()), EngineKind::MySql);
+        assert_eq!(v, Value::String("65646f63".into()));
     }
 
     #[test]
@@ -544,7 +455,7 @@ mod tests {
         // SHOW is Read-classed by the guard (label != SELECT) and returns rows.
         assert!(class_fetches_rows(&class_of(
             "SHOW PROCESSLIST",
-            EngineKind::Mysql,
+            EngineKind::MySql,
             WriteMode::ReadOnly
         )));
         // A plain SELECT-shaped prefix must NOT decide: DML executes.
