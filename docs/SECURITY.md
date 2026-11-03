@@ -16,7 +16,7 @@ flowchart LR
   Sess --> DB[(Least-privilege DB user)]
 ```
 
-### 1. AST guard (`src/guard/`)
+### 1. AST guard (`crates/strut-sql-guard/`)
 
 - Dialects: `PostgreSqlDialect` / `MySqlDialect` / `SQLiteDialect`
 - Reject empty / multi-statement strings
@@ -29,7 +29,7 @@ flowchart LR
 - `EXPLAIN ANALYZE` requires writes
 - Batch `queries[]` items are each parsed as a single statement
 
-**Since 1.1.0 — bypass closure:**
+**Bypass closure (v2):**
 
 - **CTE bodies are classified recursively.** A `WITH x AS (DELETE … RETURNING …) SELECT …` is DML, not a read; the class of a query is the most dangerous class found anywhere in its tree (CTEs, subqueries, set operations).
 - **`SELECT … INTO` / `INTO OUTFILE` / `INTO DUMPFILE` are not reads.** They create tables or files and are denied in read-only mode.
@@ -59,7 +59,7 @@ flowchart LR
 | AllowWrites | `--allow-writes` | + INSERT/UPDATE/DELETE/MERGE |
 | AllowDdl | `--allow-ddl` | + DROP/ALTER/TRUNCATE/CREATE … |
 
-`GRANT` / `REVOKE` form their own guard class (**Admin** since 1.1.0) and
+`GRANT` / `REVOKE` form their own guard class (**Admin**) and
 are **not** unlocked by `--allow-ddl` alone: privilege management
 additionally requires the explicit `--allow-grants` opt-in, so a schema-DDL
 token can never silently become a privilege-escalation token. See
@@ -96,11 +96,11 @@ GRANT SELECT ON ALL TABLES IN SCHEMA public TO mcp_ro;
 - Audit trail: see [Audit log](#audit-log) — `MCP_SQL_LOG=audit=info` enables it
 - Do not put passwords in MCP client JSON `args`
 
-### 5. Schema isolation (v0.5+)
+### 5. Schema isolation
 
 MySQL `search_objects` / `list_tables` / `list_columns` / `list_indexes` default to the **connected database** (`DATABASE()` or database name in URL). Cross-database search requires explicit `schema: "*"`.
 
-### 6. DDL confirm (v0.5+)
+### 6. DDL confirmation
 
 `schema_mutate` and DDL alias tools (`drop_table`, `truncate_table`, `drop_column`) require `"confirm": true` for destructive actions, in addition to `--allow-ddl`. Aliases are listed only when both `--full-tools` and `--allow-ddl` are set.
 
@@ -127,9 +127,8 @@ Each executed statement emits one audit event on stderr with the statement
 text, its guard classification, the effective write tier, the source name,
 and the outcome. **Parameter values are never logged** — values bound through
 `params` stay out of the audit trail, and tokens/credentials are never
-written to any log. (Before 1.1.0 some docs described the audit trail as
-merely "optional/future"; as of 1.1.0 it is implemented exactly as above —
-the filter is the tracing target `audit`, e.g. `MCP_SQL_LOG=audit=info`.)
+written to any log. The filter is the tracing target `audit`, e.g.
+`MCP_SQL_LOG=audit=info`.
 
 ## HTTP transport
 
@@ -173,10 +172,62 @@ Format: comma-separated `name:token:mode[:source1|source2|...]` entries
   a routable interface is never started by accident.
 - Loopback binds (`127.0.0.1`) without tokens remain available for local
   development and print a startup warning.
-- Token auth is an API-token scheme for self-hosted/remote use; OAuth 2.1
-  support is on the v2 roadmap, not in 1.1.0.
+- Token secrets may be stored as `sha256:<64 lowercase hex>` and are compared
+  in constant time; raw secrets and digests are both accepted.
+- OAuth 2.1: set `STRUT_STACK_SQL_OAUTH_ISSUER` and
+  `STRUT_STACK_SQL_OAUTH_AUDIENCE` to validate RS256 Bearer JWTs from an
+  external authorization server. The server discovers the issuer's JWKS,
+  validates `iss`/`aud`/`exp`, maps a configurable claim (default `sub`) to a
+  principal, and serves RFC 9728 protected-resource metadata at
+  `/.well-known/oauth-protected-resource`. Discovery failure fails closed;
+  API keys keep working. Token material is never logged.
 - Terminate TLS in front of the server (reverse proxy or tunnel) whenever
   tokens cross a network you do not control.
+
+## Release security gate (R1-06)
+
+Three checks run before a release:
+
+1. **Guard fuzz (`scripts/security/fuzz_guard.py`).** The server runs in the
+   default read-only process mode against a *writable* SQLite source, so a
+   guard bypass would actually mutate the database instead of failing on a
+   read-only connection. The generator emits write attempts hidden in reads
+   (CTE bodies, `SELECT … INTO`, `INTO OUTFILE`/`DUMPFILE`, `PRAGMA` writes,
+   keyword comment-splitting, multi-statement smuggling, dangerous functions,
+   unicode/whitespace variants) and records attempts, denials, any `ok: true`
+   on a write attempt (a bypass), protocol failures, crashes, and a database
+   digest before/after (table list, row counts, canary rows, file SHA-256,
+   stray files).
+
+   ```bash
+   scripts/security/fuzz_guard.py --seconds 3600 --seed 20261103 \
+       --out /tmp/guard-fuzz.json
+   ```
+
+   The gate passes only with `bypasses == 0`, no crashes, no protocol errors,
+   and an unchanged database digest. Raw artifacts are attached to the release
+   evidence, not regenerated for the docs.
+
+   Freeze result (2026-11-03, seed 20261103, 3,603 s wall clock): **3,159,868
+   attempts, 3,159,868 denied, 0 bypasses, 0 protocol errors, 0 crashes,
+   database digest unchanged** — `scripts/security/results/guard-fuzz-2.0.0.json`
+   records the counts and the binary SHA-256. Re-run with a fresh seed before
+   any release whose guard code changed.
+
+2. **No credentials in output, errors or logs.**
+   `scripts/security/credential_leak_check.sh` drives a DSN with a password
+   into a refused connection and an HTTP request with a wrong token, then
+   scans stdout, stderr and the response body for either secret. It exits
+   non-zero on any hit. Connection errors redact URL passwords, `list_sources`
+   never returns user/password, audit events carry the statement text but
+   never parameter values, and OAuth/token material is never logged.
+
+3. **Cross-principal isolation.** With two principals granted two different
+   sources, principal A cannot reach source B through *any* tool path —
+   direct `execute_sql`, a batch on the other source, `search_objects`, or the
+   advisor — and the denial neither returns rows nor echoes the other source's
+   URL. Covered by
+   `tests/http_integration.rs::principal_cannot_reach_a_source_it_was_not_granted`.
 
 ## Reporting
 
