@@ -192,11 +192,11 @@ Measured at the 2.0.0 freeze on the documented WSL2 reference machine
 (n=120 after 20 warmups, 20 cold starts; raw JSON in
 `scripts/benchmark/results/2.0.0.json`, including the binary sha256):
 
-- **stdio meets every PRD-F2-12 target**: idle RSS 8.05 MB (≤ 15), cold-start
-  p95 7.43 ms (≤ 25), core `tools/list` 3,039 B (≤ 3,072 B), 100×8 result
-  7,526 B (≤ 70 KB), SELECT-by-PK p50 0.99 ms (≤ 1).
-- **HTTP now meets its own declared targets**: cold-start p95 46.98 ms
-  (≤ 60 ms) and SELECT-by-PK p50 2.28 ms (≤ 5 ms). Setting `TCP_NODELAY` on
+- **stdio meets every PRD-F2-12 target**: idle RSS 8.30 MB (≤ 15), cold-start
+  p95 5.20 ms (≤ 25), core `tools/list` 2,920 B (≤ 3,072 B), 100×8 result
+  7,526 B (≤ 70 KB), SELECT-by-PK p50 0.73 ms (≤ 1).
+- **HTTP now meets its own declared targets**: cold-start p95 40.02 ms
+  (≤ 60 ms) and SELECT-by-PK p50 1.25 ms (≤ 5 ms). Setting `TCP_NODELAY` on
   accepted connections removed a ~40 ms Nagle/delayed-ACK penalty per
   `tools/call` on reused connections. The HTTP cold start cannot reuse the
   stdio budget: on this host the kernel `bind()` of a listening socket alone
@@ -204,10 +204,10 @@ Measured at the 2.0.0 freeze on the documented WSL2 reference machine
   targets are declared in the artifact instead of rounding the difference
   away.
 - **Full 20-tool surface**: `tools/list` with `--full-tools --allow-ddl` is
-  11,003 B against a 12,000 B CI cap; the core surface is 3,039 B against
+  11,757 B against a 12,000 B CI cap; the core surface is 2,920 B against
   3,072 B.
 - **PostgreSQL 16 and MySQL 8.4 are measured**, not `not_run`: SELECT-by-PK
-  p50 2.44 ms / 2.99 ms (p95 3.78 / 4.27 ms), 0 errors, same 7,526 B payload,
+  p50 1.43 ms / 1.56 ms (p95 2.34 / 2.00 ms), 0 errors, same 7,526 B payload,
   using fixtures seeded through the compose stack.
 - **Size gate**: the stripped Linux x64 release binary is 10.6 MB, under the
   16 MB release budget.

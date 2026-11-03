@@ -34,23 +34,23 @@ not typed by hand.
 
 | Metric | Target | stdio | HTTP |
 |---|---:|---:|---:|
-| Idle RSS | ≤ 15 MB | 8.05 MB — **PASS** | 8.79 MB — **PASS** |
-| Load RSS | — | 12.11 MB | 13.25 MB |
-| Cold start, single run | — | 4.54 ms | 32.88 ms |
-| Cold start, p50 / p95 / p99 | stdio ≤ 25 ms · HTTP ≤ 60 ms | 3.49 / **7.43** / 14.19 ms — **PASS** | 42.40 / **46.98** / 47.39 ms — **PASS** |
+| Idle RSS | ≤ 15 MB | 8.30 MB — **PASS** | 9.34 MB — **PASS** |
+| Load RSS | — | 12.58 MB | 13.71 MB |
+| Cold start, single run | — | 4.23 ms | 30.12 ms |
+| Cold start, p50 / p95 / p99 | stdio ≤ 25 ms · HTTP ≤ 60 ms | 3.70 / **5.20** / 26.57 ms — **PASS** | 28.18 / **40.02** / 53.88 ms — **PASS** |
 | `tools/list` (3 core tools) | ≤ 3,072 B | 2,920 B — **PASS** | 2,920 B — **PASS** |
 | `tools/list` (full 20-tool + DDL surface) | ≤ 12,000 B | 11,757 B — **PASS** | 11,757 B — **PASS** |
 | 100×8 result before truncation | ≤ 70 KB | 7,526 B — **PASS** | 7,526 B — **PASS** |
-| `execute_sql` SELECT by PK, p50 / p95 / p99 | stdio ≤ 1 ms · HTTP ≤ 5 ms | 0.99 / 1.57 / 3.01 ms — **PASS** | 2.28 / 2.81 / 3.09 ms — **PASS** |
+| `execute_sql` SELECT by PK, p50 / p95 / p99 | stdio ≤ 1 ms · HTTP ≤ 5 ms | 0.73 / 0.88 / 1.15 ms — **PASS** | 1.25 / 1.64 / 1.88 ms — **PASS** |
 | `execute_sql` errors | 0 | 0 | 0 |
 
 ### Server engines (stdio, same client loop)
 
 | Engine | SELECT by PK p50 / p95 / p99 | 100×8 payload | Errors |
 |---|---:|---:|---:|
-| SQLite (in-process file) | 0.99 / 1.57 / 3.01 ms | 7,526 B | 0 |
-| PostgreSQL 16 (`postgres:16-alpine`, container) | 2.44 / 3.78 / 4.71 ms | 7,526 B | 0 |
-| MySQL 8.4 (`mysql:8.4`, container) | 2.99 / 4.27 / 4.83 ms | 7,526 B | 0 |
+| SQLite (in-process file) | 0.73 / 0.88 / 1.15 ms | 7,526 B | 0 |
+| PostgreSQL 16 (`postgres:16-alpine`, container) | 1.43 / 2.34 / 15.00 ms | 7,526 B | 0 |
+| MySQL 8.4 (`mysql:8.4`, container) | 1.56 / 2.00 / 2.26 ms | 7,526 B | 0 |
 
 The engine rows are seeded by `scripts/benchmark/seed-engines.sh` with the same
 fixture shape as the SQLite benchmark (1,000 rows × 8 columns, plus a 100×8

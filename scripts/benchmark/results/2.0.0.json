@@ -1,9 +1,9 @@
 {
   "meta": {
     "release": "2.0.0",
-    "generated_at": "2026-11-03T15:20:40Z",
+    "generated_at": "2026-11-03T17:14:20Z",
     "binary": "/home/rizal/projects/strut-stack-sql-push/target/release/strut-stack-sql",
-    "binary_sha256": "09a8b3eed350ee32de56b778baa918f5f5efabd9e1e934a6ca438b2f96bb5c19",
+    "binary_sha256": "14f2f2349ff1d9f3b8d22d51901eff16ea21453105b23739f3887849c5c63c36",
     "database": "sqlite (temp file, seeded 1000 users + 100x8 table)",
     "iterations": 120,
     "warmup": 20,
@@ -31,28 +31,28 @@
   "cold_start_samples_ms": {
     "stdio": {
       "n": 20,
-      "p50": 3.485,
-      "p95": 7.427,
-      "p99": 14.188,
-      "mean": 4.452,
-      "min": 2.569,
-      "max": 14.188
+      "p50": 3.699,
+      "p95": 5.195,
+      "p99": 26.565,
+      "mean": 4.867,
+      "min": 2.632,
+      "max": 26.565
     },
     "http": {
       "n": 20,
-      "p50": 42.396,
-      "p95": 46.979,
-      "p99": 47.394,
-      "mean": 39.647,
-      "min": 29.95,
-      "max": 47.394
+      "p50": 28.179,
+      "p95": 40.015,
+      "p99": 53.882,
+      "mean": 30.599,
+      "min": 17.925,
+      "max": 53.882
     }
   },
   "results": {
     "stdio": {
       "transport": "stdio",
-      "cold_start_single_ms": 4.541,
-      "tools_list_bytes": 3039,
+      "cold_start_single_ms": 4.665,
+      "tools_list_bytes": 2920,
       "tools_list_tool_count": 3,
       "result_100x8_bytes": 7526,
       "result_100x8_rows": 100,
@@ -60,21 +60,21 @@
       "result_100x8_truncated": false,
       "execute_sql_select_by_pk_ms": {
         "n": 120,
-        "p50": 0.987,
-        "p95": 1.567,
-        "p99": 3.006,
-        "mean": 1.111,
-        "min": 0.89,
-        "max": 3.798
+        "p50": 0.727,
+        "p95": 0.882,
+        "p99": 1.153,
+        "mean": 0.752,
+        "min": 0.652,
+        "max": 1.21
       },
       "execute_sql_errors": 0,
-      "idle_rss_mb": 8.05,
-      "load_rss_mb": 12.11
+      "idle_rss_mb": 8.3,
+      "load_rss_mb": 12.58
     },
     "http": {
       "transport": "http",
-      "cold_start_single_ms": 32.877,
-      "tools_list_bytes": 3039,
+      "cold_start_single_ms": 38.865,
+      "tools_list_bytes": 2920,
       "tools_list_tool_count": 3,
       "result_100x8_bytes": 7526,
       "result_100x8_rows": 100,
@@ -82,16 +82,16 @@
       "result_100x8_truncated": false,
       "execute_sql_select_by_pk_ms": {
         "n": 120,
-        "p50": 2.281,
-        "p95": 2.814,
-        "p99": 3.085,
-        "mean": 2.316,
-        "min": 1.726,
-        "max": 3.323
+        "p50": 1.25,
+        "p95": 1.638,
+        "p99": 1.884,
+        "mean": 1.287,
+        "min": 1.061,
+        "max": 2.029
       },
       "execute_sql_errors": 0,
-      "idle_rss_mb": 8.79,
-      "load_rss_mb": 13.25
+      "idle_rss_mb": 9.34,
+      "load_rss_mb": 13.71
     }
   },
   "targets": {
@@ -112,19 +112,19 @@
   "comparison": {
     "stdio": {
       "idle_rss_mb": {
-        "value": 8.05,
+        "value": 8.3,
         "target": 15.0,
         "unit": "MB",
         "status": "PASS"
       },
       "cold_start_p95_ms": {
-        "value": 7.427,
+        "value": 5.195,
         "target": 25.0,
         "unit": "ms",
         "status": "PASS"
       },
       "tools_list_bytes": {
-        "value": 3039,
+        "value": 2920,
         "target": 3072,
         "unit": "bytes",
         "status": "PASS"
@@ -136,7 +136,7 @@
         "status": "PASS"
       },
       "execute_sql_p50_ms": {
-        "value": 0.987,
+        "value": 0.727,
         "target": 1.0,
         "unit": "ms",
         "status": "PASS"
@@ -144,19 +144,19 @@
     },
     "http": {
       "idle_rss_mb": {
-        "value": 8.79,
+        "value": 9.34,
         "target": 15.0,
         "unit": "MB",
         "status": "PASS"
       },
       "cold_start_p95_ms": {
-        "value": 46.979,
+        "value": 40.015,
         "target": 60.0,
         "unit": "ms",
         "status": "PASS"
       },
       "tools_list_bytes": {
-        "value": 3039,
+        "value": 2920,
         "target": 3072,
         "unit": "bytes",
         "status": "PASS"
@@ -168,7 +168,7 @@
         "status": "PASS"
       },
       "execute_sql_p50_ms": {
-        "value": 2.281,
+        "value": 1.25,
         "target": 5.0,
         "unit": "ms",
         "status": "PASS"
@@ -189,12 +189,12 @@
       "result_100x8_cols": 8,
       "execute_sql_select_by_pk_ms": {
         "n": 120,
-        "p50": 2.439,
-        "p95": 3.775,
-        "p99": 4.712,
-        "mean": 2.609,
-        "min": 1.805,
-        "max": 4.88
+        "p50": 1.425,
+        "p95": 2.336,
+        "p99": 14.997,
+        "mean": 1.779,
+        "min": 1.194,
+        "max": 15.796
       },
       "execute_sql_errors": 0
     },
@@ -207,12 +207,12 @@
       "result_100x8_cols": 8,
       "execute_sql_select_by_pk_ms": {
         "n": 120,
-        "p50": 2.987,
-        "p95": 4.269,
-        "p99": 4.83,
-        "mean": 3.089,
-        "min": 2.166,
-        "max": 5.728
+        "p50": 1.563,
+        "p95": 1.997,
+        "p99": 2.262,
+        "mean": 1.611,
+        "min": 1.305,
+        "max": 3.388
       },
       "execute_sql_errors": 0
     }
