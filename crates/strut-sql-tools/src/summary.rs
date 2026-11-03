@@ -100,7 +100,10 @@ fn split_table(table: &str) -> (Option<String>, String) {
 
 /// Case-insensitive lookup that returns the catalog's own spelling, so the
 /// generated SQL uses identifiers as the engine defines them.
-fn catalog_name<'a>(columns: &'a [strut_sql_driver_api::ColumnInfo], requested: &str) -> Option<&'a str> {
+fn catalog_name<'a>(
+    columns: &'a [strut_sql_driver_api::ColumnInfo],
+    requested: &str,
+) -> Option<&'a str> {
     columns
         .iter()
         .find(|c| c.name.eq_ignore_ascii_case(requested))
@@ -132,12 +135,7 @@ pub async fn handle_summary(
     let info = driver
         .describe_table(schema.as_deref(), &table)
         .await
-        .map_err(|e| {
-            tool_error(format!(
-                "cannot summarize table '{}': {e}",
-                params.table
-            ))
-        })?;
+        .map_err(|e| tool_error(format!("cannot summarize table '{}': {e}", params.table)))?;
     if info.columns.is_empty() {
         return Err(tool_error(format!(
             "cannot summarize table '{}': no such table",
@@ -145,7 +143,11 @@ pub async fn handle_summary(
         )));
     }
     let from = match &schema {
-        Some(schema) => format!("{}.{}", quote_ident(schema, engine), quote_ident(&table, engine)),
+        Some(schema) => format!(
+            "{}.{}",
+            quote_ident(schema, engine),
+            quote_ident(&table, engine)
+        ),
         None => quote_ident(&table, engine),
     };
 

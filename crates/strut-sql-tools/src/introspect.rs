@@ -7,6 +7,7 @@ use strut_sql_driver_api::{
     ForeignKeyInfo as DriverForeignKeyInfo, IndexInfo as DriverIndexInfo, IndexPage,
     ObjectType as DriverObjectType, SchemaObject as DriverSchemaObject,
 };
+use strut_sql_guard::TablePolicy;
 
 /// Object kind exposed to agents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -454,6 +455,23 @@ pub async fn list_schemas_page(
 
 /// One page of tables with keyword + LIMIT/OFFSET pushed to the driver
 /// (PRD-F2-05), cached per source/engine/schema (PRD-F2-04).
+/// Table visibility under the caller's grant (R2-04). Denied tables must not
+/// appear in `list_tables`, `search_objects`, `schema_overview`,
+/// `get_schema_context`, `suggest_joins` or the relationship graph.
+pub fn table_visible(policy: &TablePolicy, schema: Option<&str>, table: &str) -> bool {
+    policy.is_empty() || policy.allows_table(schema, table)
+}
+
+/// True when the object's owning table is visible to the caller. Columns and
+/// indexes resolve through their `table` parent.
+pub fn object_visible(policy: &TablePolicy, object: &SchemaObject) -> bool {
+    if policy.is_empty() {
+        return true;
+    }
+    let table = object.table.as_deref().unwrap_or(&object.name);
+    policy.allows_table(object.schema.as_deref(), table)
+}
+
 pub async fn list_tables_page(
     driver: &Arc<dyn EngineDriver>,
     source: Option<&str>,
@@ -624,6 +642,7 @@ pub async fn search_objects(
         offset,
         limit,
         false,
+        None,
     )
     .await
 }
@@ -642,6 +661,7 @@ pub async fn search_objects_ranked(
     offset: usize,
     limit: usize,
     include_score: bool,
+    policy: Option<&TablePolicy>,
 ) -> Result<SearchResult, String> {
     let mut objects: Vec<SchemaObject> = match object_type {
         ObjectType::Schema => {
@@ -682,6 +702,12 @@ pub async fn search_objects_ranked(
                 .collect()
         }
     };
+
+    // Deny/allow rules apply before ranking and pagination so a denied table
+    // never influences page size or scores.
+    if let Some(policy) = policy {
+        objects.retain(|object| object_visible(policy, object));
+    }
 
     if let Some(kw) = keyword {
         objects.retain(|o| object_matches(o, kw));

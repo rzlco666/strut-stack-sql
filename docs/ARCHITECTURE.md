@@ -96,6 +96,10 @@ fail-soft per item unless `--fail-fast`.
   (`iss`/`aud`/`exp`), with the principal id from a configurable claim.
 - **Admin gate**: `GRANT`/`REVOKE` require the Admin tier and
   `--allow-grants`; a DDL grant alone never widens to privilege management.
+- **Table rules**: the effective grant also carries `allow_tables`,
+  `deny_tables`, `row_filters` and `mask`. The guard checks every referenced
+  table and rewrites filtered tables as derived subqueries, so the raw SQL
+  path cannot bypass them.
 
 ## Transports
 

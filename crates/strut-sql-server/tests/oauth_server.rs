@@ -327,6 +327,7 @@ mod http_oauth {
             allow_grants: false,
             oauth,
             policy,
+            tables: strut_sql_core::auth::TablePolicy::default(),
             ephemeral: false,
             hide_endpoints: None,
         }

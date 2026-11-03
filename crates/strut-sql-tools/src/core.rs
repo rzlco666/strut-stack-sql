@@ -123,6 +123,17 @@ pub fn exec_options(config: &AppConfig) -> ExecOptions {
         page_offset: 0,
         page_size: None,
         deny_columns: config.deny_columns.clone(),
+        masks: config
+            .tables
+            .masks
+            .iter()
+            .map(|mask| (mask.column.clone(), mask.mode))
+            .collect(),
+        table_policy: if config.tables.is_empty() {
+            None
+        } else {
+            Some(config.tables.clone())
+        },
     }
 }
 
@@ -253,6 +264,7 @@ pub async fn handle_search_objects(
         offset,
         limit,
         params.include_score.unwrap_or(false),
+        Some(&config.tables),
     )
     .await
     .map_err(|e| tool_error_code(e, ToolErrorKind::Execution))?;
@@ -569,6 +581,11 @@ pub async fn handle_analyze_query(
         config.write_mode,
         config.query_timeout,
         crate::explain::AnalyzeOptions {
+            table_policy: if config.tables.is_empty() {
+                None
+            } else {
+                Some(config.tables.clone())
+            },
             analyze,
             include_anti_patterns: config.full_tools,
         },

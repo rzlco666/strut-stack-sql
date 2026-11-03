@@ -36,6 +36,8 @@ fn exec_opts(write_mode: WriteMode) -> ExecOptions {
         page_offset: 0,
         page_size: None,
         deny_columns: vec![],
+        masks: vec![],
+        table_policy: None,
     }
 }
 

@@ -75,6 +75,13 @@ step-by-step mapping is in
   `cursor_expired` / `cursor_invalid` / `cursor_*` codes. Cursor mode requires
   a single-table SELECT ordered by one unique column that is also selected;
   other first-page requests keep the legacy offset behaviour.
+- **Table allow/deny, row filters and column masking.** `[[grants]]` gained
+  `allow_tables`, `deny_tables`, `row_filters` and `mask` (partial | hash |
+  null). Deny wins over allow; row filters are injected into the AST as
+  `AND (predicate)` and a statement where a filter cannot be applied is
+  rejected instead of running unfiltered. Enforcement covers `execute_sql`
+  (single, batch, cursor, summary), `/export`, the advisor and every schema
+  discovery tool.
 - **HTTP export (NDJSON / CSV).** `POST /export` streams rows with the same
   authentication and Policy authorization as `/mcp`, a forced read-only write
   mode, `--max-rows`/`--max-bytes` caps, response chunks bounded by

@@ -202,10 +202,7 @@ pub async fn export_handler(
                 .map(|row| {
                     let mut object = serde_json::Map::new();
                     for (i, column) in columnar.cols.iter().enumerate() {
-                        object.insert(
-                            column.clone(),
-                            row.get(i).cloned().unwrap_or(Value::Null),
-                        );
+                        object.insert(column.clone(), row.get(i).cloned().unwrap_or(Value::Null));
                     }
                     let mut line = serde_json::to_string(&object).unwrap_or_default();
                     line.push('\n');
@@ -283,7 +280,10 @@ mod tests {
     fn csv_nulls_are_empty_and_quotes_are_escaped() {
         assert_eq!(csv_field(&Value::Null), "");
         assert_eq!(csv_field(&json!("plain")), "plain");
-        assert_eq!(csv_line(vec!["a,b".into(), "q\"q".into(), String::new()]), "\"a,b\",\"q\"\"q\",\n");
+        assert_eq!(
+            csv_line(vec!["a,b".into(), "q\"q".into(), String::new()]),
+            "\"a,b\",\"q\"\"q\",\n"
+        );
     }
 
     #[test]
@@ -294,13 +294,14 @@ mod tests {
 
     #[test]
     fn chunks_respect_the_byte_budget() {
-        let rows = vec!["aaaa\n".to_string(), "bbbb\n".to_string(), "cccc\n".to_string()];
+        let rows = vec![
+            "aaaa\n".to_string(),
+            "bbbb\n".to_string(),
+            "cccc\n".to_string(),
+        ];
         let chunks = chunk_rows(rows, 5);
         assert_eq!(chunks.len(), 3, "each row exceeds the 5-byte budget alone");
-        let chunks = chunk_rows(
-            vec!["aaa\n".into(), "bbb\n".into(), "ccc\n".into()],
-            8,
-        );
+        let chunks = chunk_rows(vec!["aaa\n".into(), "bbb\n".into(), "ccc\n".into()], 8);
         assert_eq!(chunks.len(), 2);
         assert!(chunks[0].len() <= 8);
     }

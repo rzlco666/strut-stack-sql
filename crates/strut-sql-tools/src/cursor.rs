@@ -220,7 +220,15 @@ mod tests {
 
     #[test]
     fn roundtrip_preserves_payload() {
-        let token = codec().issue("app", "SELECT id FROM t ORDER BY id", &[json!(1)], json!(42), false, 25, 1000);
+        let token = codec().issue(
+            "app",
+            "SELECT id FROM t ORDER BY id",
+            &[json!(1)],
+            json!(42),
+            false,
+            25,
+            1000,
+        );
         let payload = codec().decode(&token, 1001).expect("valid cursor");
         assert_eq!(payload.source, "app");
         assert_eq!(payload.after, json!(42));
@@ -232,7 +240,10 @@ mod tests {
     #[test]
     fn expired_cursor_is_rejected() {
         let token = codec().issue("app", "SELECT 1", &[], json!(1), false, 10, 1000);
-        assert_eq!(codec().decode(&token, 1000 + CURSOR_TTL_SECS), Err(CursorError::Expired));
+        assert_eq!(
+            codec().decode(&token, 1000 + CURSOR_TTL_SECS),
+            Err(CursorError::Expired)
+        );
     }
 
     #[test]
@@ -252,7 +263,10 @@ mod tests {
     fn different_key_rejects_signature() {
         let token = codec().issue("app", "SELECT 1", &[], json!(1), false, 10, 1000);
         let other = CursorCodec::with_key([9u8; 32]);
-        assert!(matches!(other.decode(&token, 1001), Err(CursorError::Invalid(_))));
+        assert!(matches!(
+            other.decode(&token, 1001),
+            Err(CursorError::Invalid(_))
+        ));
     }
 
     #[test]
@@ -273,7 +287,15 @@ mod tests {
 
     #[test]
     fn cursor_is_opaque_base64url_and_contains_no_sql() {
-        let token = codec().issue("app", "SELECT secret_column FROM t ORDER BY id", &[json!("p@ss")], json!(5), false, 10, 1000);
+        let token = codec().issue(
+            "app",
+            "SELECT secret_column FROM t ORDER BY id",
+            &[json!("p@ss")],
+            json!(5),
+            false,
+            10,
+            1000,
+        );
         assert!(!token.contains('+') && !token.contains('/') && !token.contains('='));
         let body = URL_SAFE_NO_PAD
             .decode(token.split_once('.').expect("two parts").0)

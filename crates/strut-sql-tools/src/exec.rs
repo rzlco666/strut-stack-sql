@@ -8,7 +8,7 @@ use strut_sql_driver_api::{BoundQuery, DriverError, EngineDriver, EngineKind, Sq
 use strut_sql_format::{truncate_to_bytes, ColumnarMeta, ColumnarResult};
 use strut_sql_guard::{
     validate_and_prepare_keyset, validate_and_prepare_with_options, GuardError, KeysetRequest,
-    PrepareOptions, SqlClass, StmtClass, WriteMode,
+    MaskMode, PrepareOptions, SqlClass, StmtClass, TablePolicy, WriteMode,
 };
 
 use crate::bind::to_sql_values;
@@ -70,6 +70,10 @@ pub struct ExecOptions {
     pub page_size: Option<usize>,
     /// Case-insensitive column names to redact in result cells (opt-in).
     pub deny_columns: Vec<String>,
+    /// Column masks from the caller's grant (R2-04).
+    pub masks: Vec<(String, MaskMode)>,
+    /// Table allow/deny + row filters from the caller's grant (R2-04).
+    pub table_policy: Option<TablePolicy>,
 }
 
 /// Hard governance limits for one `execute_batch` call (PRD-F2-10).
@@ -98,6 +102,7 @@ pub async fn execute_query(
         PrepareOptions {
             page_offset: opts.page_offset,
             page_size: opts.page_size,
+            table_policy: opts.table_policy.clone(),
         },
     )?;
     let started = Instant::now();
@@ -172,6 +177,7 @@ pub async fn execute_query(
             }
             let columnar = truncate_to_bytes(columnar, opts.max_bytes);
             let columnar = redact_denied_columns(columnar, &opts.deny_columns);
+            let columnar = apply_masks(columnar, &opts.masks);
             tracing::info!(
                 duration_ms = started.elapsed().as_millis() as u64,
                 rows = columnar.meta.n,
@@ -246,7 +252,11 @@ pub async fn execute_keyset_page(
         params,
         engine,
         opts.write_mode,
-        &KeysetRequest { after, page_size },
+        &KeysetRequest {
+            after,
+            page_size,
+            table_policy: opts.table_policy.clone(),
+        },
     )?;
     let columnar = run_sql(driver, &prepared.sql, &prepared.params, engine, true, None).await?;
     let key_index = crate::keyset::order_key_index(&columnar.cols, &shape.order_column)?;
@@ -258,7 +268,12 @@ pub async fn execute_keyset_page(
         columnar.rows.truncate(page);
     }
     let next_key = if has_more {
-        match columnar.rows.last().and_then(|row| row.get(key_index)).cloned() {
+        match columnar
+            .rows
+            .last()
+            .and_then(|row| row.get(key_index))
+            .cloned()
+        {
             Some(Value::Null) | None => {
                 return Err(crate::keyset::KeysetError::NullKey(
                     "cursor key is NULL or missing; order by a NOT NULL unique column".into(),
@@ -277,6 +292,7 @@ pub async fn execute_keyset_page(
     columnar.meta.page_offset = None;
     let columnar = truncate_to_bytes(columnar, opts.max_bytes);
     let columnar = redact_denied_columns(columnar, &opts.deny_columns);
+    let columnar = apply_masks(columnar, &opts.masks);
     Ok(KeysetPage {
         result: QueryResult {
             ok: true,
@@ -528,6 +544,75 @@ pub(crate) fn sql_value_to_json(value: SqlValue, engine: EngineKind) -> Value {
 /// Treat `deny_columns` as a seat-belt for accidental exposure, never as an
 /// access-control boundary; real protection is a read-only DB user and views
 /// that exclude sensitive columns.
+/// Apply per-column masks from the grant (R2-04): `partial` keeps a
+/// recognisable prefix, `hash` replaces the value with a SHA-256 digest, and
+/// `null` replaces it with JSON null. Masked column names are reported in
+/// `meta.redacted_columns`.
+pub fn apply_masks(mut columnar: ColumnarResult, masks: &[(String, MaskMode)]) -> ColumnarResult {
+    if masks.is_empty() {
+        return columnar;
+    }
+    let mut masked: Vec<String> = Vec::new();
+    for (index, column) in columnar.cols.iter().enumerate() {
+        let Some(mode) = masks
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(column))
+            .map(|(_, mode)| *mode)
+        else {
+            continue;
+        };
+        masked.push(column.clone());
+        for row in &mut columnar.rows {
+            if let Some(cell) = row.get_mut(index) {
+                *cell = mask_value(cell, mode);
+            }
+        }
+    }
+    if !masked.is_empty() {
+        masked.sort();
+        columnar
+            .meta
+            .redacted_columns
+            .get_or_insert_with(Vec::new)
+            .extend(masked);
+    }
+    columnar
+}
+
+fn mask_value(value: &Value, mode: MaskMode) -> Value {
+    match mode {
+        MaskMode::Null => Value::Null,
+        MaskMode::Hash => match value {
+            Value::Null => Value::Null,
+            other => {
+                use sha2::{Digest, Sha256};
+                let raw = match other {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                Value::String(format!("{:x}", Sha256::digest(raw.as_bytes())))
+            }
+        },
+        MaskMode::Partial => match value {
+            Value::Null => Value::Null,
+            Value::String(s) if s.contains('@') => {
+                let (user, domain) = s.split_once('@').unwrap_or((s, ""));
+                let first = user
+                    .chars()
+                    .next()
+                    .map(|c| c.to_string())
+                    .unwrap_or_default();
+                Value::String(format!("{first}***@{domain}"))
+            }
+            Value::String(s) => {
+                let kept: String = s.chars().take(2).collect();
+                Value::String(format!("{kept}***"))
+            }
+            _ => Value::String("***".to_string()),
+        },
+    }
+}
+
 pub fn redact_denied_columns(
     mut result: ColumnarResult,
     deny_columns: &[String],
@@ -671,6 +756,8 @@ mod tests {
             page_offset: 0,
             page_size: None,
             deny_columns: Vec::new(),
+            masks: vec![],
+            table_policy: None,
         }
     }
 

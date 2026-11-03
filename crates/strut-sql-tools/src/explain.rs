@@ -12,9 +12,7 @@ use std::time::Duration;
 use serde::Serialize;
 use serde_json::Value;
 use strut_sql_driver_api::{BoundQuery, EngineDriver, EngineKind, SqlValue, TableStats};
-use strut_sql_guard::{
-    detect_anti_patterns, validate_and_prepare, GuardError, PatternContext, WriteMode,
-};
+use strut_sql_guard::{detect_anti_patterns, GuardError, PatternContext, WriteMode};
 
 use crate::bind::to_sql_values;
 
@@ -99,6 +97,9 @@ pub struct ExplainSummary {
 
 #[derive(Debug, Clone, Default)]
 pub struct AnalyzeOptions {
+    /// Table allow/deny + row filters for the caller (R2-04). The advisor must
+    /// not explain a table the principal cannot query.
+    pub table_policy: Option<strut_sql_guard::TablePolicy>,
     /// Request EXPLAIN ANALYZE (executes). Caller must also allow it in config.
     pub analyze: bool,
     /// Include AST anti-pattern findings (default true in full mode).
@@ -138,7 +139,18 @@ pub async fn analyze_query_with_options(
             "EXPLAIN ANALYZE is not supported on SQLite".into(),
         ));
     }
-    let prepared = validate_and_prepare(sql, params, engine, write_mode, 100)?;
+    let prepared = strut_sql_guard::validate_and_prepare_with_options(
+        sql,
+        params,
+        engine,
+        write_mode,
+        100,
+        strut_sql_guard::PrepareOptions {
+            page_offset: 0,
+            page_size: None,
+            table_policy: options.table_policy.clone(),
+        },
+    )?;
 
     if !prepared.class.is_select_like()
         && prepared.class.label() != "SELECT"

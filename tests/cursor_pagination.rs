@@ -58,6 +58,7 @@ async fn config(write_mode: WriteMode) -> (Arc<AppConfig>, Arc<dyn EngineDriver>
         batch_max_bytes: 1024 * 1024,
         fail_fast: false,
         deny_columns: vec![],
+        tables: strut_stack_sql::core::auth::TablePolicy::default(),
         allow_explain_analyze: false,
         principal_id: "local".into(),
         query_history: false,
@@ -87,18 +88,25 @@ fn opts() -> ExecOptions {
         page_offset: 0,
         page_size: None,
         deny_columns: vec![],
+        masks: vec![],
+        table_policy: None,
     }
 }
 
 async fn seed(driver: &Arc<dyn EngineDriver>, rows: i64) {
-    execute_query(driver, "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)", &[], &opts())
-        .await
-        .expect("create");
+    execute_query(
+        driver,
+        "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)",
+        &[],
+        &opts(),
+    )
+    .await
+    .expect("create");
     for id in 1..=rows {
         execute_query(
             driver,
             "INSERT INTO t (id, name) VALUES (?, ?)",
-            &[json!(id), json!(format!("row{id}")),],
+            &[json!(id), json!(format!("row{id}"))],
             &opts(),
         )
         .await
@@ -183,9 +191,14 @@ async fn cursor_walk_survives_inserts_and_deletes_between_pages() {
             .await
             .expect("insert between pages");
             let victim = page_ids[0];
-            execute_query(&driver, "DELETE FROM t WHERE id = ?", &[json!(victim)], &opts())
-                .await
-                .expect("delete between pages");
+            execute_query(
+                &driver,
+                "DELETE FROM t WHERE id = ?",
+                &[json!(victim)],
+                &opts(),
+            )
+            .await
+            .expect("delete between pages");
             deleted.insert(victim);
             let _ = last;
         }
@@ -202,7 +215,11 @@ async fn cursor_walk_survives_inserts_and_deletes_between_pages() {
 
     // No duplicate ids anywhere in the walk.
     let unique: HashSet<i64> = seen.iter().copied().collect();
-    assert_eq!(unique.len(), seen.len(), "duplicate rows across pages: {seen:?}");
+    assert_eq!(
+        unique.len(),
+        seen.len(),
+        "duplicate rows across pages: {seen:?}"
+    );
     // Every original row appears, in ascending order, regardless of the
     // deletes (a deleted row that was already returned stays in the result
     // stream; one deleted before its page simply never appears).
@@ -231,9 +248,14 @@ async fn cursor_is_bound_to_the_exact_sql_and_params() {
         .expect("first page has a cursor")
         .to_string();
 
-    let err = page(&config, "SELECT id, name FROM t ORDER BY id DESC", Some(2), Some(cursor.clone()))
-        .await
-        .expect_err("different SQL must be rejected");
+    let err = page(
+        &config,
+        "SELECT id, name FROM t ORDER BY id DESC",
+        Some(2),
+        Some(cursor.clone()),
+    )
+    .await
+    .expect_err("different SQL must be rejected");
     let data = err.data.expect("structured error data");
     assert_eq!(data["code"], json!("cursor_invalid"), "{data}");
 
@@ -308,6 +330,8 @@ async fn descending_cursor_walks_down() {
         .as_str()
         .expect("cursor")
         .to_string();
-    let second = page(&config, sql, Some(3), Some(cursor)).await.expect("page 2");
+    let second = page(&config, sql, Some(3), Some(cursor))
+        .await
+        .expect("page 2");
     assert_eq!(ids(&second), vec![4, 3, 2]);
 }

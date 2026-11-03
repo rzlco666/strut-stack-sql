@@ -65,6 +65,7 @@ async fn config_with_deny(deny_columns: Vec<String>) -> (Arc<AppConfig>, Arc<dyn
         allow_grants: false,
         oauth: None,
         policy: policy(WriteMode::AllowDdl),
+        tables: strut_stack_sql::core::auth::TablePolicy::default(),
         ephemeral: false,
         hide_endpoints: None,
     };
@@ -82,6 +83,8 @@ fn opts() -> ExecOptions {
         page_offset: 0,
         page_size: None,
         deny_columns: vec![],
+        masks: vec![],
+        table_policy: None,
     }
 }
 
@@ -92,7 +95,9 @@ async fn seed(driver: &Arc<dyn EngineDriver>) {
         "INSERT INTO users (id, region, amount, secret) VALUES (2, 'eu', 20.0, 's2')",
         "INSERT INTO users (id, region, amount, secret) VALUES (3, 'us', 30.0, 's3')",
     ] {
-        execute_query(driver, sql, &[], &opts()).await.expect("seed");
+        execute_query(driver, sql, &[], &opts())
+            .await
+            .expect("seed");
     }
 }
 
@@ -116,9 +121,12 @@ async fn count_is_exact_and_groupable() {
     seed(&driver).await;
 
     let total = body(
-        handle_execute_sql(&config, summary_args(json!({"kind":"count","table":"users"})))
-            .await
-            .expect("count"),
+        handle_execute_sql(
+            &config,
+            summary_args(json!({"kind":"count","table":"users"})),
+        )
+        .await
+        .expect("count"),
     );
     assert_eq!(total["data"]["rows"], json!([[3]]), "{total}");
     assert_eq!(total["data"]["meta"]["summary"]["exact"], json!(true));
@@ -145,7 +153,9 @@ async fn sample_is_bounded_and_never_marked_exact() {
     let payload = body(
         handle_execute_sql(
             &config,
-            summary_args(json!({"kind":"sample","table":"users","columns":["id","region"],"limit":2})),
+            summary_args(
+                json!({"kind":"sample","table":"users","columns":["id","region"],"limit":2}),
+            ),
         )
         .await
         .expect("sample"),
@@ -166,7 +176,9 @@ async fn aggregates_compute_over_rows() {
     let payload = body(
         handle_execute_sql(
             &config,
-            summary_args(json!({"kind":"aggregate","table":"users","aggregate":"sum","column":"amount"})),
+            summary_args(
+                json!({"kind":"aggregate","table":"users","aggregate":"sum","column":"amount"}),
+            ),
         )
         .await
         .expect("sum"),
@@ -182,7 +194,11 @@ async fn aggregates_compute_over_rows() {
         .await
         .expect("grouped count aggregate"),
     );
-    assert_eq!(counted["data"]["rows"], json!([["eu", 2], ["us", 1]]), "{counted}");
+    assert_eq!(
+        counted["data"]["rows"],
+        json!([["eu", 2], ["us", 1]]),
+        "{counted}"
+    );
 }
 
 #[tokio::test]
@@ -240,9 +256,12 @@ async fn injection_shaped_table_name_does_not_execute_sql() {
     assert!(err.message.contains("cannot summarize"), "{err}");
     // The table still exists and still has its rows.
     let payload = body(
-        handle_execute_sql(&config, summary_args(json!({"kind":"count","table":"users"})))
-            .await
-            .expect("count after rejected injection"),
+        handle_execute_sql(
+            &config,
+            summary_args(json!({"kind":"count","table":"users"})),
+        )
+        .await
+        .expect("count after rejected injection"),
     );
     assert_eq!(payload["data"]["rows"], json!([[3]]));
 }

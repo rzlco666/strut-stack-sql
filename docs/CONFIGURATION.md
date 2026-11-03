@@ -32,6 +32,49 @@ whenever it is selected:**
 > selected with the `--config` CLI flag only. (Older docs mentioned
 > `MCP_SQL_CONFIG`; it never existed in the code and has been removed.)
 
+## Table rules, row filters and masking (`[[grants]]`)
+
+A grant can narrow what its principal sees beyond the tier. All four fields are
+optional and additive across grants that match the same principal/source:
+
+```toml
+[[grants]]
+principal   = "analyst"
+source      = "app"
+max_tier    = "read"
+allow_tables = ["public.orders", "public.customers"]   # non-empty = only these
+deny_tables  = ["public.payroll", "customers"]         # always wins over allow
+row_filters  = [{ table = "public.orders", predicate = "tenant_id = 7" }]
+mask         = [
+  { column = "email", mode = "partial" },                    # a***@example.com
+  { table = "public.customers", column = "tax_id", mode = "hash" },
+  { column = "phone", mode = "null" },
+]
+```
+
+- **Deny wins over allow.** With both set, a denied table is unreachable even
+  if it is also listed in `allow_tables`; an empty `allow_tables` means "every
+  table not denied". Schema-qualified names are matched against the schema
+  part; an unqualified name matches any schema.
+- **Row filters are injected into the AST**, as `AND (predicate)` around the
+  table reference, so aliases, joins, CTEs and existing `WHERE` clauses keep
+  working. The predicate must be a single expression (no `;`, no comments) and
+  is validated by the guard. A statement family where the filter cannot be
+  applied — DML/DDL on a filtered table, or a shape the rewriter cannot see —
+  is **rejected** with `guard_denied` rather than run unfiltered.
+- **Masks apply to returned cells**: `partial` keeps a recognisable prefix
+  (first character plus the domain for email-like values), `hash` replaces the
+  value with its SHA-256 hex digest, `null` replaces it with JSON null. Masked
+  columns are listed in `meta.redacted_columns`. A table-scoped mask wins for
+  its table; an unscoped mask applies to that column name on every table.
+- **Enforcement points**: `execute_sql` (single, batch, cursor and summary),
+  HTTP `/export`, the EXPLAIN advisor, and the schema tools — `list_tables`,
+  `describe_table`, `list_indexes`, `list_foreign_keys`, `schema_overview`,
+  `search_objects`, `get_schema_context`, `suggest_joins` and
+  `get_relationship_graph` never reveal a table the caller cannot query.
+- Denials name the table and the principal's limits, never another tenant's
+  rows or the filter's hidden predicate values.
+
 ### Ephemeral mode
 
 ```bash

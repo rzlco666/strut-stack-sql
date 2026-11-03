@@ -153,14 +153,21 @@ pub async fn handle_list_tables(
     )
     .await
     .map_err(catalog_error)?;
+    // Deny/allow rules apply to schema metadata too: a table the principal
+    // cannot query must not be discoverable through this tool.
+    let objects: Vec<_> = page
+        .objects
+        .into_iter()
+        .filter(|object| introspect::object_visible(&config.tables, object))
+        .collect();
     json_result(&ListTablesResult {
         meta: ListTablesMeta {
-            n: page.meta.n,
+            n: objects.len(),
             offset: page.meta.offset,
             limit: page.meta.limit,
             has_more: page.meta.has_more,
         },
-        objects: page.objects,
+        objects,
     })
 }
 
@@ -168,6 +175,12 @@ pub async fn handle_describe_table(
     config: &Arc<AppConfig>,
     params: DescribeTableParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
+    if !introspect::table_visible(&config.tables, params.schema.as_deref(), &params.table) {
+        return Err(crate::core::tool_error(format!(
+            "table '{}' is not accessible to this principal",
+            params.table
+        )));
+    }
     let (driver, _, _) = source_driver(config, params.source.as_deref()).await?;
     let object = introspect::describe_table(&driver, params.schema.as_deref(), &params.table)
         .await
@@ -189,6 +202,18 @@ pub async fn handle_list_indexes(
     )
     .await
     .map_err(catalog_error)?;
+    let listed: Vec<_> = listed
+        .into_iter()
+        .filter(|index| {
+            index
+                .table
+                .as_deref()
+                .map(|table| {
+                    introspect::table_visible(&config.tables, index.schema.as_deref(), table)
+                })
+                .unwrap_or(true)
+        })
+        .collect();
     json_result(&listed)
 }
 
@@ -219,6 +244,13 @@ pub async fn handle_list_foreign_keys(
         introspect::list_foreign_keys(&driver, params.schema.as_deref(), params.table.as_deref())
             .await
             .map_err(catalog_error)?;
+    let fks: Vec<_> = fks
+        .into_iter()
+        .filter(|fk| {
+            introspect::table_visible(&config.tables, None, &fk.table)
+                && introspect::table_visible(&config.tables, None, &fk.ref_table)
+        })
+        .collect();
     json_result(&fks)
 }
 
@@ -227,9 +259,20 @@ pub async fn handle_schema_overview(
     params: SchemaOverviewParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     let (driver, source_name, _) = source_driver(config, params.source.as_deref()).await?;
-    let overview =
+    let mut overview =
         introspect::schema_overview(&driver, Some(&source_name), params.schema.as_deref())
             .await
             .map_err(catalog_error)?;
+    if !config.tables.is_empty() {
+        overview.tables.retain(|table| {
+            introspect::table_visible(&config.tables, Some(&overview.schema), &table.name)
+        });
+        overview.foreign_keys.retain(|fk| {
+            introspect::table_visible(&config.tables, None, &fk.table)
+                && introspect::table_visible(&config.tables, None, &fk.ref_table)
+        });
+        overview.meta.n_tables = overview.tables.len();
+        overview.meta.n_foreign_keys = overview.foreign_keys.len();
+    }
     json_result(&overview)
 }

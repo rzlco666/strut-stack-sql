@@ -11,7 +11,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use rmcp::model::CallToolResult;
 use serde_json::{json, Value};
-use strut_sql_driver_api::{BoundQuery, ConnectOptions, EngineDriver, EngineKind};
+use strut_sql_driver_api::{ConnectOptions, EngineDriver, EngineKind};
 use strut_sql_driver_mysql::MySqlDriver;
 use strut_sql_driver_postgres::PostgresDriver;
 use strut_sql_driver_sqlite::SqliteDriver;
@@ -85,6 +85,7 @@ async fn sqlite_config(write_mode: WriteMode) -> AppConfig {
         batch_max_bytes: 1024 * 1024,
         fail_fast: false,
         deny_columns: vec![],
+        tables: strut_stack_sql::core::auth::TablePolicy::default(),
         allow_explain_analyze: false,
         principal_id: "local".into(),
         query_history: false,
@@ -146,7 +147,7 @@ async fn seed_users(config: &Arc<AppConfig>) {
             cursor: None,
             source: None,
             format: None,
-                summary: None,
+            summary: None,
         },
     )
     .await;
@@ -161,7 +162,7 @@ async fn seed_users(config: &Arc<AppConfig>) {
             cursor: None,
             source: None,
             format: None,
-                summary: None,
+            summary: None,
         },
     )
     .await;
@@ -205,7 +206,7 @@ async fn guard_blocks_dml_in_readonly() {
             cursor: None,
             source: None,
             format: None,
-                summary: None,
+            summary: None,
         },
     )
     .await;
@@ -226,7 +227,7 @@ async fn guard_blocks_ddl_in_readonly() {
             cursor: None,
             source: None,
             format: None,
-                summary: None,
+            summary: None,
         },
     )
     .await;
@@ -247,7 +248,7 @@ async fn guard_blocks_transaction_control() {
             cursor: None,
             source: None,
             format: None,
-                summary: None,
+            summary: None,
         },
     )
     .await;
@@ -268,7 +269,7 @@ async fn guard_blocks_multi_statement() {
             cursor: None,
             source: None,
             format: None,
-                summary: None,
+            summary: None,
         },
     )
     .await;
@@ -289,7 +290,7 @@ async fn guard_blocks_empty_query() {
             cursor: None,
             source: None,
             format: None,
-                summary: None,
+            summary: None,
         },
     )
     .await;
@@ -310,7 +311,7 @@ async fn guard_blocks_grant() {
             cursor: None,
             source: None,
             format: None,
-                summary: None,
+            summary: None,
         },
     )
     .await;
@@ -334,7 +335,7 @@ async fn params_basic_select() {
             cursor: None,
             source: None,
             format: None,
-                summary: None,
+            summary: None,
         },
     )
     .await;
@@ -358,7 +359,7 @@ async fn params_unicode_and_emoji() {
             cursor: None,
             source: None,
             format: None,
-                summary: None,
+            summary: None,
         },
     )
     .await;
@@ -373,7 +374,7 @@ async fn params_unicode_and_emoji() {
             cursor: None,
             source: None,
             format: None,
-                summary: None,
+            summary: None,
         },
     )
     .await;
@@ -394,7 +395,7 @@ async fn params_null_value() {
             cursor: None,
             source: None,
             format: None,
-                summary: None,
+            summary: None,
         },
     )
     .await;
@@ -418,7 +419,7 @@ async fn params_missing_placeholder_rejected() {
             cursor: None,
             source: None,
             format: None,
-                summary: None,
+            summary: None,
         },
     )
     .await;
@@ -439,7 +440,7 @@ async fn params_extra_rejected() {
             cursor: None,
             source: None,
             format: None,
-                summary: None,
+            summary: None,
         },
     )
     .await;
@@ -464,7 +465,7 @@ async fn injection_param_treated_as_data() {
             cursor: None,
             source: None,
             format: None,
-                summary: None,
+            summary: None,
         },
     )
     .await;
@@ -481,7 +482,7 @@ async fn injection_param_treated_as_data() {
             cursor: None,
             source: None,
             format: None,
-                summary: None,
+            summary: None,
         },
     )
     .await;
@@ -503,7 +504,7 @@ async fn injection_union_in_param_is_literal() {
             cursor: None,
             source: None,
             format: None,
-                summary: None,
+            summary: None,
         },
     )
     .await;
@@ -526,7 +527,7 @@ async fn injection_or_in_param_is_literal() {
             cursor: None,
             source: None,
             format: None,
-                summary: None,
+            summary: None,
         },
     )
     .await;
@@ -553,7 +554,7 @@ async fn types_large_int_and_float() {
             cursor: None,
             source: None,
             format: None,
-                summary: None,
+            summary: None,
         },
     )
     .await;
@@ -576,7 +577,7 @@ async fn count_serializes_as_number_not_bool() {
             cursor: None,
             source: None,
             format: None,
-                summary: None,
+            summary: None,
         },
     )
     .await;
@@ -602,7 +603,7 @@ async fn batch_legacy_strings() {
             cursor: None,
             source: None,
             format: None,
-                summary: None,
+            summary: None,
         },
     )
     .await;
@@ -627,7 +628,7 @@ async fn batch_parameterized() {
             cursor: None,
             source: None,
             format: None,
-                summary: None,
+            summary: None,
         },
     )
     .await;
@@ -651,7 +652,7 @@ async fn batch_mixed_valid_and_invalid() {
             cursor: None,
             source: None,
             format: None,
-                summary: None,
+            summary: None,
         },
     )
     .await;
@@ -679,7 +680,7 @@ async fn pagination_offset_and_size() {
             cursor: None,
             source: None,
             format: None,
-                summary: None,
+            summary: None,
         },
     )
     .await;
@@ -711,7 +712,7 @@ async fn pagination_offset_and_size() {
             cursor: None,
             source: None,
             format: None,
-                summary: None,
+            summary: None,
         },
     )
     .await;
@@ -729,7 +730,7 @@ async fn pagination_offset_and_size() {
             cursor: None,
             source: None,
             format: None,
-                summary: None,
+            summary: None,
         },
     )
     .await;
@@ -766,7 +767,7 @@ async fn ddl_through_execute_sql_invalidates_schema_cache() {
             cursor: None,
             source: None,
             format: None,
-                summary: None,
+            summary: None,
         },
     )
     .await;
@@ -786,7 +787,7 @@ async fn ddl_through_execute_sql_invalidates_schema_cache() {
             cursor: None,
             source: None,
             format: None,
-                summary: None,
+            summary: None,
         },
     )
     .await;
@@ -869,6 +870,7 @@ async fn postgres_config() -> Option<AppConfig> {
         batch_max_bytes: 1024 * 1024,
         fail_fast: false,
         deny_columns: vec![],
+        tables: strut_stack_sql::core::auth::TablePolicy::default(),
         allow_explain_analyze: false,
         principal_id: "local".into(),
         query_history: false,
@@ -902,7 +904,7 @@ async fn postgres_parameterized_select() {
             cursor: None,
             source: None,
             format: None,
-                summary: None,
+            summary: None,
         },
     )
     .await;
@@ -969,6 +971,7 @@ async fn mysql_config() -> Option<AppConfig> {
         batch_max_bytes: 1024 * 1024,
         fail_fast: false,
         deny_columns: vec![],
+        tables: strut_stack_sql::core::auth::TablePolicy::default(),
         allow_explain_analyze: false,
         principal_id: "local".into(),
         query_history: false,
@@ -1010,7 +1013,7 @@ async fn mysql_show_processlist_allowed() {
             cursor: None,
             source: None,
             format: None,
-                summary: None,
+            summary: None,
         },
     )
     .await;
@@ -1033,7 +1036,7 @@ async fn mysql_count_serializes_as_number() {
             cursor: None,
             source: None,
             format: None,
-                summary: None,
+            summary: None,
         },
     )
     .await;
@@ -1582,7 +1585,10 @@ async fn export_streams_ndjson_and_csv_with_null_semantics() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body, "id,name\n1,a\n2,\n", "NULL must be an empty CSV field: {body:?}");
+    assert_eq!(
+        body, "id,name\n1,a\n2,\n",
+        "NULL must be an empty CSV field: {body:?}"
+    );
 
     // Writes are refused on the export path even at DDL process tier.
     let (status, body) = post_export(

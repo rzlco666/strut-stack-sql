@@ -31,6 +31,7 @@ fn test_policy(write_mode: WriteMode, full_tools: bool, history: bool) -> Policy
         max_bytes: None,
         query_timeout: None,
         query_history: history,
+        tables: strut_stack_sql::core::auth::TablePolicy::default(),
     });
     policy
 }
@@ -75,6 +76,7 @@ async fn test_config(
         batch_max_bytes: 1024 * 1024,
         fail_fast: false,
         deny_columns: vec![],
+        tables: strut_stack_sql::core::auth::TablePolicy::default(),
         allow_explain_analyze: false,
         principal_id: name.into(),
         query_history: history,

@@ -349,15 +349,32 @@ pub async fn relationship_graph(
     schema: Option<&str>,
     focus: Option<&str>,
     depth: Option<usize>,
+    policy: Option<&strut_sql_guard::TablePolicy>,
 ) -> Result<RelationshipGraph, String> {
     let graph = load_graph(driver, source, schema).await?;
     let depth = depth.unwrap_or(2).min(MAX_DEPTH);
-    let (nodes, edges) = match focus {
+    if let (Some(policy), Some(table)) = (policy, focus) {
+        if !policy.allows_table(None, table) {
+            return Err(format!(
+                "table '{table}' is not accessible to this principal"
+            ));
+        }
+    }
+    let (mut nodes, mut edges) = match focus {
         Some(table) => graph
             .focus_graph(table, depth)
             .ok_or_else(|| format!("unknown table '{table}' in schema '{}'", graph.schema))?,
         None => (graph.nodes.values().cloned().collect(), graph.edges.clone()),
     };
+    if let Some(policy) = policy {
+        if !policy.is_empty() {
+            nodes.retain(|node| policy.allows_table(None, &node.table));
+            edges.retain(|edge| {
+                policy.allows_table(None, &edge.from_table)
+                    && policy.allows_table(None, &edge.to_table)
+            });
+        }
+    }
     let requested_nodes = nodes.len();
     let requested_edges = edges.len();
     let (nodes, edges, capped) = cap_graph(nodes, edges, requested_nodes, requested_edges);
@@ -384,7 +401,17 @@ pub async fn suggest_joins(
     source: Option<&str>,
     tables: &[String],
     schema: Option<&str>,
+    policy: Option<&strut_sql_guard::TablePolicy>,
 ) -> Result<SuggestJoins, String> {
+    if let Some(policy) = policy {
+        for table in tables {
+            if !policy.is_empty() && !policy.allows_table(None, table) {
+                return Err(format!(
+                    "table '{table}' is not accessible to this principal"
+                ));
+            }
+        }
+    }
     let graph = load_graph(driver, source, schema).await?;
     let mut joins = Vec::new();
     let mut unreachable = Vec::new();

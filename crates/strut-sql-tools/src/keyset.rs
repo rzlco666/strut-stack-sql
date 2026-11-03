@@ -141,12 +141,11 @@ pub async fn ensure_unique_order_column(
         .list_indexes(schema.as_deref(), Some(&table))
         .await
         .map_err(|e| {
-            KeysetError::Unsupported(format!(
-                "could not read indexes for table '{table}': {e}"
-            ))
+            KeysetError::Unsupported(format!("could not read indexes for table '{table}': {e}"))
         })?;
     let unique_single = indexes.iter().any(|index| {
-        (index.primary || index.unique) && index.columns.len() == 1
+        (index.primary || index.unique)
+            && index.columns.len() == 1
             && index.columns[0].eq_ignore_ascii_case(&column)
     });
     if unique_single {
@@ -187,14 +186,26 @@ mod tests {
 
     #[test]
     fn cursor_is_bound_to_sql_params_and_source() {
-        let token = issue_cursor("app", "SELECT * FROM t ORDER BY id", &[json!(1)], json!(5), false, 10);
+        let token = issue_cursor(
+            "app",
+            "SELECT * FROM t ORDER BY id",
+            &[json!(1)],
+            json!(5),
+            false,
+            10,
+        );
         assert!(verify_cursor(&token, "app", "SELECT * FROM t ORDER BY id", &[json!(1)]).is_ok());
         assert!(matches!(
             verify_cursor(&token, "other", "SELECT * FROM t ORDER BY id", &[json!(1)]),
             Err(KeysetError::Invalid(_))
         ));
         assert!(matches!(
-            verify_cursor(&token, "app", "SELECT * FROM t ORDER BY id DESC", &[json!(1)]),
+            verify_cursor(
+                &token,
+                "app",
+                "SELECT * FROM t ORDER BY id DESC",
+                &[json!(1)]
+            ),
             Err(KeysetError::Invalid(_))
         ));
         assert!(matches!(
@@ -239,9 +250,18 @@ mod tests {
         for (err, code) in [
             (KeysetError::Expired, "CURSOR_EXPIRED"),
             (KeysetError::Invalid("x".into()), "CURSOR_INVALID"),
-            (KeysetError::Unsupported("x".into()), "CURSOR_UNSUPPORTED_QUERY"),
-            (KeysetError::NotUnique("x".into()), "CURSOR_ORDER_KEY_NOT_UNIQUE"),
-            (KeysetError::NotSelected("x".into()), "CURSOR_ORDER_KEY_NOT_SELECTED"),
+            (
+                KeysetError::Unsupported("x".into()),
+                "CURSOR_UNSUPPORTED_QUERY",
+            ),
+            (
+                KeysetError::NotUnique("x".into()),
+                "CURSOR_ORDER_KEY_NOT_UNIQUE",
+            ),
+            (
+                KeysetError::NotSelected("x".into()),
+                "CURSOR_ORDER_KEY_NOT_SELECTED",
+            ),
             (KeysetError::NullKey("x".into()), "CURSOR_NULL_KEY"),
         ] {
             assert_eq!(err.code(), code);

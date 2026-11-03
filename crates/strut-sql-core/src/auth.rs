@@ -39,6 +39,7 @@ use serde::{Deserialize, Serialize};
 
 use strut_sql_driver_api::EngineKind;
 use strut_sql_guard::{classify_sql_raw, SqlClass, WriteMode};
+pub use strut_sql_guard::{ColumnMask, MaskMode, RowFilter, TablePolicy, TableRule};
 
 /// Tools always exposed (every mode, every `full_tools` setting).
 pub const CORE_TOOLS: &[&str] = &["search_objects", "execute_sql", "analyze_query_performance"];
@@ -261,6 +262,8 @@ pub struct Grant {
     pub query_timeout: Option<Duration>,
     /// Opt-in in-memory session query history for this principal (PRD-F3-08).
     pub query_history: bool,
+    /// Table allow/deny lists, row filters and column masks (R2-04).
+    pub tables: TablePolicy,
 }
 
 impl Grant {
@@ -273,6 +276,7 @@ impl Grant {
             max_bytes: None,
             query_timeout: None,
             query_history: false,
+            tables: TablePolicy::default(),
         }
     }
 }
@@ -290,6 +294,8 @@ pub struct Authorization {
     pub query_timeout: Option<Duration>,
     /// Session query history was explicitly enabled for this grant.
     pub query_history: bool,
+    /// Effective table allow/deny, row-filter and mask rules.
+    pub tables: TablePolicy,
 }
 
 impl Authorization {
@@ -500,10 +506,14 @@ impl Policy {
             return Decision::Deny(Denial::AdminGateDisabled);
         }
 
-        let Some(grant) = self
+        let matching: Vec<&Grant> = self
             .grants
             .iter()
             .filter(|g| g.principal == principal.id && g.source.matches(source))
+            .collect();
+        let Some(grant) = matching
+            .iter()
+            .copied()
             // Most permissive matching grant wins; deterministic order.
             .max_by_key(|g| (self.effective_tier(g), g.max_rows.unwrap_or(u32::MAX)))
         else {
@@ -522,6 +532,12 @@ impl Policy {
             });
         }
 
+        // Table rules from every matching grant accumulate: a deny in any of
+        // them applies, and row filters stack as AND conditions.
+        let mut tables = TablePolicy::default();
+        for grant in &matching {
+            tables.merge(&grant.tables);
+        }
         Decision::Allow(Authorization {
             principal_id: principal.id.clone(),
             source: source.to_string(),
@@ -530,6 +546,7 @@ impl Policy {
             max_bytes: grant.max_bytes,
             query_timeout: grant.query_timeout,
             query_history: grant.query_history,
+            tables,
         })
     }
 
@@ -563,6 +580,7 @@ mod tests {
             max_bytes: Some(1024),
             query_timeout: Some(Duration::from_secs(2)),
             query_history: true,
+            tables: TablePolicy::default(),
         });
         p.add_grant(Grant {
             principal: "bob".into(),
@@ -572,6 +590,7 @@ mod tests {
             max_bytes: None,
             query_timeout: None,
             query_history: false,
+            tables: TablePolicy::default(),
         });
         p.add_grant(Grant {
             principal: "root".into(),

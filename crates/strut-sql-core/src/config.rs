@@ -13,7 +13,7 @@ use std::sync::Arc;
 use strut_sql_driver_api::{EngineDriver, EngineKind};
 pub use strut_sql_guard::WriteMode;
 
-use crate::auth::{Authorization, Grant, GrantSource, Policy, Tier};
+use crate::auth::{Authorization, Grant, GrantSource, MaskMode, Policy, Tier};
 use crate::registry::{
     detect_engine_from_url, parse_host_port, LazyDriver, DEFAULT_CONNECT_TIMEOUT_SECS,
 };
@@ -403,6 +403,100 @@ pub struct GrantConfig {
     /// Opt-in in-memory session query history (PRD-F3-08). Default false.
     #[serde(default)]
     pub query_history: bool,
+    /// Tables this principal may touch. Empty = every table not denied.
+    #[serde(default)]
+    pub allow_tables: Vec<String>,
+    /// Tables this principal can never touch; deny wins over allow (R2-04).
+    #[serde(default)]
+    pub deny_tables: Vec<String>,
+    /// Row filters: `{ table = "orders", predicate = "tenant_id = 7" }` (R2-04).
+    #[serde(default)]
+    pub row_filters: Vec<RowFilterConfig>,
+    /// Column masks: `{ column = "email", mode = "partial" }` (R2-04).
+    #[serde(default)]
+    pub mask: Vec<MaskConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RowFilterConfig {
+    pub table: String,
+    pub predicate: String,
+}
+
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MaskConfig {
+    /// Restrict the mask to one table (default: every table with that column).
+    #[serde(default)]
+    pub table: Option<String>,
+    pub column: String,
+    pub mode: MaskMode,
+}
+
+/// Validate and convert the per-grant table rules (R2-04).
+///
+/// Row-filter predicates are checked by the guard at the point of use; here
+/// they are rejected when empty or containing statement separators, so a
+/// config typo fails at startup rather than at the first query.
+fn table_policy_from_config(grant: &GrantConfig) -> anyhow::Result<crate::auth::TablePolicy> {
+    use crate::auth::{ColumnMask, RowFilter, TablePolicy, TableRule};
+    let rule = |raw: &str| TableRule {
+        schema: raw.rsplit_once('.').map(|(s, _)| s.to_string()),
+        table: raw
+            .rsplit_once('.')
+            .map(|(_, t)| t.to_string())
+            .unwrap_or_else(|| raw.to_string()),
+    };
+    for raw in grant.allow_tables.iter().chain(grant.deny_tables.iter()) {
+        if raw.trim().is_empty() {
+            bail!("[[grants]] table rule must not be empty");
+        }
+    }
+    let mut filters = Vec::new();
+    for filter in &grant.row_filters {
+        if filter.predicate.trim().is_empty() {
+            bail!(
+                "[[grants]] row filter for table '{}' has an empty predicate",
+                filter.table
+            );
+        }
+        if filter.predicate.contains(';') {
+            bail!(
+                "[[grants]] row filter for table '{}' must be a single expression",
+                filter.table
+            );
+        }
+        if filter.predicate.contains("--") || filter.predicate.contains("/*") {
+            bail!(
+                "[[grants]] row filter for table '{}' must not contain SQL comments",
+                filter.table
+            );
+        }
+        filters.push(RowFilter {
+            schema: filter.table.rsplit_once('.').map(|(s, _)| s.to_string()),
+            table: filter
+                .table
+                .rsplit_once('.')
+                .map(|(_, t)| t.to_string())
+                .unwrap_or_else(|| filter.table.clone()),
+            predicate: filter.predicate.clone(),
+        });
+    }
+    Ok(TablePolicy {
+        allow: grant.allow_tables.iter().map(|raw| rule(raw)).collect(),
+        deny: grant.deny_tables.iter().map(|raw| rule(raw)).collect(),
+        row_filters: filters,
+        masks: grant
+            .mask
+            .iter()
+            .map(|mask| ColumnMask {
+                table: mask.table.as_deref().map(rule),
+                column: mask.column.clone(),
+                mode: mask.mode,
+            })
+            .collect(),
+    })
 }
 
 fn default_grant_source() -> String {
@@ -475,6 +569,10 @@ pub struct AppConfig {
     pub oauth: Option<OAuthSettings>,
     /// Authorization policy derived from tokens + TOML principals/grants.
     pub policy: Policy,
+    /// Effective table allow/deny, row-filter and mask rules (R2-04). Empty
+    /// for the unscoped process view; populated from the grant by
+    /// [`AppConfig::scoped_for`].
+    pub tables: crate::auth::TablePolicy,
     /// True when running on the ephemeral `sqlite::memory:` fallback.
     pub ephemeral: bool,
     /// Explicit endpoint-hiding override; `None` = automatic default
@@ -512,6 +610,7 @@ impl AppConfig {
         scoped.write_mode = authz.write_mode();
         scoped.principal_id = authz.principal_id.clone();
         scoped.query_history = authz.query_history;
+        scoped.tables = authz.tables.clone();
         if let Some(max_rows) = authz.max_rows {
             scoped.max_rows = scoped.max_rows.min(max_rows);
         }
@@ -814,6 +913,7 @@ fn build_policy(
             max_bytes: grant.max_bytes,
             query_timeout: grant.query_timeout.map(Duration::from_secs),
             query_history: grant.query_history,
+            tables: table_policy_from_config(grant)?,
         });
     }
 
@@ -951,6 +1051,7 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
             allow_grants,
             oauth,
             policy,
+            tables: crate::auth::TablePolicy::default(),
             ephemeral: false,
             hide_endpoints,
         });
@@ -1059,6 +1160,7 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
         allow_grants,
         oauth,
         policy,
+        tables: crate::auth::TablePolicy::default(),
         ephemeral,
         hide_endpoints,
     })
@@ -1538,6 +1640,10 @@ mod tests {
             max_bytes: None,
             query_timeout: None,
             query_history: false,
+            allow_tables: vec![],
+            deny_tables: vec![],
+            row_filters: vec![],
+            mask: vec![],
         }];
         let policy = build_policy(
             WriteMode::AllowDdl,
@@ -1571,6 +1677,10 @@ mod tests {
                 max_bytes: Some(2048),
                 query_timeout: Some(3),
                 query_history: false,
+                allow_tables: vec![],
+                deny_tables: vec![],
+                row_filters: vec![],
+                mask: vec![],
             },
             GrantConfig {
                 principal: Principal::LOCAL_ID.into(),
@@ -1580,6 +1690,10 @@ mod tests {
                 max_bytes: None,
                 query_timeout: None,
                 query_history: false,
+                allow_tables: vec![],
+                deny_tables: vec![],
+                row_filters: vec![],
+                mask: vec![],
             },
         ];
         let policy = build_policy(
@@ -1620,6 +1734,10 @@ mod tests {
             max_bytes: None,
             query_timeout: None,
             query_history: false,
+            allow_tables: vec![],
+            deny_tables: vec![],
+            row_filters: vec![],
+            mask: vec![],
         }];
         let err = build_policy(
             WriteMode::ReadOnly,
@@ -1645,6 +1763,10 @@ mod tests {
                 max_bytes: None,
                 query_timeout: None,
                 query_history: false,
+                allow_tables: vec![],
+                deny_tables: vec![],
+                row_filters: vec![],
+                mask: vec![],
             },
             GrantConfig {
                 principal: "alice".into(),
@@ -1654,6 +1776,10 @@ mod tests {
                 max_bytes: None,
                 query_timeout: None,
                 query_history: false,
+                allow_tables: vec![],
+                deny_tables: vec![],
+                row_filters: vec![],
+                mask: vec![],
             },
         ];
         assert!(build_policy(
@@ -1675,6 +1801,10 @@ mod tests {
             max_bytes: None,
             query_timeout: None,
             query_history: false,
+            allow_tables: vec![],
+            deny_tables: vec![],
+            row_filters: vec![],
+            mask: vec![],
         }];
         assert!(build_policy(
             WriteMode::ReadOnly,

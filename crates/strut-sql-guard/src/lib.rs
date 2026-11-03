@@ -2,6 +2,7 @@ mod capabilities;
 mod classify;
 mod params;
 mod patterns;
+mod policy;
 
 use serde_json::Value;
 use sqlparser::ast::{
@@ -59,11 +60,17 @@ pub use params::{
     rewrite_placeholders_for_postgres, validate_param_count,
 };
 pub use patterns::{detect_anti_patterns, AntiPattern, PatternContext};
+pub use policy::{
+    enforce_table_policy, referenced_tables, ColumnMask, MaskMode, RowFilter, TablePolicy,
+    TableRef, TableRule,
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct PrepareOptions {
     pub page_offset: usize,
     pub page_size: Option<usize>,
+    /// Table allow/deny + row filters for the calling principal (R2-04).
+    pub table_policy: Option<TablePolicy>,
 }
 
 #[derive(Debug, Clone)]
@@ -199,7 +206,7 @@ pub fn validate_and_prepare_with_options(
         ));
     }
 
-    let stmt = statements.into_iter().next().expect("checked len");
+    let mut stmt = statements.into_iter().next().expect("checked len");
     if let Some(message) = capabilities::unsupported_statement(engine, &stmt) {
         return Err(GuardError::Denied(message));
     }
@@ -208,6 +215,12 @@ pub fn validate_and_prepare_with_options(
     // SQL-SEC-03/04: dangerous functions are denied in EVERY mode — this is
     // not a write-mode question, these functions must never run at all.
     check_denied_functions(&stmt, engine)?;
+
+    if let Some(policy) = &prepare_opts.table_policy {
+        if !policy.is_empty() {
+            enforce_table_policy(&mut stmt, &class, policy, engine)?;
+        }
+    }
 
     if class.requires_writes_for_explain() && !write_mode.allows_dml() {
         return Err(GuardError::Denied(
@@ -233,13 +246,16 @@ pub fn validate_and_prepare_with_options(
         && matches!(&stmt, Statement::Query(q) if q.limit_clause.is_none() && q.fetch.is_none());
 
     let trimmed = strip_trailing_semicolons(&normalized);
-    let mut stmt = stmt;
     let (limit_clamped, limit_unverified) = if wants_pagination {
         (false, false)
     } else {
         clamp_query_limit(&mut stmt, default_limit)
     };
 
+    let policy_rewrote = prepare_opts
+        .table_policy
+        .as_ref()
+        .is_some_and(|policy| !policy.is_empty());
     let (final_sql, server_pagination) = if wants_pagination {
         if let Statement::Query(q) = &mut stmt {
             if !class.is_select_like() {
@@ -257,8 +273,17 @@ pub fn validate_and_prepare_with_options(
             ));
         }
     } else if needs_limit {
-        (format!("{trimmed} LIMIT {default_limit}"), false)
-    } else if limit_clamped {
+        if policy_rewrote {
+            // The table policy injected derived subqueries into the AST;
+            // serializing the original text would silently drop them.
+            if let Statement::Query(q) = &mut stmt {
+                set_query_limit(q, default_limit);
+            }
+            (stmt.to_string(), false)
+        } else {
+            (format!("{trimmed} LIMIT {default_limit}"), false)
+        }
+    } else if limit_clamped || policy_rewrote {
         (stmt.to_string(), false)
     } else {
         (trimmed.to_string(), false)
@@ -1327,6 +1352,7 @@ pub struct KeysetShape {
 pub struct KeysetRequest {
     pub after: Option<Value>,
     pub page_size: u32,
+    pub table_policy: Option<TablePolicy>,
 }
 
 fn keyset_denied(message: &str) -> GuardError {
@@ -1350,7 +1376,10 @@ fn expr_has_function(expr: &Expr) -> bool {
                 || conditions.iter().any(|case| {
                     expr_has_function(&case.condition) || expr_has_function(&case.result)
                 })
-                || else_result.as_deref().map(expr_has_function).unwrap_or(false)
+                || else_result
+                    .as_deref()
+                    .map(expr_has_function)
+                    .unwrap_or(false)
         }
         Expr::InList { expr, list, .. } => {
             expr_has_function(expr) || list.iter().any(expr_has_function)
@@ -1431,7 +1460,9 @@ fn extract_keyset_shape(q: &Query) -> Result<KeysetShape, GuardError> {
         .as_ref()
         .ok_or_else(|| keyset_denied("cursor pagination requires ORDER BY on a unique column"))?;
     let sqlparser::ast::OrderByKind::Expressions(exprs) = &order.kind else {
-        return Err(keyset_denied("ORDER BY ALL is not supported with cursor pagination"));
+        return Err(keyset_denied(
+            "ORDER BY ALL is not supported with cursor pagination",
+        ));
     };
     if exprs.len() != 1 {
         return Err(keyset_denied(
@@ -1518,6 +1549,11 @@ pub fn validate_and_prepare_keyset(
     let class = classify::classify(&stmt)?;
     check_query_complexity(&stmt)?;
     check_denied_functions(&stmt, engine)?;
+    if let Some(policy) = &request.table_policy {
+        if !policy.is_empty() {
+            enforce_table_policy(&mut stmt, &class, policy, engine)?;
+        }
+    }
     if !class.is_select_like() {
         return Err(GuardError::Denied(
             "cursor pagination is only supported on SELECT queries".into(),
@@ -1768,6 +1804,7 @@ mod tests {
             PrepareOptions {
                 page_offset: 50,
                 page_size: Some(25),
+                table_policy: None,
             },
         )
         .unwrap();

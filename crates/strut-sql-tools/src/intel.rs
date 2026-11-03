@@ -120,6 +120,11 @@ pub async fn handle_get_relationship_graph(
         params.schema.as_deref(),
         params.table.as_deref(),
         params.depth,
+        if config.tables.is_empty() {
+            None
+        } else {
+            Some(&config.tables)
+        },
     )
     .await
     .map_err(graph_error)?;
@@ -144,6 +149,11 @@ pub async fn handle_suggest_joins(
         Some(&source.name),
         &params.tables,
         params.schema.as_deref(),
+        if config.tables.is_empty() {
+            None
+        } else {
+            Some(&config.tables)
+        },
     )
     .await
     .map_err(graph_error)?;
@@ -169,6 +179,11 @@ pub async fn handle_get_schema_context(
         budget,
         params.tables.as_deref(),
         params.keyword.as_deref(),
+        if config.tables.is_empty() {
+            None
+        } else {
+            Some(&config.tables)
+        },
     )
     .await
     .map_err(|e| tool_error_code(e, ToolErrorKind::Execution))?;
@@ -183,17 +198,45 @@ async fn build_schema_context(
     token_budget: usize,
     focus: Option<&[String]>,
     keyword: Option<&str>,
+    policy: Option<&strut_sql_guard::TablePolicy>,
 ) -> Result<SchemaContext, String> {
     let schema_name = driver
         .resolve_schema(schema)
         .await
         .map_err(|e| e.to_string())?;
-    let tables = introspect::list_tables(driver, source, Some(&schema_name), None).await?;
-    let columns = introspect::list_columns(driver, source, Some(&schema_name), None).await?;
-    let fks = driver
+    let mut tables = introspect::list_tables(driver, source, Some(&schema_name), None).await?;
+    let mut columns = introspect::list_columns(driver, source, Some(&schema_name), None).await?;
+    if let Some(policy) = policy {
+        if !policy.is_empty() {
+            for table in focus.into_iter().flatten() {
+                if !policy.allows_table(Some(&schema_name), table) {
+                    return Err(format!(
+                        "table '{table}' is not accessible to this principal"
+                    ));
+                }
+            }
+            tables.retain(|table| policy.allows_table(Some(&schema_name), &table.name));
+            columns.retain(|column| {
+                column
+                    .table
+                    .as_deref()
+                    .map(|table| policy.allows_table(Some(&schema_name), table))
+                    .unwrap_or(true)
+            });
+        }
+    }
+    let mut fks = driver
         .list_foreign_keys(Some(&schema_name), None)
         .await
         .map_err(|e| e.to_string())?;
+    if let Some(policy) = policy {
+        if !policy.is_empty() {
+            fks.retain(|fk| {
+                policy.allows_table(Some(&schema_name), &fk.table)
+                    && policy.allows_table(Some(&schema_name), &fk.ref_table)
+            });
+        }
+    }
     let indexes = driver
         .list_indexes(Some(&schema_name), None)
         .await
