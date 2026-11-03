@@ -1,89 +1,147 @@
 # Changelog
 
-## [Unreleased]
+## [2.0.0] — 2026-11-03
 
-### MCP conformance gate & client matrix (B6)
+Major, breaking release. There is no v1 compatibility layer: the tool surface,
+configuration schema, and result/error contracts are the v2 ones documented in
+`docs/`. A v1 deployment must be reconfigured from the sections below; the
+step-by-step mapping is in
+[docs/MIGRATION_V1_TO_V2.md](docs/MIGRATION_V1_TO_V2.md).
 
-- **Runnable conformance gate**: `scripts/conformance/run.sh` (Python 3
-  stdlib only) exercises stdio and Streamable HTTP — initialize/version
-  negotiation, `ping`, `tools/list` schema validity for all 20 tools,
-  `tools/call` per group, unknown-tool and malformed-message shapes, batch
-  rejection, HTTP auth/OAuth metadata/session headers, and DNS-rebinding
-  Origin checks. It writes JSON plus a human summary and fails CI on required
-  failures.
-- **Pinned MCP spec 2025-06-18**: the server now advertises its own
-  `serverInfo` identity, answers older/unknown requested versions with
-  2025-06-18, rejects unsupported `MCP-Protocol-Version` headers with 400, and
-  no longer echo-negotiates 2025-03-26 (whose batch requirement is not
-  implemented).
-- **DNS rebinding defense**: non-loopback `Origin` values are rejected with
-  403; loopback origins must match the `Host` header and port. Remote
-  deployments allowlist exact origins with
-  `STRUT_STACK_SQL_ALLOWED_ORIGINS`.
-- **Six-client matrix**: `docs/CLIENTS.md` has paste-ready stdio + HTTP
-  configs for Cursor, Claude Code, VS Code, Codex, Windsurf, and OpenCode;
-  every JSON/TOML block is parsed by `scripts/conformance/check_clients.py`
-  and the minimal stdio command line is smoke-run.
-- **Measured result**: repo runner 48 pass / 0 fail / 3 optional (51 checks);
-  official suite 6 applicable passes, 20 not applicable (recorded in
-  `docs/CONFORMANCE.md`). CI and release workflows now run the gate; the
-  release job depends on it.
+### Added
 
-### Schema intelligence & performance advisor (PRD-F3)
+- **10-crate workspace plus a thin binary.** `strut-sql-driver-api` defines the
+  public `EngineDriver` contract and engine-neutral value types;
+  `strut-sql-driver-{postgres,mysql,sqlite}` implement it; `strut-sql-core`,
+  `strut-sql-guard`, `strut-sql-format`, `strut-sql-tools`, and
+  `strut-sql-server` hold the engine-independent product; and
+  `strut-sql-driver-conformance` is the shared Driver Conformance Test Kit.
+  Database libraries are confined to driver crates.
+- **Per-caller authorization (Principal + Policy).** Grants are evaluated per
+  principal × source × tier (`read < writes < ddl < admin`) with optional
+  row/byte/timeout ceilings. One `authorize()` function gates every tool
+  invocation and drives `list_tools`, so a hidden tool is also denied when
+  called directly. `GRANT`/`REVOKE` are a separate `Admin` tier behind
+  `--allow-grants`; the process write mode remains a hard ceiling.
+- **HTTP authentication.** API keys are accepted raw or as `sha256:<hex>`
+  digests and compared in constant time; each key carries a maximum tier and
+  optional source allowlist. Non-loopback binds without auth are refused at
+  startup unless `--allow-unauthenticated-http` is explicit. Origin/Host
+  checks defend against DNS rebinding.
+- **OAuth 2.1 resource server.** With `STRUT_STACK_SQL_OAUTH_ISSUER` and
+  `STRUT_STACK_SQL_OAUTH_AUDIENCE`, access tokens are validated as RS256 JWTs
+  against the issuer's discovered JWKS (`iss`/`aud`/`exp`), mapped to a
+  principal via a configurable claim, and advertised through RFC 9728
+  protected-resource metadata. Discovery failure fails closed; token material
+  is never logged.
+- **Schema intelligence (PRD-F3).** Ranked `search_objects`, relation-aware
+  `schema_overview`, and three new tools — `get_relationship_graph`,
+  `suggest_joins`, `get_schema_context` — bring the surface to exactly 20
+  tools. All are read-tier, guarded, audited, and honor source/deny-column
+  policy.
+- **Performance advisor v2.** A uniform plan tree across the three engines,
+  tiered `issues` (`info`/`warning`/`critical`), dominant-cost nodes, row
+  estimate misses, leading-wildcard LIKE, AST anti-patterns, and index advice
+  as `CREATE INDEX …` text with triggering node, estimate, and confidence.
+  Advice is never executed. `EXPLAIN ANALYZE` is opt-in via `analyze: true`
+  plus `--allow-explain-analyze`.
+- **Schema statistics and history.** Driver `table_stats` with honest
+  provenance (planner/catalog/unavailable), table/index sizes where reported,
+  index coverage for advisor rules; opt-in per-principal in-memory query
+  history (normalized hashes, no parameter values) for N+1 and repeated-slow
+  suggestions.
+- **Schema cache** keyed by source/engine/schema with TTL and invalidation
+  after DDL issued through the server; filter and pagination pushed into the
+  driver's catalog SQL; set-based SQLite introspection removes the N+1
+  `PRAGMA` chains.
+- **Governed batch execution**: statement count, total wall-clock deadline,
+  and cross-item byte ceiling, with per-item fail-soft unless `--fail-fast`.
+- **Rich type codecs**: UUID, timestamps, high-precision decimals, JSON,
+  binary/bytea, PostgreSQL arrays; SQLite BLOB as hex; MySQL BOOL as JSON
+  bool; VARBINARY/BLOB remain hex.
+- **MCP conformance gate and six-client matrix.** `scripts/conformance/run.sh`
+  covers stdio and Streamable HTTP (lifecycle, 20-tool listing, calls, error
+  shapes, batching, auth/OAuth metadata, sessions, Origin checks); every
+  config block in `docs/CLIENTS.md` is parsed and the minimal stdio command is
+  smoke-run. The pinned spec is **2025-06-18**.
+- **Reproducible benchmark harness** (`scripts/benchmark/bench.py`) with raw
+  results published at `scripts/benchmark/results/2.0.0.json`.
 
-- **Ranked `search_objects`**: relevance ordering exact > prefix > substring >
-  catalog comment, optional `include_score`; compact output stays the
-  default. Ranking is global before pagination.
-- **New tools (surface now exactly 20)**: `get_relationship_graph` (FK graph
-  with optional focus/depth), `suggest_joins` (shortest paths with
-  copy-ready `on` conditions; same-name candidates marked `guess: true`),
-  and `get_schema_context` (deterministic token-budgeted digest, expanded
-  around focus tables via the join graph). All are read-tier, guarded,
-  audited, and respect source allowlists/deny-columns.
-- **Relation-aware `schema_overview`**: per-table `fk_in`/`fk_out`, `hub`
-  and `orphan` flags, `meta.hubs`/`meta.orphans`; the 200-table cap is
-  explicit in `meta.truncated`.
-- **Advisor v2**: uniform plan tree for PostgreSQL/MySQL/SQLite, tiered
-  `issues` (`info`/`warning`/`critical`) for full scans, large nested loops,
-  expensive sort/hash, dominant-cost nodes, row-estimate misses, type casts,
-  leading-wildcard LIKE, plus AST anti-patterns; index advice as
-  `CREATE INDEX …` text with triggering node, row estimate and confidence.
-  `EXPLAIN ANALYZE` is opt-in (`analyze: true` + `--allow-explain-analyze`).
-- **Schema stats (F3-07)**: driver `table_stats` with honest estimate
-  provenance (planner/catalog/unavailable), table/index sizes where the
-  engine reports them, and index coverage for advisor rules.
-- **Anti-patterns (F3-06)**: structured findings on `execute_sql` in full
-  mode (`meta`-adjacent `anti_patterns`) and in the advisor.
-- **Session history (F3-08)**: per-principal opt-in in-memory history with
-  normalized SQL hashes, class, duration and rows (no parameter values),
-  N+1 and repeated-slow suggestions.
-- **Capability matrix (F3-09)**: `docs/CAPABILITIES.md` plus enforced
-  per-engine classification tests; `CREATE SEQUENCE`/`COMMENT` (PostgreSQL
-  Ddl), `VACUUM`/`ANALYZE` (Admin), and SQLite read pragmas are now
-  explicit instead of silently `Other`.
-- **Error contract (F3-10)**: every handler distinguishes
-  `invalid_params` (validation), `authorization_denied`, `guard_denied`,
-  and retryable `execution_error` with structured `{code,message,retryable}`
-  data; success payloads no longer carry `{ok:false}`; JSON fallback text
-  escaping is correct.
+### Changed (breaking)
 
-### Benchmarks (PRD-F2-12/F2-13)
+- **Tool surface is exactly 20**: 3 core tools always; 10 introspection tools
+  with `--full-tools`; 7 DDL tools only with `--full-tools --allow-ddl`.
+  v1 tool names and gating no longer apply.
+- **Configuration v2**: multi-source TOML with `[[principals]]` and
+  `[[grants]]`; unknown keys, duplicate source names, and a dangling
+  `default_source` are startup errors; an omitted default is the
+  lexicographically first source; a TOML source without `url`/`url_env` is an
+  error and never inherits another source's credentials; numeric options are
+  range-validated.
+- **Result and error contracts**: every failure is categorized as
+  `invalid_params`, `authorization_denied`, `guard_denied`, or retryable
+  `execution_error` with structured `{code,message,retryable}` data; success
+  payloads never carry `{ok:false}`. Pagination reports
+  `page_offset`/`page_size`/`has_more`/`total_fetched`.
+- **One binary only.** The legacy `mcp-sql-rust` binary target, its install
+  symlink, and the duplicate Homebrew/Scoop/winget manifests were removed;
+  every script, launcher, container, and document now targets
+  `strut-stack-sql`.
 
-- Reproducible harness added at `scripts/benchmark/bench.py` (+
-  `run-bench.sh`); raw results for 2.0.0 in
-  `scripts/benchmark/results/2.0.0.json` with machine specs.
-- Reference machine (WSL2, 6 vCPU, 5.8 GB): **stdio meets every PRD-F2-12
-  target** — idle RSS 8.60 MB, cold-start p95 6.25 ms, `tools/list`
-  2,783 bytes, 100×8 result 7,526 bytes, SELECT-by-PK p50 0.83 ms.
-- HTTP transport **misses two targets** and is recorded as such rather than
-  rounded away: cold-start p95 54.06 ms (target ≤ 25 ms; HTTP listener
-  readiness + session handshake are included) and SELECT-by-PK p50 3.99 ms
-  (target ≤ 1 ms; each call is a fresh HTTP request, so network/HTTP framing
-  dominates). The stdio core meets the target; the HTTP gap is transport
-  overhead, not query/format overhead.
-- Competitor comparison not run: `npx`/Node is absent and the pinned
-  competitors require a live PostgreSQL server. PostgreSQL/MySQL engine
-  results are `not_run` for the same reason (no live server on this machine).
+### Fixed
+
+- **Guard bypass family (Tahap A)**: CTE bodies containing
+  INSERT/UPDATE/DELETE are classified recursively as DML;
+  `SELECT … INTO`, `INTO OUTFILE`, and `INTO DUMPFILE` are never reads;
+  dangerous functions are denied or tier-gated per engine; parameterized
+  `LIMIT ?` and `FETCH FIRST` are clamped; row-locking clauses and unknown
+  statement classes are denied; GRANT/REVOKE moved to `Admin`.
+- **Credential and identifier safety**: URL redaction handles passwords with
+  `@`/`:` and sensitive query parameters; URL parts are percent-encoded;
+  SQLite attached-schema names are quoted correctly; cross-source credential
+  inheritance was removed.
+- **Data fidelity**: PostgreSQL `uuid`/`timestamptz`/`inet`/`citext` decode as
+  JSON strings; MySQL `DECIMAL`/`BIGINT UNSIGNED`/aggregates stay numeric
+  without float round-trip; MySQL text vs BINARY/VARBINARY decode is correct;
+  SQLite BLOB is hex instead of silent `Null`; `approx_rows` no longer reports
+  fake zeroes for never-analyzed PostgreSQL.
+- **Robustness**: `search_objects` pagination past the end returns an empty
+  page instead of panicking; FK/index grouping is keyed by
+  (schema, table, name); pool-access `.expect()` panics were replaced with
+  structured errors; a single 10 MB cell cannot exceed the result byte cap.
+- **Advisor defects**: the dead `_warnings` parameter, MySQL double-counting
+  walker, and hardcoded SQLite index column were removed.
+
+### Performance
+
+Measured at the 2.0.0 freeze on the documented WSL2 reference machine
+(n=120 after 20 warmups, 20 cold starts; raw JSON in
+`scripts/benchmark/results/2.0.0.json`, including the binary sha256):
+
+- **stdio meets every PRD-F2-12 target**: idle RSS 8.05 MB (≤ 15), cold-start
+  p95 7.43 ms (≤ 25), core `tools/list` 3,039 B (≤ 3,072 B), 100×8 result
+  7,526 B (≤ 70 KB), SELECT-by-PK p50 0.99 ms (≤ 1).
+- **HTTP now meets its own declared targets**: cold-start p95 46.98 ms
+  (≤ 60 ms) and SELECT-by-PK p50 2.28 ms (≤ 5 ms). Setting `TCP_NODELAY` on
+  accepted connections removed a ~40 ms Nagle/delayed-ACK penalty per
+  `tools/call` on reused connections. The HTTP cold start cannot reuse the
+  stdio budget: on this host the kernel `bind()` of a listening socket alone
+  measures ~23 ms p50 (reproducible in plain Python), so the per-transport
+  targets are declared in the artifact instead of rounding the difference
+  away.
+- **Full 20-tool surface**: `tools/list` with `--full-tools --allow-ddl` is
+  11,003 B against a 12,000 B CI cap; the core surface is 3,039 B against
+  3,072 B.
+- **PostgreSQL 16 and MySQL 8.4 are measured**, not `not_run`: SELECT-by-PK
+  p50 2.44 ms / 2.99 ms (p95 3.78 / 4.27 ms), 0 errors, same 7,526 B payload,
+  using fixtures seeded through the compose stack.
+- **Size gate**: the stripped Linux x64 release binary is 10.6 MB, under the
+  16 MB release budget.
+- The competitor comparison stays `not_run`: `npx`/Node is not installed on the
+  reference machine, and the pinned rivals also need a live PostgreSQL server.
+- Run-to-run `execute_sql` p50 varies with host load (0.80–1.47 ms observed for
+  the same binary); the range is stated in [BENCHMARKS.md](docs/BENCHMARKS.md)
+  rather than quoting only the best run.
 
 ## [1.1.0] — 2026-11-02
 

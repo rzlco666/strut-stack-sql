@@ -88,9 +88,8 @@ POSTGRES_DB=app
 ## Multi-source TOML
 
 The example file in this repo is
-[`mcp-sql-rust.example.toml`](../mcp-sql-rust.example.toml) (compat name kept
-from the pre-1.0 project name; it is *the* example for
-`strut-stack-sql --config`). Copy it to `strut-stack-sql.toml`:
+[`strut-stack-sql.example.toml`](../strut-stack-sql.example.toml) — *the*
+example for `strut-stack-sql --config`. Copy it to `strut-stack-sql.toml`:
 
 ```toml
 default_source = "app"
@@ -112,7 +111,7 @@ Rules:
   URLs with plaintext passwords into TOML.
 - `default_source` is honored as written and **must name an existing
   source** (a typo is a startup error). When omitted, the default is
-  deterministic since 1.1.0: the **lexicographically first** source name,
+  deterministic in v2: the **lexicographically first** source name,
   chosen with a startup warning (previously this was hash-map order).
 - Duplicate source names and unknown keys are startup errors (fail-closed).
 - Pass `"source": "analytics"` in tool calls to target a non-default source.
@@ -137,11 +136,40 @@ Format: **comma-separated** entries of the form
   names); without it the token may use every source.
 - Token secrets must not contain `:` or `,`. Duplicate token names are a
   startup error.
+- Secrets may be stored as `sha256:<64 lowercase hex>` instead of plaintext:
+  `alice:sha256:9f86d0…:readonly`. Raw and hashed secrets are both compared
+  in constant time. Generate a digest with
+  `printf %s "$TOKEN" | sha256sum`.
 
 For a single quick token there is also `--http-token <secret>` (name `cli`,
 mode = the process mode). Clients send `Authorization: Bearer <token>`.
 Requests are rate-limited per token (`--http-rate-limit-per-minute`,
 default 600, 0 = off).
+
+## OAuth 2.1 resource server
+
+Set both variables to validate Bearer JWTs from an external authorization
+server:
+
+```bash
+STRUT_STACK_SQL_OAUTH_ISSUER="https://auth.example.com" \
+STRUT_STACK_SQL_OAUTH_AUDIENCE="https://mcp.example.com/mcp" \
+  strut-stack-sql --http 0.0.0.0:8080
+```
+
+- The server discovers `/.well-known/oauth-authorization-server` (falling back
+  to `/.well-known/openid-configuration`), fetches the advertised JWKS, and
+  validates **RS256** signature plus `iss`, `aud`, and `exp`.
+- The principal id comes from the claim named by
+  `STRUT_STACK_SQL_OAUTH_SUBJECT_CLAIM` (default `sub`). It is mapped through
+  the same `[[grants]]` policy as API keys.
+- `GET /.well-known/oauth-protected-resource` (and the resource-path variant)
+  serves RFC 9728 metadata; 401 responses carry the `resource_metadata`
+  challenge.
+- Discovery/JWKS failure at startup makes OAuth tokens fail closed; API keys
+  keep working. There is no built-in authorization server and no token
+  issuance.
+- Token material is never logged.
 
 The HTTP transport pins MCP spec **2025-06-18**. An unsupported
 `MCP-Protocol-Version` header is rejected with 400; an `initialize` body that
@@ -180,7 +208,7 @@ strut-stack-sql --http-token <secret>          # single HTTP bearer token (name 
 strut-stack-sql --http-rate-limit-per-minute 600
 ```
 
-Numeric options are range-validated at startup (1.1.0): zero or absurd
+Numeric options are range-validated at startup: zero or absurd
 values for `--max-rows`, `--pool-size`, timeouts, and `--batch-concurrency`
 are rejected instead of being silently accepted.
 

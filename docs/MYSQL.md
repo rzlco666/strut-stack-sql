@@ -20,11 +20,11 @@ In MySQL, the `schema` tool parameter is the **database name** (`table_schema` i
 
 When `schema` is omitted, the server resolves the current database via `SELECT DATABASE()` or the database name in `DATABASE_URL`. Use `schema: "*"` only to search all databases on the server.
 
-## Type fidelity (v0.5+)
+## Type fidelity
 
 `information_schema` aggregates (`SUM(table_rows)`, `ROUND(...)`, `COUNT(*)`) return JSON **numbers** without `CAST(... AS CHAR)` workarounds. `DECIMAL` columns decode via `bigdecimal`.
 
-### Strings vs binary (v0.5.1+)
+### Strings vs binary
 
 - Character types (`VARCHAR`, `CHAR`, `TEXT`, `ENUM`, `SET`, `JSON`) → UTF-8 JSON strings in `execute_sql` (columnar and `format: rows`).
 - Binary types (`BLOB`, `BINARY`, `VARBINARY`, `BIT`) → hex strings (lowercase, no `0x` prefix).

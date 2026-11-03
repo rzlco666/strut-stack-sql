@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Benchmark mcp-sql-rust only (helper for run.sh).
+# Benchmark strut-stack-sql only (helper for run.sh).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-BINARY="${BINARY:-${ROOT}/target/release/mcp-sql-rust}"
+BINARY="${BINARY:-${ROOT}/target/release/strut-stack-sql}"
 DATABASE_URL="${DATABASE_URL:-postgresql://demo:demo@localhost:5433/demo}"
 CLIENT="${ROOT}/scripts/benchmark/mcp-client.mjs"
 
