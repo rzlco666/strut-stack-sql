@@ -23,7 +23,7 @@ dependency of publishing (PRD-CONF-01).
 | Repo runner | **51 passed, 0 failed, 3 optional, 0 not run** (54 checks) |
 | Machine report | `target/conformance/report.json` |
 | Client matrix check | `scripts/conformance/check_clients.py` — 16 marked snippets, smoke passed |
-| `tools/list` size caps | core 3,039 B / 3,072 B; full 20-tool 11,003 B / 12,000 B (stdio and HTTP) |
+| `tools/list` size caps | core 3,059 B / 3,072 B; full 20-tool 11,023 B / 12,000 B (stdio and HTTP) |
 
 `node`/`npx` are not installed on the reference machine (`which node npx` →
 not found). `bunx` is installed and ran the official suite; this is recorded

@@ -1308,6 +1308,289 @@ fn set_query_offset_limit(q: &mut Query, offset: u64, limit: u64) {
     });
 }
 
+/// Shape of a query that cursor (keyset) pagination can serve.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeysetShape {
+    /// Base table name as written (last segment of a qualified name).
+    pub table: String,
+    /// Full table name as written, including any schema qualifier.
+    pub table_qualified: String,
+    /// Column the query is ordered by (unqualified name).
+    pub order_column: String,
+    /// True when the query orders descending.
+    pub descending: bool,
+}
+
+/// Cursor page request. `after = None` requests the first page (no key
+/// predicate); `Some(key)` requests the page after that ordering-key value.
+#[derive(Debug, Clone)]
+pub struct KeysetRequest {
+    pub after: Option<Value>,
+    pub page_size: u32,
+}
+
+fn keyset_denied(message: &str) -> GuardError {
+    GuardError::Denied(message.to_string())
+}
+
+fn expr_has_function(expr: &Expr) -> bool {
+    match expr {
+        Expr::Function(_) => true,
+        Expr::BinaryOp { left, right, .. } => expr_has_function(left) || expr_has_function(right),
+        Expr::UnaryOp { expr, .. } => expr_has_function(expr),
+        Expr::Nested(inner) => expr_has_function(inner),
+        Expr::Cast { expr, .. } => expr_has_function(expr),
+        Expr::Case {
+            operand,
+            conditions,
+            else_result,
+            ..
+        } => {
+            operand.as_deref().map(expr_has_function).unwrap_or(false)
+                || conditions.iter().any(|case| {
+                    expr_has_function(&case.condition) || expr_has_function(&case.result)
+                })
+                || else_result.as_deref().map(expr_has_function).unwrap_or(false)
+        }
+        Expr::InList { expr, list, .. } => {
+            expr_has_function(expr) || list.iter().any(expr_has_function)
+        }
+        Expr::Between {
+            expr, low, high, ..
+        } => expr_has_function(expr) || expr_has_function(low) || expr_has_function(high),
+        _ => false,
+    }
+}
+
+/// Extract the keyset shape of a parsed query, or explain why the query cannot
+/// be paged by keyset. Kept deliberately narrow: OFFSET is not involved, so a
+/// row inserted or deleted between pages can neither duplicate nor skip a row.
+fn extract_keyset_shape(q: &Query) -> Result<KeysetShape, GuardError> {
+    if q.with.is_some() {
+        return Err(keyset_denied(
+            "cursor pagination does not support WITH/CTE queries; page the outer SELECT instead",
+        ));
+    }
+    if q.limit_clause.is_some() || q.fetch.is_some() {
+        return Err(keyset_denied(
+            "cursor pagination sets its own LIMIT; remove LIMIT/OFFSET/FETCH from the SQL",
+        ));
+    }
+    if !q.locks.is_empty() {
+        return Err(keyset_denied(
+            "cursor pagination does not support row-locking clauses",
+        ));
+    }
+    let SetExpr::Select(select) = q.body.as_ref() else {
+        return Err(keyset_denied(
+            "cursor pagination requires a single SELECT (no UNION/EXCEPT/INTERSECT/VALUES)",
+        ));
+    };
+    if select.distinct.is_some() {
+        return Err(keyset_denied(
+            "cursor pagination does not support DISTINCT; deduplicate client-side instead",
+        ));
+    }
+    let empty_group_by = match &select.group_by {
+        GroupByExpr::Expressions(exprs, _) => exprs.is_empty(),
+        GroupByExpr::All(_) => false,
+    };
+    if !empty_group_by || select.having.is_some() {
+        return Err(keyset_denied(
+            "cursor pagination does not support GROUP BY/HAVING",
+        ));
+    }
+    if select.projection.iter().any(|item| match item {
+        SelectItem::UnnamedExpr(expr) => expr_has_function(expr),
+        SelectItem::ExprWithAlias { expr, .. } => expr_has_function(expr),
+        _ => false,
+    }) {
+        return Err(keyset_denied(
+            "cursor pagination does not support aggregate/function projections",
+        ));
+    }
+    if select.from.len() != 1 || !select.from[0].joins.is_empty() {
+        return Err(keyset_denied(
+            "cursor pagination requires exactly one table and no joins",
+        ));
+    }
+    let TableFactor::Table { name, .. } = &select.from[0].relation else {
+        return Err(keyset_denied(
+            "cursor pagination requires a plain table (not a subquery or table function)",
+        ));
+    };
+    let qualified = name.to_string().replace(['"', '`'], "");
+    let table = qualified
+        .rsplit('.')
+        .next()
+        .unwrap_or(&qualified)
+        .to_string();
+
+    let order = q
+        .order_by
+        .as_ref()
+        .ok_or_else(|| keyset_denied("cursor pagination requires ORDER BY on a unique column"))?;
+    let sqlparser::ast::OrderByKind::Expressions(exprs) = &order.kind else {
+        return Err(keyset_denied("ORDER BY ALL is not supported with cursor pagination"));
+    };
+    if exprs.len() != 1 {
+        return Err(keyset_denied(
+            "cursor pagination requires ORDER BY on exactly one unique column",
+        ));
+    }
+    let order_expr = &exprs[0];
+    if order_expr.with_fill.is_some() || order_expr.options.nulls_first.is_some() {
+        return Err(keyset_denied(
+            "cursor pagination does not support WITH FILL or NULLS FIRST/LAST",
+        ));
+    }
+    let order_column = match &order_expr.expr {
+        Expr::Identifier(ident) => ident.value.clone(),
+        Expr::CompoundIdentifier(parts) if parts.len() >= 2 => {
+            parts.last().map(|p| p.value.clone()).unwrap_or_default()
+        }
+        _ => {
+            return Err(keyset_denied(
+                "cursor pagination requires ORDER BY on a plain column (not an expression)",
+            ))
+        }
+    };
+    Ok(KeysetShape {
+        table,
+        table_qualified: qualified,
+        order_column,
+        descending: order_expr.options.asc == Some(false),
+    })
+}
+
+/// Public shape probe used by the tool layer before issuing a cursor, so the
+/// ordering column can be checked against the engine's unique indexes.
+pub fn keyset_shape(sql: &str, engine: EngineKind) -> Result<KeysetShape, GuardError> {
+    let normalized = normalize_sql_for_engine(sql, engine);
+    let statements = Parser::parse_sql(dialect_for(engine).as_ref(), &normalized)
+        .map_err(|e| GuardError::Denied(format!("parse error: {e}")))?;
+    if statements.len() != 1 {
+        return Err(keyset_denied(
+            "cursor pagination requires exactly one statement",
+        ));
+    }
+    let Statement::Query(q) = &statements[0] else {
+        return Err(keyset_denied(
+            "cursor pagination is only supported on SELECT queries",
+        ));
+    };
+    extract_keyset_shape(q)
+}
+
+/// Prepare one keyset page: `WHERE (original) AND key > $N ORDER BY key LIMIT n+1`.
+///
+/// The extra bound parameter is appended to `params`, so the caller's own
+/// placeholders keep their positions. The `+1` row is a probe: the caller drops
+/// it and uses it to decide whether a next page exists.
+pub fn validate_and_prepare_keyset(
+    sql: &str,
+    query_params: &[Value],
+    engine: EngineKind,
+    write_mode: WriteMode,
+    request: &KeysetRequest,
+) -> Result<(PreparedSql, KeysetShape), GuardError> {
+    if request.page_size == 0 {
+        return Err(GuardError::Denied("page_size must be at least 1".into()));
+    }
+    validate_param_count(sql, query_params, engine)?;
+    reject_file_export_syntax(sql)?;
+
+    let normalized = normalize_sql_for_engine(sql, engine);
+    let statements = Parser::parse_sql(dialect_for(engine).as_ref(), &normalized)
+        .map_err(|e| GuardError::Denied(format!("parse error: {e}")))?;
+    if statements.is_empty() {
+        return Err(GuardError::Denied("empty query".into()));
+    }
+    if statements.len() > 1 {
+        return Err(GuardError::Denied(
+            "multiple statements are not allowed in a single query string".into(),
+        ));
+    }
+    let mut stmt = statements.into_iter().next().expect("checked len");
+    if let Some(message) = capabilities::unsupported_statement(engine, &stmt) {
+        return Err(GuardError::Denied(message));
+    }
+    let class = classify::classify(&stmt)?;
+    check_query_complexity(&stmt)?;
+    check_denied_functions(&stmt, engine)?;
+    if !class.is_select_like() {
+        return Err(GuardError::Denied(
+            "cursor pagination is only supported on SELECT queries".into(),
+        ));
+    }
+    enforce_write_mode(&class, write_mode)?;
+
+    let Statement::Query(q) = &mut stmt else {
+        return Err(GuardError::Denied(
+            "cursor pagination is only supported on SELECT queries".into(),
+        ));
+    };
+    let shape = extract_keyset_shape(q)?;
+
+    if let Some(_after) = &request.after {
+        let placeholder = match engine {
+            EngineKind::Postgres => format!("${}", query_params.len() + 1),
+            _ => "?".to_string(),
+        };
+        let predicate = Expr::BinaryOp {
+            left: Box::new(Expr::Identifier(sqlparser::ast::Ident::new(
+                shape.order_column.clone(),
+            ))),
+            op: if shape.descending {
+                sqlparser::ast::BinaryOperator::Lt
+            } else {
+                sqlparser::ast::BinaryOperator::Gt
+            },
+            right: Box::new(Expr::Value(SqlValue::Placeholder(placeholder).into())),
+        };
+        let SetExpr::Select(select) = q.body.as_mut() else {
+            unreachable!("shape extraction required a SELECT body");
+        };
+        select.selection = Some(match select.selection.take() {
+            Some(existing) => Expr::BinaryOp {
+                left: Box::new(Expr::Nested(Box::new(existing))),
+                op: sqlparser::ast::BinaryOperator::And,
+                right: Box::new(predicate),
+            },
+            None => predicate,
+        });
+    }
+    q.limit_clause = Some(LimitClause::LimitOffset {
+        limit: Some(Expr::value(SqlValue::Number(
+            (request.page_size as u64 + 1).to_string(),
+            false,
+        ))),
+        offset: None,
+        limit_by: vec![],
+    });
+
+    let final_sql = stmt.to_string();
+    let mut all_params = query_params.to_vec();
+    if let Some(after) = request.after.clone() {
+        all_params.push(after);
+    }
+    validate_param_count(&final_sql, &all_params, engine)?;
+
+    Ok((
+        PreparedSql {
+            sql: final_sql,
+            params: all_params,
+            limit_injected: false,
+            limit_clamped: false,
+            limit_unverified: false,
+            class,
+            server_pagination: true,
+            page_size: request.page_size,
+        },
+        shape,
+    ))
+}
+
 /// Clamp literal row limits to `max_rows` and report unverifiable ones.
 ///
 /// Returns `(clamped, unverified)`:

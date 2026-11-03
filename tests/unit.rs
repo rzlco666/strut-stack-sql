@@ -153,6 +153,7 @@ mod format_tests {
                 has_more: None,
                 total_fetched: None,
                 redacted_columns: None,
+                next_cursor: None,
                 warnings: None,
             },
         };
@@ -221,6 +222,7 @@ mod redact_tests {
                 has_more: None,
                 total_fetched: None,
                 redacted_columns: None,
+                next_cursor: None,
                 warnings: None,
             },
         };

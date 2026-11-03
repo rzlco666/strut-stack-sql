@@ -205,7 +205,7 @@ impl McpSqlServer {
         .await
     }
 
-    #[tool(description = "Execute one SQL statement or a concurrent batch via queries[].")]
+    #[tool(description = "Run SQL or a concurrent batch.")]
     async fn execute_sql(
         &self,
         params: Parameters<ExecuteSqlParams>,

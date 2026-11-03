@@ -28,6 +28,7 @@ Run SQL or concurrent batch.
 | `params` | array? | bound values for `?` placeholders (single-query mode) |
 | `page_offset` | number? | row offset after guard LIMIT (single-query only; default 0) |
 | `page_size` | number? | rows per page (single-query only; default `--max-rows`) |
+| `cursor` | string? | opaque cursor from a previous page's `meta.next_cursor`; expires after 10 minutes |
 | `format` | `columnar` \| `rows` \| `auto`? | response shape (default **columnar**; `auto` = row objects if ≤10 rows, else columnar — only when explicitly requested, or via `MCP_SQL_FORMAT=auto`) |
 | `queries` | string[] or object[]? | batch (not both with `sql`) |
 | `source` | string? | connection name |
@@ -58,15 +59,50 @@ Do not pass top-level `params` together with `queries[]` — put `params` on eac
 
 **Pagination (large result sets):**
 
+Cursor (keyset) pagination is the default when `page_size` is set on a first
+page (`page_offset` absent or 0) and the query qualifies:
+
+```json
+{ "sql": "SELECT id, name FROM users ORDER BY id", "page_size": 50 }
+```
+
+The response carries `meta.next_cursor`; send the *same* SQL and `params` plus
+the cursor to get the next page:
+
 ```json
 {
   "sql": "SELECT id, name FROM users ORDER BY id",
-  "page_offset": 0,
-  "page_size": 50
+  "page_size": 50,
+  "cursor": "eyJ2IjoxLCJleHAiOjE3…"
 }
 ```
 
-Loop until `meta.has_more` is `false`, incrementing `page_offset` by `page_size` each call. Pagination meta: `page_offset`, `page_size`, `has_more`, `total_fetched`.
+Rules for cursor mode:
+
+- exactly one table, no joins/CTEs/GROUP BY/DISTINCT/aggregates;
+- `ORDER BY` on **one** column that is a primary key or single-column unique
+  index, and that column must also be selected (it becomes the next key);
+- no `LIMIT`/`OFFSET`/`FETCH` in the SQL — the server sets its own;
+- the cursor is HMAC-signed, bound to the source, the SQL text and the parameter
+  values, and expires after **10 minutes**; changing any of them returns
+  `cursor_invalid`.
+
+Because the next page starts *after the last key value*, a row inserted or
+deleted between pages can neither duplicate nor skip another row. When the
+query does not qualify, a first-page request falls back to offset pagination
+(`meta.next_cursor` stays absent); a cursor request for such a query is
+rejected with `cursor_unsupported_query`.
+
+Offset pagination remains available and is the only option for non-unique
+orderings:
+
+```json
+{ "sql": "SELECT id, name FROM users ORDER BY name", "page_offset": 0, "page_size": 50 }
+```
+
+Loop until `meta.has_more` is `false`, incrementing `page_offset` by `page_size`
+each call. Offset pages may shift under concurrent writes. Pagination meta:
+`page_offset`, `page_size`, `has_more`, `total_fetched`, `next_cursor`.
 
 **Response (single):**
 
@@ -167,9 +203,9 @@ Destructive ops (`drop_*`, `truncate_table`) require `"confirm": true`. Prefer `
 
 ## Supported SQL surface
 
-The guard (`src/guard/classify.rs`) decides everything. If a statement type
+The guard (`crates/strut-sql-guard/src/classify.rs`) decides everything. If a statement type
 is not listed as supported below, it is **rejected in every mode** — there is
-no silent subset. (Before 1.1.0 this surface was undocumented; several types
+no silent subset. (Earlier releases left several types
 fell into the reject bucket without any doc saying so.)
 
 ### Read — allowed in every mode (ReadOnly and up)
@@ -186,7 +222,7 @@ fell into the reject bucket without any doc saying so.)
 - `INSERT`, `UPDATE`, `DELETE`, `MERGE`
 - A CTE whose body contains any of the above (e.g.
   `WITH d AS (DELETE … RETURNING …) SELECT …`) is classified **DML**,
-  never Read — classification is recursive since 1.1.0
+  never Read — classification is recursive
 
 ### DDL — requires `--allow-ddl`
 
@@ -195,7 +231,7 @@ fell into the reject bucket without any doc saying so.)
   parser
 - `CREATE SEQUENCE` (PostgreSQL) and `COMMENT ON` (PostgreSQL)
 - `DROP …`, `ALTER TABLE`, `ALTER INDEX`, `TRUNCATE` (not SQLite)
-- `GRANT` / `REVOKE` are their own class (**Admin**, since 1.1.0) and need
+- `GRANT` / `REVOKE` are their own class (**Admin**) and need
   more than `--allow-ddl`: the additional explicit `--allow-grants` opt-in
   (see [SECURITY.md](SECURITY.md)).
 
@@ -240,6 +276,8 @@ Every tool failure carries `data: {code, message, retryable}`:
 | Authorization policy denial | -32010 | `authorization_denied` | no |
 | Guard denial / blocked statement | -32011 | `guard_denied` | no |
 | Execution / connection failure | -32012 | `execution_error` | yes |
+| Cursor expired / tampered / bound to other SQL | -32013 | `cursor_expired`, `cursor_invalid` | no |
+| Cursor query shape unusable | -32013 | `cursor_unsupported_query`, `cursor_order_key_not_unique`, `cursor_order_key_not_selected`, `cursor_null_key` | no |
 
 Successful calls never return an `{ok:false}` payload; batch items keep their
 per-item `{ok, data|error}` shape because a batch is fail-soft by design.

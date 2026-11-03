@@ -10,10 +10,11 @@ use strut_sql_core::config::AppConfig;
 use strut_sql_core::redact::redact_url;
 use strut_sql_driver_api::EngineKind;
 use strut_sql_format::{format_columnar, resolve_result_format, to_json_text, ResultFormat};
-use strut_sql_guard::{classify_sql, SqlClass};
+use strut_sql_guard::{classify_sql, keyset_shape, SqlClass};
 
 use crate::exec::{
-    execute_batch, execute_query, BatchLimits, BatchResult, ExecError, ExecOptions, QueryResult,
+    execute_batch, execute_keyset_page, execute_query, BatchLimits, BatchResult, ExecError,
+    ExecOptions, QueryResult,
 };
 use crate::history;
 use crate::intel;
@@ -68,21 +69,24 @@ pub struct ExecuteSqlParams {
     /// Single SQL statement.
     #[serde(default)]
     pub sql: Option<String>,
-    /// Bound values for `?` (single query).
+    /// Values for `?` placeholders.
     #[serde(default)]
     pub params: Option<Vec<Value>>,
     /// Concurrent SQL batch.
     #[serde(default)]
     pub queries: Option<Vec<BatchQueryItem>>,
-    /// Row offset for paginated results.
+    /// Offset pagination (legacy).
     #[serde(default)]
     pub page_offset: Option<usize>,
-    /// Rows per page (default --max-rows).
+    /// Rows per page.
     #[serde(default)]
     pub page_size: Option<usize>,
+    /// Cursor for the next page; expires in 10 min.
+    #[serde(default)]
+    pub cursor: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
-    /// Response shape: auto (rows if ≤10), columnar, or rows.
+    /// columnar (default), rows, or auto.
     #[serde(default)]
     pub format: Option<ResultFormat>,
 }
@@ -155,11 +159,24 @@ pub fn tool_error_code(msg: impl Into<String>, kind: ToolErrorKind) -> McpError 
     McpError::new(rmcp::model::ErrorCode(json_rpc_code), msg, Some(data))
 }
 
+/// Structured cursor error (R2-01). Each failure mode has its own wire code so
+/// clients can distinguish "page again" (expired) from "your query changed".
+pub fn cursor_error(err: crate::keyset::KeysetError) -> McpError {
+    let msg = redact_url(&err.to_string());
+    let data = serde_json::json!({
+        "code": err.code().to_ascii_lowercase(),
+        "message": msg,
+        "retryable": err.retryable(),
+    });
+    McpError::new(rmcp::model::ErrorCode(-32013), msg, Some(data))
+}
+
 /// Map an execution-layer error to its tool error kind.
 pub(crate) fn exec_error_kind(err: &ExecError) -> ToolErrorKind {
     match err {
         ExecError::Guard(_) => ToolErrorKind::Guard,
         ExecError::Limit(_) => ToolErrorKind::Validation,
+        ExecError::Cursor(_) => ToolErrorKind::Validation,
         ExecError::Database(_) | ExecError::Other(_) => ToolErrorKind::Execution,
     }
 }
@@ -253,6 +270,11 @@ pub async fn handle_execute_sql(
                 "provide params on each queries[] item, not at the top level",
             ));
         }
+        if params.cursor.is_some() {
+            return Err(tool_error(
+                "cursor is not supported with queries[] batch mode; page single queries instead",
+            ));
+        }
         if params.page_offset.is_some() || params.page_size.is_some() {
             return Err(tool_error(
                 "page_offset and page_size are not supported with queries[] batch mode",
@@ -305,35 +327,129 @@ pub async fn handle_execute_sql(
         .await
         .map_err(|e| tool_error_code(e.to_string(), ToolErrorKind::Execution))?;
     let started = Instant::now();
+
+    // R2-01: cursor pagination. Attempted when the caller passes a cursor, or
+    // a page_size on a first page (page_offset = 0). When the query cannot be
+    // paged by keyset — no ORDER BY, non-unique key, joins — a first-page
+    // request falls back to the legacy offset behaviour; a cursor request is
+    // rejected with a structured code instead of silently restarting.
+    let cursor_requested = params.cursor.is_some();
+    let first_page = params.page_size.is_some() && params.page_offset.unwrap_or(0) == 0;
+    let mut keyset_error: Option<crate::keyset::KeysetError> = None;
+    if cursor_requested || first_page {
+        match prepare_keyset_call(
+            &driver,
+            &source.name,
+            &sql,
+            &query_params,
+            params.cursor.as_deref(),
+            params.page_size,
+            config.max_rows,
+            &opts,
+        )
+        .await
+        {
+            Ok((page, page_size_used)) => {
+                let mut page = page;
+                if let Some(next_key) = page.next_key.clone() {
+                    let token = crate::keyset::issue_cursor(
+                        &source.name,
+                        &sql,
+                        &query_params,
+                        next_key,
+                        page.descending,
+                        page_size_used,
+                    );
+                    if let Some(data) = page.result.data.as_mut() {
+                        data.meta.next_cursor = Some(token);
+                    }
+                }
+                let result = page.result;
+                let elapsed_ms = started.elapsed().as_millis() as u64;
+                invalidate_after_sql(&source.name, driver.kind(), &sql, result.ok);
+                return finish_query_result(
+                    config,
+                    &driver,
+                    &source.name,
+                    &sql,
+                    &query_params,
+                    &result,
+                    format,
+                    elapsed_ms,
+                )
+                .await;
+            }
+            Err(KeysetFailure::NotApplicable(err)) => {
+                if cursor_requested {
+                    return Err(cursor_error(err));
+                }
+                keyset_error = Some(err);
+            }
+            Err(KeysetFailure::Failed(err)) => {
+                return Err(tool_error_code(err.to_string(), exec_error_kind(&err)));
+            }
+        }
+    }
+    if let Some(err) = keyset_error {
+        tracing::debug!(
+            code = err.code(),
+            "cursor pagination not applicable; using page_offset pagination"
+        );
+    }
     let result = execute_query(&driver, &sql, &query_params, &opts)
         .await
         .map_err(|e| tool_error_code(e.to_string(), exec_error_kind(&e)))?;
     let elapsed_ms = started.elapsed().as_millis() as u64;
     invalidate_after_sql(&source.name, driver.kind(), &sql, result.ok);
 
-    let mut payload = format_query_result(&result, format);
-    let select_like = classify_sql(&sql, driver.kind())
+    finish_query_result(
+        config,
+        &driver,
+        &source.name,
+        &sql,
+        &query_params,
+        &result,
+        format,
+        elapsed_ms,
+    )
+    .await
+}
+
+/// Shared post-processing for a single-query result (cursor and offset paths):
+/// result formatting plus the optional advisor/history decorations.
+#[allow(clippy::too_many_arguments)]
+async fn finish_query_result(
+    config: &Arc<AppConfig>,
+    driver: &Arc<dyn strut_sql_driver_api::EngineDriver>,
+    source_name: &str,
+    sql: &str,
+    query_params: &[Value],
+    result: &QueryResult,
+    format: ResultFormat,
+    elapsed_ms: u64,
+) -> Result<CallToolResult, McpError> {
+    let mut payload = format_query_result(result, format);
+    let select_like = classify_sql(sql, driver.kind())
         .map(|class| class.is_select_like())
         .unwrap_or(false);
     if config.full_tools && select_like {
-        let patterns =
-            intel::execution_anti_patterns(&driver, Some(&source.name), None, &sql).await;
+        let patterns = intel::execution_anti_patterns(driver, Some(source_name), None, sql).await;
         if !patterns.is_empty() {
             payload["anti_patterns"] = serde_json::to_value(&patterns).unwrap_or_default();
         }
     }
     if config.query_history {
-        let label = classify_sql(&sql, driver.kind())
+        let label = classify_sql(sql, driver.kind())
             .map(|class| class.label().to_string())
             .unwrap_or_else(|_| "UNKNOWN".to_string());
         let rows = result.data.as_ref().map(|d| d.meta.n).unwrap_or(0);
         let suggestions = history::record(
             &config.principal_id,
-            &sql,
+            sql,
             &label,
             elapsed_ms,
             rows,
-            &query_params,
+            query_params,
         );
         if !suggestions.is_empty() {
             payload["suggestions"] = serde_json::to_value(&suggestions).unwrap_or_default();
@@ -342,6 +458,64 @@ pub async fn handle_execute_sql(
     Ok(CallToolResult::success(vec![ContentBlock::text(
         to_json_text(&payload),
     )]))
+}
+
+/// Why a cursor attempt did not produce a page.
+enum KeysetFailure {
+    /// The query cannot be paged by keyset (no unique ORDER BY key, joins, …)
+    /// or the cursor itself is unusable.
+    NotApplicable(crate::keyset::KeysetError),
+    /// Validation/execution failed; propagate, do not fall back.
+    Failed(ExecError),
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn prepare_keyset_call(
+    driver: &Arc<dyn strut_sql_driver_api::EngineDriver>,
+    source_name: &str,
+    sql: &str,
+    query_params: &[Value],
+    cursor: Option<&str>,
+    page_size: Option<usize>,
+    max_rows: u32,
+    opts: &ExecOptions,
+) -> Result<(crate::exec::KeysetPage, usize), KeysetFailure> {
+    use crate::keyset::KeysetError;
+
+    let shape = keyset_shape(sql, driver.kind())
+        .map_err(|e| KeysetFailure::NotApplicable(KeysetError::Unsupported(e.to_string())))?;
+    crate::keyset::ensure_unique_order_column(driver, &shape)
+        .await
+        .map_err(KeysetFailure::NotApplicable)?;
+
+    let (after, requested_page_size) = match cursor {
+        Some(token) => {
+            let verified = crate::keyset::verify_cursor(token, source_name, sql, query_params)
+                .map_err(KeysetFailure::NotApplicable)?;
+            if verified.descending != shape.descending {
+                return Err(KeysetFailure::NotApplicable(KeysetError::Invalid(
+                    "cursor ordering does not match the query's ORDER BY direction".into(),
+                )));
+            }
+            (Some(verified.after), verified.page_size)
+        }
+        None => (None, page_size.unwrap_or(max_rows as usize)),
+    };
+    let page_size_used = requested_page_size.clamp(1, max_rows as usize);
+    let page = execute_keyset_page(
+        driver,
+        sql,
+        query_params,
+        opts,
+        after,
+        page_size_used as u32,
+    )
+    .await
+    .map_err(|e| match e {
+        ExecError::Cursor(err) => KeysetFailure::NotApplicable(err),
+        other => KeysetFailure::Failed(other),
+    })?;
+    Ok((page, page_size_used))
 }
 
 pub async fn handle_analyze_query(

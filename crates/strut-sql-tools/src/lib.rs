@@ -1,6 +1,7 @@
 pub mod audit;
 pub mod bind;
 pub mod core;
+pub mod cursor;
 pub mod ddl;
 pub mod exec;
 pub mod explain;
@@ -9,6 +10,7 @@ pub mod graph;
 pub mod history;
 pub mod intel;
 pub mod introspect;
+pub mod keyset;
 
 pub use core::*;
 pub use ddl::*;

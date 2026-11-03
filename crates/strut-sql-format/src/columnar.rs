@@ -138,6 +138,10 @@ pub struct ColumnarMeta {
     pub total_fetched: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub redacted_columns: Option<Vec<String>>,
+    /// Opaque cursor for the next page (R2-01). Present only when cursor
+    /// pagination is in use and at least one more row exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
     /// Non-fatal capability degradations for this session (PRD-F2-11).
     /// Absent when every requested capability is effective.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -160,6 +164,7 @@ impl ColumnarResult {
                 has_more: None,
                 total_fetched: None,
                 redacted_columns: None,
+                next_cursor: None,
                 warnings: None,
             },
         }
@@ -350,6 +355,7 @@ mod tests {
                 has_more: None,
                 total_fetched: None,
                 redacted_columns: None,
+                next_cursor: None,
                 warnings: None,
             },
         };
@@ -369,6 +375,7 @@ mod tests {
             has_more: None,
             total_fetched: None,
             redacted_columns: None,
+                next_cursor: None,
             warnings: None,
         }
     }
@@ -541,6 +548,7 @@ mod tests {
                 has_more: None,
                 total_fetched: None,
                 redacted_columns: None,
+                next_cursor: None,
                 warnings: None,
             },
         };

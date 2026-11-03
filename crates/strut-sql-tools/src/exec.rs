@@ -7,7 +7,8 @@ use serde_json::Value;
 use strut_sql_driver_api::{BoundQuery, DriverError, EngineDriver, EngineKind, SqlValue};
 use strut_sql_format::{truncate_to_bytes, ColumnarMeta, ColumnarResult};
 use strut_sql_guard::{
-    validate_and_prepare_with_options, GuardError, PrepareOptions, SqlClass, StmtClass, WriteMode,
+    validate_and_prepare_keyset, validate_and_prepare_with_options, GuardError, KeysetRequest,
+    PrepareOptions, SqlClass, StmtClass, WriteMode,
 };
 
 use crate::bind::to_sql_values;
@@ -33,6 +34,9 @@ pub enum ExecError {
     Other(String),
     #[error("{0}")]
     Limit(String),
+    /// Cursor pagination failure with a structured code (R2-01).
+    #[error(transparent)]
+    Cursor(#[from] crate::keyset::KeysetError),
 }
 
 impl From<DriverError> for ExecError {
@@ -210,6 +214,82 @@ pub async fn execute_query(
     result
 }
 
+/// Result of one keyset (cursor) page.
+#[derive(Debug)]
+pub struct KeysetPage {
+    pub result: QueryResult,
+    /// True when the probe row proved another page exists.
+    pub has_more: bool,
+    /// Value of the ordering key in the last returned row (the next cursor).
+    pub next_key: Option<Value>,
+    pub descending: bool,
+    pub page_size: usize,
+}
+
+/// Execute one cursor page. `after = None` is the first page.
+///
+/// The guard rewrites the statement to `WHERE … AND key > ? ORDER BY key
+/// LIMIT page_size+1`; the probe row is dropped. Because the predicate walks
+/// the key instead of an offset, a row inserted or deleted between pages
+/// cannot duplicate or skip another row.
+pub async fn execute_keyset_page(
+    driver: &Arc<dyn EngineDriver>,
+    sql: &str,
+    params: &[Value],
+    opts: &ExecOptions,
+    after: Option<Value>,
+    page_size: u32,
+) -> Result<KeysetPage, ExecError> {
+    let engine = driver.kind();
+    let (prepared, shape) = validate_and_prepare_keyset(
+        sql,
+        params,
+        engine,
+        opts.write_mode,
+        &KeysetRequest { after, page_size },
+    )?;
+    let columnar = run_sql(driver, &prepared.sql, &prepared.params, engine, true, None).await?;
+    let key_index = crate::keyset::order_key_index(&columnar.cols, &shape.order_column)?;
+    let fetched = columnar.rows.len();
+    let page = page_size as usize;
+    let has_more = fetched > page;
+    let mut columnar = columnar;
+    if has_more {
+        columnar.rows.truncate(page);
+    }
+    let next_key = if has_more {
+        match columnar.rows.last().and_then(|row| row.get(key_index)).cloned() {
+            Some(Value::Null) | None => {
+                return Err(crate::keyset::KeysetError::NullKey(
+                    "cursor key is NULL or missing; order by a NOT NULL unique column".into(),
+                )
+                .into())
+            }
+            Some(value) => Some(value),
+        }
+    } else {
+        None
+    };
+    columnar.meta.n = columnar.rows.len();
+    columnar.meta.page_size = Some(page);
+    columnar.meta.has_more = Some(has_more);
+    columnar.meta.total_fetched = Some(fetched);
+    columnar.meta.page_offset = None;
+    let columnar = truncate_to_bytes(columnar, opts.max_bytes);
+    let columnar = redact_denied_columns(columnar, &opts.deny_columns);
+    Ok(KeysetPage {
+        result: QueryResult {
+            ok: true,
+            data: Some(columnar),
+            error: None,
+        },
+        has_more,
+        next_key,
+        descending: shape.descending,
+        page_size: page,
+    })
+}
+
 pub async fn execute_batch(
     driver: &Arc<dyn EngineDriver>,
     queries: Vec<(String, Vec<Value>)>,
@@ -377,6 +457,7 @@ async fn run_sql(
             has_more: None,
             total_fetched: None,
             redacted_columns: None,
+            next_cursor: None,
             warnings,
         },
     })
