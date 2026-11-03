@@ -116,6 +116,7 @@ async fn exec(config: &Arc<AppConfig>, name: &str, sql: &str, params: Vec<Value>
                 cursor: None,
                 source: Some(name.into()),
                 format: None,
+                summary: None,
             },
         )
         .await
@@ -485,6 +486,7 @@ async fn error_categories_are_distinct_and_retryable_is_explicit() {
             cursor: None,
             source: Some(name.into()),
             format: None,
+            summary: None,
         },
     )
     .await
@@ -503,6 +505,7 @@ async fn error_categories_are_distinct_and_retryable_is_explicit() {
             cursor: None,
             source: Some(name.into()),
             format: None,
+            summary: None,
         },
     )
     .await

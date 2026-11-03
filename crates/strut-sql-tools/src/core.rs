@@ -69,16 +69,12 @@ pub struct ExecuteSqlParams {
     /// Single SQL statement.
     #[serde(default)]
     pub sql: Option<String>,
-    /// Values for `?` placeholders.
     #[serde(default)]
     pub params: Option<Vec<Value>>,
-    /// Concurrent SQL batch.
     #[serde(default)]
     pub queries: Option<Vec<BatchQueryItem>>,
-    /// Offset pagination (legacy).
     #[serde(default)]
     pub page_offset: Option<usize>,
-    /// Rows per page.
     #[serde(default)]
     pub page_size: Option<usize>,
     /// Cursor for the next page; expires in 10 min.
@@ -86,9 +82,22 @@ pub struct ExecuteSqlParams {
     pub cursor: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
-    /// columnar (default), rows, or auto.
     #[serde(default)]
     pub format: Option<ResultFormat>,
+    #[serde(default)]
+    #[schemars(schema_with = "summary_schema")]
+    pub summary: Option<crate::summary::SummaryParams>,
+}
+
+/// Compact machine schema for the summary mode. The full field list lives in
+/// docs/TOOLS.md: expanding seven typed fields here costs ~1.4 kB of the
+/// always-loaded core `tools/list` budget, which the PRD-F2-12 cap does not
+/// allow.
+fn summary_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "object",
+        "description": "Server-built summary: count | sample | aggregate over a table (see docs/TOOLS.md)",
+    })
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -255,6 +264,14 @@ pub async fn handle_execute_sql(
     config: &Arc<AppConfig>,
     params: ExecuteSqlParams,
 ) -> Result<CallToolResult, McpError> {
+    if let Some(summary) = params.summary.clone() {
+        if params.sql.is_some() || params.queries.is_some() || params.cursor.is_some() {
+            return Err(tool_error(
+                "provide either summary, sql, queries or cursor — not more than one",
+            ));
+        }
+        return crate::summary::handle_summary(config, summary, params.source.as_deref()).await;
+    }
     let source = config
         .source(params.source.as_deref())
         .map_err(|e| tool_error(e.to_string()))?;

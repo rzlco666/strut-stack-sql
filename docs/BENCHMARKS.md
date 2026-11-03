@@ -38,8 +38,8 @@ not typed by hand.
 | Load RSS | — | 12.11 MB | 13.25 MB |
 | Cold start, single run | — | 4.54 ms | 32.88 ms |
 | Cold start, p50 / p95 / p99 | stdio ≤ 25 ms · HTTP ≤ 60 ms | 3.49 / **7.43** / 14.19 ms — **PASS** | 42.40 / **46.98** / 47.39 ms — **PASS** |
-| `tools/list` (3 core tools) | ≤ 3,072 B | 3,059 B — **PASS** | 3,059 B — **PASS** |
-| `tools/list` (full 20-tool + DDL surface) | ≤ 12,000 B | 11,023 B — **PASS** | 11,023 B — **PASS** |
+| `tools/list` (3 core tools) | ≤ 3,072 B | 2,976 B — **PASS** | 2,976 B — **PASS** |
+| `tools/list` (full 20-tool + DDL surface) | ≤ 12,000 B | 10,940 B — **PASS** | 10,940 B — **PASS** |
 | 100×8 result before truncation | ≤ 70 KB | 7,526 B — **PASS** | 7,526 B — **PASS** |
 | `execute_sql` SELECT by PK, p50 / p95 / p99 | stdio ≤ 1 ms · HTTP ≤ 5 ms | 0.99 / 1.57 / 3.01 ms — **PASS** | 2.28 / 2.81 / 3.09 ms — **PASS** |
 | `execute_sql` errors | 0 | 0 | 0 |

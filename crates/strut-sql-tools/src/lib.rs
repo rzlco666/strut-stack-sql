@@ -11,6 +11,7 @@ pub mod history;
 pub mod intel;
 pub mod introspect;
 pub mod keyset;
+pub mod summary;
 
 pub use core::*;
 pub use ddl::*;

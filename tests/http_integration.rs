@@ -146,6 +146,7 @@ async fn seed_users(config: &Arc<AppConfig>) {
             cursor: None,
             source: None,
             format: None,
+                summary: None,
         },
     )
     .await;
@@ -160,6 +161,7 @@ async fn seed_users(config: &Arc<AppConfig>) {
             cursor: None,
             source: None,
             format: None,
+                summary: None,
         },
     )
     .await;
@@ -203,6 +205,7 @@ async fn guard_blocks_dml_in_readonly() {
             cursor: None,
             source: None,
             format: None,
+                summary: None,
         },
     )
     .await;
@@ -223,6 +226,7 @@ async fn guard_blocks_ddl_in_readonly() {
             cursor: None,
             source: None,
             format: None,
+                summary: None,
         },
     )
     .await;
@@ -243,6 +247,7 @@ async fn guard_blocks_transaction_control() {
             cursor: None,
             source: None,
             format: None,
+                summary: None,
         },
     )
     .await;
@@ -263,6 +268,7 @@ async fn guard_blocks_multi_statement() {
             cursor: None,
             source: None,
             format: None,
+                summary: None,
         },
     )
     .await;
@@ -283,6 +289,7 @@ async fn guard_blocks_empty_query() {
             cursor: None,
             source: None,
             format: None,
+                summary: None,
         },
     )
     .await;
@@ -303,6 +310,7 @@ async fn guard_blocks_grant() {
             cursor: None,
             source: None,
             format: None,
+                summary: None,
         },
     )
     .await;
@@ -326,6 +334,7 @@ async fn params_basic_select() {
             cursor: None,
             source: None,
             format: None,
+                summary: None,
         },
     )
     .await;
@@ -349,6 +358,7 @@ async fn params_unicode_and_emoji() {
             cursor: None,
             source: None,
             format: None,
+                summary: None,
         },
     )
     .await;
@@ -363,6 +373,7 @@ async fn params_unicode_and_emoji() {
             cursor: None,
             source: None,
             format: None,
+                summary: None,
         },
     )
     .await;
@@ -383,6 +394,7 @@ async fn params_null_value() {
             cursor: None,
             source: None,
             format: None,
+                summary: None,
         },
     )
     .await;
@@ -406,6 +418,7 @@ async fn params_missing_placeholder_rejected() {
             cursor: None,
             source: None,
             format: None,
+                summary: None,
         },
     )
     .await;
@@ -426,6 +439,7 @@ async fn params_extra_rejected() {
             cursor: None,
             source: None,
             format: None,
+                summary: None,
         },
     )
     .await;
@@ -450,6 +464,7 @@ async fn injection_param_treated_as_data() {
             cursor: None,
             source: None,
             format: None,
+                summary: None,
         },
     )
     .await;
@@ -466,6 +481,7 @@ async fn injection_param_treated_as_data() {
             cursor: None,
             source: None,
             format: None,
+                summary: None,
         },
     )
     .await;
@@ -487,6 +503,7 @@ async fn injection_union_in_param_is_literal() {
             cursor: None,
             source: None,
             format: None,
+                summary: None,
         },
     )
     .await;
@@ -509,6 +526,7 @@ async fn injection_or_in_param_is_literal() {
             cursor: None,
             source: None,
             format: None,
+                summary: None,
         },
     )
     .await;
@@ -535,6 +553,7 @@ async fn types_large_int_and_float() {
             cursor: None,
             source: None,
             format: None,
+                summary: None,
         },
     )
     .await;
@@ -557,6 +576,7 @@ async fn count_serializes_as_number_not_bool() {
             cursor: None,
             source: None,
             format: None,
+                summary: None,
         },
     )
     .await;
@@ -582,6 +602,7 @@ async fn batch_legacy_strings() {
             cursor: None,
             source: None,
             format: None,
+                summary: None,
         },
     )
     .await;
@@ -606,6 +627,7 @@ async fn batch_parameterized() {
             cursor: None,
             source: None,
             format: None,
+                summary: None,
         },
     )
     .await;
@@ -629,6 +651,7 @@ async fn batch_mixed_valid_and_invalid() {
             cursor: None,
             source: None,
             format: None,
+                summary: None,
         },
     )
     .await;
@@ -656,6 +679,7 @@ async fn pagination_offset_and_size() {
             cursor: None,
             source: None,
             format: None,
+                summary: None,
         },
     )
     .await;
@@ -671,6 +695,7 @@ async fn pagination_offset_and_size() {
                 cursor: None,
                 source: None,
                 format: None,
+                summary: None,
             },
         )
         .await;
@@ -686,6 +711,7 @@ async fn pagination_offset_and_size() {
             cursor: None,
             source: None,
             format: None,
+                summary: None,
         },
     )
     .await;
@@ -703,6 +729,7 @@ async fn pagination_offset_and_size() {
             cursor: None,
             source: None,
             format: None,
+                summary: None,
         },
     )
     .await;
@@ -739,6 +766,7 @@ async fn ddl_through_execute_sql_invalidates_schema_cache() {
             cursor: None,
             source: None,
             format: None,
+                summary: None,
         },
     )
     .await;
@@ -758,6 +786,7 @@ async fn ddl_through_execute_sql_invalidates_schema_cache() {
             cursor: None,
             source: None,
             format: None,
+                summary: None,
         },
     )
     .await;
@@ -873,6 +902,7 @@ async fn postgres_parameterized_select() {
             cursor: None,
             source: None,
             format: None,
+                summary: None,
         },
     )
     .await;
@@ -980,6 +1010,7 @@ async fn mysql_show_processlist_allowed() {
             cursor: None,
             source: None,
             format: None,
+                summary: None,
         },
     )
     .await;
@@ -1002,6 +1033,7 @@ async fn mysql_count_serializes_as_number() {
             cursor: None,
             source: None,
             format: None,
+                summary: None,
         },
     )
     .await;

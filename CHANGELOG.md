@@ -67,6 +67,21 @@ step-by-step mapping is in
 - **Reproducible benchmark harness** (`scripts/benchmark/bench.py`) with raw
   results published at `scripts/benchmark/results/2.0.0.json`.
 
+- **Cursor (keyset) pagination for `execute_sql`.** The first page with
+  `page_size` returns an opaque HMAC-signed `meta.next_cursor`; sending it with
+  the same SQL and parameters continues the walk without OFFSET, so an insert
+  or delete between pages cannot duplicate or skip a row. Cursors are bound to
+  the source, SQL and parameter values, expire after 10 minutes, and fail with
+  `cursor_expired` / `cursor_invalid` / `cursor_*` codes. Cursor mode requires
+  a single-table SELECT ordered by one unique column that is also selected;
+  other first-page requests keep the legacy offset behaviour.
+- **Server-side summary mode.** `execute_sql({summary: …})` builds `count`,
+  `sample` or `aggregate` (count/avg/sum/min/max, optional `group_by`) without
+  accepting SQL from the caller. Identifiers are validated against the catalog
+  and quoted; deny-listed columns are rejected in group keys, metrics and
+  sample projections. Counts and aggregates are marked `exact: true`; a sample
+  is marked `exact: false` and never presented as a total.
+
 ### Changed (breaking)
 
 - **Tool surface is exactly 20**: 3 core tools always; 10 introspection tools

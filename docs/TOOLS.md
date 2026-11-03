@@ -29,6 +29,7 @@ Run SQL or concurrent batch.
 | `page_offset` | number? | row offset after guard LIMIT (single-query only; default 0) |
 | `page_size` | number? | rows per page (single-query only; default `--max-rows`) |
 | `cursor` | string? | opaque cursor from a previous page's `meta.next_cursor`; expires after 10 minutes |
+| `summary` | object? | server-built `count` / `sample` / `aggregate` instead of SQL (see below) |
 | `format` | `columnar` \| `rows` \| `auto`? | response shape (default **columnar**; `auto` = row objects if ≤10 rows, else columnar — only when explicitly requested, or via `MCP_SQL_FORMAT=auto`) |
 | `queries` | string[] or object[]? | batch (not both with `sql`) |
 | `source` | string? | connection name |
@@ -103,6 +104,40 @@ orderings:
 Loop until `meta.has_more` is `false`, incrementing `page_offset` by `page_size`
 each call. Offset pages may shift under concurrent writes. Pagination meta:
 `page_offset`, `page_size`, `has_more`, `total_fetched`, `next_cursor`.
+
+**Summary mode (no SQL):**
+
+`summary` asks the server to build and run a read-only summary. It is mutually
+exclusive with `sql`, `queries` and `cursor`.
+
+```json
+{ "summary": { "kind": "count", "table": "orders", "group_by": ["status"] } }
+{ "summary": { "kind": "sample", "table": "orders", "columns": ["id", "status"], "limit": 20 } }
+{ "summary": { "kind": "aggregate", "table": "orders", "aggregate": "sum", "column": "total_cents" } }
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `kind` | `count` \| `sample` \| `aggregate` | required |
+| `table` | string | `schema.table` accepted |
+| `columns` | string[]? | sample projection (default: every catalog column) |
+| `group_by` | string[]? | count/aggregate group keys |
+| `aggregate` | `count` \| `avg` \| `sum` \| `min` \| `max`? | aggregate only |
+| `column` | string? | aggregated column; `count` may omit it for `COUNT(*)` |
+| `limit` | number? | rows (sample) or groups; clamped to `--max-rows` |
+
+Behaviour that matters:
+
+- **Identifiers are validated against the live catalog** and quoted per engine;
+  a table or column that does not exist is an `invalid_params` error, and a
+  table name that contains SQL syntax never reaches the database as SQL.
+- **Deny-listed columns are rejected**, not merely redacted, when used in
+  `group_by`, as the aggregated `column`, or in a sample projection.
+- **Numbers are computed, never estimated.** `count`/`aggregate` report
+  `meta.summary.exact: true`; `sample` reports `exact: false` because a sample
+  is not a total. No planner row estimate is ever returned as a count.
+- `meta.summary` repeats the request (`kind`, `group_by`, `aggregate`, `table`,
+  `limit`, `source: "computed"`).
 
 **Response (single):**
 
