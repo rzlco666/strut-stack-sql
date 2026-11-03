@@ -67,6 +67,7 @@ async fn config(require_approval: bool) -> (Arc<AppConfig>, Arc<dyn EngineDriver
         require_approval,
         approvals: std::sync::Arc::new(strut_stack_sql::core::approvals::ApprovalQueue::new()),
         plans: std::sync::Arc::new(strut_sql_core::migrations::PlanStore::new()),
+        trace_sql: false,
         tables: Default::default(),
         ephemeral: false,
         hide_endpoints: None,
@@ -86,6 +87,9 @@ fn opts() -> ExecOptions {
         deny_columns: vec![],
         masks: vec![],
         table_policy: None,
+        principal: String::new(),
+        source: String::new(),
+        trace_sql: false,
     }
 }
 

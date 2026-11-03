@@ -75,6 +75,16 @@ step-by-step mapping is in
   `cursor_expired` / `cursor_invalid` / `cursor_*` codes. Cursor mode requires
   a single-table SELECT ordered by one unique column that is also selected;
   other first-page requests keep the legacy offset behaviour.
+- **Doctor and V1 migration CLI.** `strut-stack-sql doctor` validates the real
+  configuration, connects to every source, reports degraded capabilities and
+  exits `0/1/2/3` (ok / config error / connection failure / degraded).
+  `strut-stack-sql migrate --from-v1` translates a V1 TOML with warnings for
+  keys that moved to CLI flags; it is a dry run unless `--write` is given.
+- **OTel-shaped trace fields with cardinality guards.** Query events carry
+  `otel.name`, `db.system`, `db.operation`, `strut.source`, a hashed
+  `strut.principal`, `strut.rows` and `strut.duration_ms`; the prepared SQL only
+  appears with `--trace-sql` and never when the grant narrows tables or filters
+  rows.
 - **Migration plans and universal dry run.** `schema_mutate` gained
   `plan_migration`, `apply_migration` and `rollback_migration`: plans validate
   through the guard, derive an inverse only where one is exact, live for one

@@ -79,6 +79,7 @@ async fn test_config(
         require_approval: false,
         approvals: std::sync::Arc::new(strut_stack_sql::core::approvals::ApprovalQueue::new()),
         plans: std::sync::Arc::new(strut_sql_core::migrations::PlanStore::new()),
+        trace_sql: false,
         tables: strut_stack_sql::core::auth::TablePolicy::default(),
         allow_explain_analyze: false,
         principal_id: name.into(),

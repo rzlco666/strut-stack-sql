@@ -249,6 +249,50 @@ Rules:
   flag required by the DDL tools, is never recorded in the queue and never
   satisfies a pending approval.
 
+## Maintenance commands
+
+```bash
+strut-stack-sql doctor --config strut-stack-sql.toml   # checks + exit code
+strut-stack-sql migrate --from-v1 --input v1.toml      # dry run, prints V2 TOML
+strut-stack-sql migrate --from-v1 --input v1.toml --write --out strut-stack-sql.toml
+```
+
+`doctor` loads the real configuration (the same `--config`/`--url`/env resolution
+the server uses), then checks every source with a real connection and reports
+capability degradations. Exit codes: `0` all checks passed, `1` configuration
+could not be loaded, `2` at least one source failed to connect, `3` reachable
+but degraded. URLs are redacted in its output.
+
+`migrate --from-v1` translates a V1 TOML: sources and `deny_columns` carry
+over, top-level V1 process options are reported with the CLI flag that
+replaces them (`max_rows` → `--max-rows`, …), and the binary rename is stated
+once. It never touches a database and **never overwrites a file** unless
+`--write` is passed; without `--write` it prints the translated file.
+
+## Observability (OTel-shaped fields)
+
+Query events carry OpenTelemetry-style attributes on the `query executed`
+tracing event, so a `tracing-opentelemetry` layer can export them without
+renaming anything:
+
+| Field | Value |
+|---|---|
+| `otel.name` | `execute_sql` |
+| `db.system` | engine (postgresql/mysql/sqlite) |
+| `db.operation` | `execute` |
+| `strut.source` | configured source name |
+| `strut.principal` | 12 hex chars of SHA-256 of the principal id |
+| `strut.rows` | rows returned |
+| `strut.duration_ms` | wall clock |
+| `db.statement` | prepared SQL **only** with `--trace-sql` |
+
+Cardinality and secrecy guards: parameter values are never emitted, the
+principal is hashed (never an email/token name), and `--trace-sql` is ignored
+whenever the caller's grant carries table rules or row filters (the scoped
+config clears it), because the statement may name a table the caller cannot
+access. There is no bundled exporter; point your tracing subscriber at an OTLP
+pipeline.
+
 ## HTTP export (NDJSON / CSV)
 
 `POST /export` streams rows for bulk export without going through JSON-RPC.

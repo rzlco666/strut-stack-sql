@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use strut_stack_sql::config::{load_config, Cli};
+use strut_stack_sql::config::{load_config, Cli, Command};
 use strut_stack_sql::server::{run_http, run_stdio};
 use tracing_subscriber::EnvFilter;
 
@@ -8,6 +8,27 @@ use tracing_subscriber::EnvFilter;
 async fn main() -> Result<()> {
     init_tracing();
     let cli = Cli::parse();
+    match &cli.command {
+        Some(Command::Doctor) => {
+            let code = strut_stack_sql::core::doctor::exit_code(&cli).await;
+            std::process::exit(code);
+        }
+        Some(Command::Migrate {
+            from_v1,
+            input,
+            write,
+            out,
+        }) => {
+            let code = strut_stack_sql::core::migrate::run(
+                *from_v1,
+                input.as_deref(),
+                *write,
+                out.as_deref(),
+            )?;
+            std::process::exit(code);
+        }
+        None => {}
+    }
     let config = load_config(&cli).await?;
     if cli.eager_connect {
         config.connect_all().await?;

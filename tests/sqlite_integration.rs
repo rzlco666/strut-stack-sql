@@ -38,6 +38,9 @@ fn exec_opts(write_mode: WriteMode) -> ExecOptions {
         deny_columns: vec![],
         masks: vec![],
         table_policy: None,
+        principal: String::new(),
+        source: String::new(),
+        trace_sql: false,
     }
 }
 

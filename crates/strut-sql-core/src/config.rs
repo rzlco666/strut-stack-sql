@@ -220,6 +220,27 @@ fn parse_token_parts<'a>(parts: &[&'a str]) -> Result<ParsedTokenEntry<'a>> {
     }
 }
 
+#[derive(Debug, Clone, clap::Subcommand)]
+pub enum Command {
+    /// Check configuration, credentials and connectivity; non-zero exit on problems.
+    Doctor,
+    /// Translate a V1 deployment configuration to V2.
+    Migrate {
+        /// Treat the input as a V1 (1.x) configuration.
+        #[arg(long)]
+        from_v1: bool,
+        /// V1 TOML file to read (default: ./strut-stack-sql.toml or the --config file).
+        #[arg(long)]
+        input: Option<PathBuf>,
+        /// Write the V2 file instead of printing it.
+        #[arg(long)]
+        write: bool,
+        /// Output path for --write (default: ./strut-stack-sql.toml).
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "strut-stack-sql",
@@ -227,20 +248,24 @@ fn parse_token_parts<'a>(parts: &[&'a str]) -> Result<ParsedTokenEntry<'a>> {
     about = "Strut Stack SQL — token-efficient MCP for MySQL, PostgreSQL, and SQLite"
 )]
 pub struct Cli {
+    /// Maintenance subcommands. Without one the server starts normally.
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
     /// Database connection URL (overrides .env discovery).
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub url: Option<String>,
 
     /// Environment variable holding the connection URL.
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub url_env: Option<String>,
 
     /// Path to strut-stack-sql.toml for multi-source configuration.
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub config: Option<PathBuf>,
 
     /// Workspace root for .env discovery and SQLite relative paths.
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub workspace: Option<PathBuf>,
 
     /// Connect to all sources at startup (default: lazy connect on first tool call).
@@ -273,6 +298,11 @@ pub struct Cli {
     /// required to start in that combination, loudly warned).
     #[arg(long)]
     pub allow_unauthenticated_http: bool,
+
+    /// Include the prepared SQL text in trace/log events (off by default;
+    /// ignored when the grant carries table rules or row filters).
+    #[arg(long, global = true)]
+    pub trace_sql: bool,
 
     /// Require an accepted approval for destructive DDL (drop/truncate/drop
     /// column). Also: STRUT_STACK_SQL_REQUIRE_APPROVAL=1.
@@ -307,11 +337,11 @@ pub struct Cli {
     pub hide_source_endpoints: bool,
 
     /// Max rows returned per query.
-    #[arg(long, default_value_t = DEFAULT_MAX_ROWS)]
+    #[arg(long, global = true, default_value_t = DEFAULT_MAX_ROWS)]
     pub max_rows: u32,
 
     /// Max response bytes per query result.
-    #[arg(long, default_value_t = DEFAULT_MAX_BYTES)]
+    #[arg(long, global = true, default_value_t = DEFAULT_MAX_BYTES)]
     pub max_bytes: usize,
 
     /// Connection pool size per source.
@@ -319,11 +349,11 @@ pub struct Cli {
     pub pool_size: u32,
 
     /// Query timeout in seconds.
-    #[arg(long, default_value_t = DEFAULT_QUERY_TIMEOUT_SECS)]
+    #[arg(long, global = true, default_value_t = DEFAULT_QUERY_TIMEOUT_SECS)]
     pub query_timeout: u64,
 
     /// Pool acquire / connect timeout in seconds (default: 2).
-    #[arg(long, default_value_t = DEFAULT_CONNECT_TIMEOUT_SECS)]
+    #[arg(long, global = true, default_value_t = DEFAULT_CONNECT_TIMEOUT_SECS)]
     pub connect_timeout: u64,
 
     /// Max concurrent queries in a batch.
@@ -576,6 +606,9 @@ pub struct AppConfig {
     pub policy: Policy,
     /// Destructive DDL requires an accepted approval (R2-05).
     pub require_approval: bool,
+    /// Trace events may carry the prepared SQL text (R2-07). Never enabled
+    /// when the grant narrows tables: the statement may name them.
+    pub trace_sql: bool,
     /// Shared approval queue (in-memory, 15-minute TTL).
     pub approvals: std::sync::Arc<crate::approvals::ApprovalQueue>,
     /// Shared migration plan store (in-memory, 1-hour TTL).
@@ -622,6 +655,9 @@ impl AppConfig {
         scoped.principal_id = authz.principal_id.clone();
         scoped.query_history = authz.query_history;
         scoped.tables = authz.tables.clone();
+        if !scoped.tables.is_empty() {
+            scoped.trace_sql = false;
+        }
         // The queue is process-shared: scoped views must see the same entries.
         scoped.approvals = self.approvals.clone();
         scoped.plans = self.plans.clone();
@@ -1065,6 +1101,7 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
             allow_grants,
             oauth,
             policy,
+            trace_sql: cli.trace_sql,
             require_approval: cli.require_approval
                 || env_truthy("STRUT_STACK_SQL_REQUIRE_APPROVAL"),
             approvals: std::sync::Arc::new(crate::approvals::ApprovalQueue::new()),
@@ -1178,6 +1215,7 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
         allow_grants,
         oauth,
         policy,
+        trace_sql: cli.trace_sql,
         require_approval: cli.require_approval || env_truthy("STRUT_STACK_SQL_REQUIRE_APPROVAL"),
         approvals: std::sync::Arc::new(crate::approvals::ApprovalQueue::new()),
         plans: std::sync::Arc::new(crate::migrations::PlanStore::new()),
@@ -1921,6 +1959,7 @@ max_rows = 7
 
     fn test_cli(config: Option<PathBuf>) -> Cli {
         Cli {
+            command: None,
             url: None,
             url_env: None,
             config,
@@ -1933,6 +1972,7 @@ max_rows = 7
             http_token: None,
             allow_unauthenticated_http: false,
             allow_grants: false,
+            trace_sql: false,
             require_approval: false,
             allow_explain_analyze: false,
             http_rate_limit_per_minute: 600,

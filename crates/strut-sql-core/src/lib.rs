@@ -1,6 +1,8 @@
 pub mod approvals;
 pub mod auth;
 pub mod config;
+pub mod doctor;
+pub mod migrate;
 pub mod migrations;
 pub mod redact;
 pub mod registry;

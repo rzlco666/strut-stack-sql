@@ -74,6 +74,12 @@ pub struct ExecOptions {
     pub masks: Vec<(String, MaskMode)>,
     /// Table allow/deny + row filters from the caller's grant (R2-04).
     pub table_policy: Option<TablePolicy>,
+    /// Hashed principal id for trace events (R2-07); never the raw id.
+    pub principal: String,
+    /// Source name for trace events.
+    pub source: String,
+    /// Include the prepared SQL text in the trace event (opt-in).
+    pub trace_sql: bool,
 }
 
 /// Hard governance limits for one `execute_batch` call (PRD-F2-10).
@@ -178,7 +184,19 @@ pub async fn execute_query(
             let columnar = truncate_to_bytes(columnar, opts.max_bytes);
             let columnar = redact_denied_columns(columnar, &opts.deny_columns);
             let columnar = apply_masks(columnar, &opts.masks);
+            // OTel-shaped attributes on one event (R2-07). Cardinality is
+            // bounded: no parameter values, the principal is hashed, and the
+            // statement text appears only when the operator opted in and the
+            // grant does not narrow tables (scoped_for clears trace_sql then).
             tracing::info!(
+                "otel.name" = "execute_sql",
+                "db.system" = ?engine,
+                "db.operation" = "execute",
+                "strut.source" = %opts.source,
+                "strut.principal" = %opts.principal,
+                "strut.rows" = columnar.meta.n,
+                "strut.duration_ms" = started.elapsed().as_millis() as u64,
+                "db.statement" = if opts.trace_sql { Some(prepared.sql.as_str()) } else { None },
                 duration_ms = started.elapsed().as_millis() as u64,
                 rows = columnar.meta.n,
                 engine = ?engine,
@@ -758,6 +776,9 @@ mod tests {
             deny_columns: Vec::new(),
             masks: vec![],
             table_policy: None,
+            principal: String::new(),
+            source: String::new(),
+            trace_sql: false,
         }
     }
 

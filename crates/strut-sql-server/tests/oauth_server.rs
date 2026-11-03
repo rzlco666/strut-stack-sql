@@ -330,6 +330,7 @@ mod http_oauth {
             require_approval: false,
             approvals: std::sync::Arc::new(strut_sql_core::approvals::ApprovalQueue::new()),
             plans: std::sync::Arc::new(strut_sql_core::migrations::PlanStore::new()),
+            trace_sql: false,
             tables: strut_sql_core::auth::TablePolicy::default(),
             ephemeral: false,
             hide_endpoints: None,

@@ -68,6 +68,7 @@ async fn config_with_deny(deny_columns: Vec<String>) -> (Arc<AppConfig>, Arc<dyn
         require_approval: false,
         approvals: std::sync::Arc::new(strut_stack_sql::core::approvals::ApprovalQueue::new()),
         plans: std::sync::Arc::new(strut_sql_core::migrations::PlanStore::new()),
+        trace_sql: false,
         tables: strut_stack_sql::core::auth::TablePolicy::default(),
         ephemeral: false,
         hide_endpoints: None,
@@ -88,6 +89,9 @@ fn opts() -> ExecOptions {
         deny_columns: vec![],
         masks: vec![],
         table_policy: None,
+        principal: String::new(),
+        source: String::new(),
+        trace_sql: false,
     }
 }
 

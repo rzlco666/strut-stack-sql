@@ -142,7 +142,18 @@ pub fn exec_options(config: &AppConfig) -> ExecOptions {
         } else {
             Some(config.tables.clone())
         },
+        principal: principal_tag(&config.principal_id),
+        source: String::new(),
+        trace_sql: config.trace_sql,
     }
+}
+
+/// Bounded-cardinality principal tag for trace events: 12 hex chars of
+/// SHA-256. Never the raw principal id (which may be an email or token name).
+pub fn principal_tag(principal: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(principal.as_bytes());
+    digest.iter().take(6).map(|b| format!("{b:02x}")).collect()
 }
 
 /// Error category for tool failures (SQL-BUG-14): clients/agents judge
