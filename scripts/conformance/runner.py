@@ -38,6 +38,11 @@ SPEC_BASE = "https://modelcontextprotocol.io/specification/2025-06-18"
 PRD_CONF = "PRD-V2 §6.1 (PRD-CONF-01/02/03)"
 
 CORE_TOOLS = {"search_objects", "execute_sql", "analyze_query_performance"}
+# tools/list payload caps (R1-05): the default surface must stay under the
+# PRD-F2-12 3,072-byte budget; the full 20-tool surface has its own cap so
+# description creep fails CI instead of being discovered by clients.
+CORE_TOOLS_LIST_BYTES_CAP = 3072
+FULL_TOOLS_LIST_BYTES_CAP = 12000
 FULL_TOOLS = {
     "add_column",
     "alter_column",
@@ -232,6 +237,11 @@ def schema_errors(schema: Any, path: str = "inputSchema") -> list[str]:
                 errors.extend(schema_errors(definition, f"{path}.$defs.{name}"))
 
     return errors
+
+
+def payload_bytes(payload: Any) -> int:
+    """Compact JSON size of a JSON-RPC result payload, in bytes."""
+    return len(json.dumps(payload, separators=(",", ":")).encode())
 
 
 def validate_tool(tool: Any) -> list[str]:
@@ -974,6 +984,19 @@ def run_stdio_checks(
             detail={"count": len(names), "names": sorted(names)},
             error=None if ok else f"expected {sorted(CORE_TOOLS)}",
         )
+        core_bytes = payload_bytes(response.get("result") or {})
+        results.ok(
+            "stdio.tools.list.default_bytes",
+            "stdio.tools",
+            "stdio",
+            f"default tools/list payload is within {CORE_TOOLS_LIST_BYTES_CAP} bytes",
+            f"{SPEC_BASE}/server/tools#listing-tools; PRD-F2-12 token budget",
+            core_bytes <= CORE_TOOLS_LIST_BYTES_CAP,
+            detail={"bytes": core_bytes, "cap": CORE_TOOLS_LIST_BYTES_CAP},
+            error=None
+            if core_bytes <= CORE_TOOLS_LIST_BYTES_CAP
+            else f"{core_bytes} bytes > {CORE_TOOLS_LIST_BYTES_CAP}",
+        )
     except Exception as exc:
         results.not_run(
             "stdio.tools.list.default_surface",
@@ -1006,6 +1029,23 @@ def run_stdio_checks(
             error=None
             if count_ok and not errors
             else f"count={len(full_tools)} schema_errors={len(errors)}",
+        )
+        full_bytes = payload_bytes(response.get("result") or {})
+        results.ok(
+            "stdio.tools.list.full_bytes",
+            "stdio.tools",
+            "stdio",
+            f"full+DDL tools/list payload is within {FULL_TOOLS_LIST_BYTES_CAP} bytes",
+            f"{SPEC_BASE}/server/tools#listing-tools; R1-05 surface cap",
+            full_bytes <= FULL_TOOLS_LIST_BYTES_CAP,
+            detail={
+                "bytes": full_bytes,
+                "cap": FULL_TOOLS_LIST_BYTES_CAP,
+                "tool_count": len(full_tools),
+            },
+            error=None
+            if full_bytes <= FULL_TOOLS_LIST_BYTES_CAP
+            else f"{full_bytes} bytes > {FULL_TOOLS_LIST_BYTES_CAP}",
         )
     except Exception as exc:
         results.not_run(
@@ -1473,6 +1513,23 @@ def run_http_checks(
             ok,
             detail={"count": len(tools), "schema_errors": errors[:10]},
             error=None if ok else f"count={len(tools)} errors={len(errors)}",
+        )
+        http_bytes = payload_bytes((message or {}).get("result") or {})
+        results.ok(
+            "http.tools.list.full_bytes",
+            "http.tools",
+            "http",
+            f"tools/list payload is within {FULL_TOOLS_LIST_BYTES_CAP} bytes over HTTP",
+            f"{SPEC_BASE}/server/tools#listing-tools; R1-05 surface cap",
+            http_bytes <= FULL_TOOLS_LIST_BYTES_CAP,
+            detail={
+                "bytes": http_bytes,
+                "cap": FULL_TOOLS_LIST_BYTES_CAP,
+                "tool_count": len(tools),
+            },
+            error=None
+            if http_bytes <= FULL_TOOLS_LIST_BYTES_CAP
+            else f"{http_bytes} bytes > {FULL_TOOLS_LIST_BYTES_CAP}",
         )
     except Exception as exc:
         results.fail(

@@ -14,15 +14,16 @@ dependency of publishing (PRD-CONF-01).
 
 | Item | Value |
 |---|---|
-| Date | 2026-11-02 |
-| Binary | `strut-stack-sql 1.1.0` (`cargo build --release --workspace`) |
-| Source | `feat/v2` at `ad47d0c` plus this brief's uncommitted changes |
+| Date | 2026-11-03 |
+| Binary | `strut-stack-sql 2.0.0` (`cargo build --release --workspace`) |
+| Source | `feat/v2` at `7df8f31` plus the R1-05 surface caps |
 | Supported MCP spec version | **2025-06-18** (pinned, PRD-CONF-02) |
 | Official suite | `@modelcontextprotocol/conformance@0.1.16`, run via `bunx` |
-| Official scenarios | 6 passed, 20 not applicable (details below) |
-| Repo runner | **48 passed, 0 failed, 3 optional, 0 not run** (51 checks) |
+| Official scenarios | 6 passed, 20 not applicable (rerun against 2.0.0; details below) |
+| Repo runner | **51 passed, 0 failed, 3 optional, 0 not run** (54 checks) |
 | Machine report | `target/conformance/report.json` |
 | Client matrix check | `scripts/conformance/check_clients.py` — 16 marked snippets, smoke passed |
+| `tools/list` size caps | core 3,039 B / 3,072 B; full 20-tool 11,003 B / 12,000 B (stdio and HTTP) |
 
 `node`/`npx` are not installed on the reference machine (`which node npx` →
 not found). `bunx` is installed and ran the official suite; this is recorded

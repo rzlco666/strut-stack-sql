@@ -36,7 +36,7 @@ pub struct SearchObjectsParams {
     pub offset: Option<usize>,
     #[serde(default)]
     pub limit: Option<usize>,
-    /// Include the relevance score on each object (default: compact output).
+    /// Include per-object relevance score.
     #[serde(default)]
     pub include_score: Option<bool>,
 }
@@ -68,16 +68,16 @@ pub struct ExecuteSqlParams {
     /// Single SQL statement.
     #[serde(default)]
     pub sql: Option<String>,
-    /// Bound values for `?` placeholders (single-query mode only).
+    /// Bound values for `?` (single query).
     #[serde(default)]
     pub params: Option<Vec<Value>>,
-    /// Batch of SQL statements executed concurrently.
+    /// Concurrent SQL batch.
     #[serde(default)]
     pub queries: Option<Vec<BatchQueryItem>>,
-    /// Row offset for paginated single-query results (after guard LIMIT).
+    /// Row offset for paginated results.
     #[serde(default)]
     pub page_offset: Option<usize>,
-    /// Rows per page; defaults to --max-rows when omitted.
+    /// Rows per page (default --max-rows).
     #[serde(default)]
     pub page_size: Option<usize>,
     #[serde(default)]
@@ -95,8 +95,7 @@ pub struct AnalyzeQueryParams {
     pub params: Option<Vec<Value>>,
     #[serde(default)]
     pub source: Option<String>,
-    /// Run EXPLAIN ANALYZE (executes the statement). Requires the server
-    /// opt-in --allow-explain-analyze; never enabled implicitly.
+    /// Run EXPLAIN ANALYZE (executes SQL); requires --allow-explain-analyze.
     #[serde(default)]
     pub analyze: Option<bool>,
 }
