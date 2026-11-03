@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use rmcp::model::CallToolResult;
+use rmcp::ErrorData as McpError;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +23,12 @@ pub enum SchemaMutateAction {
     AlterColumn,
     DropColumn,
     TruncateTable,
+    /// Migration planning: validate statements and store a plan (never executes).
+    PlanMigration,
+    /// Execute a stored plan; requires plan_id and an accepted approval.
+    ApplyMigration,
+    /// Execute a plan's inverse; requires an applied plan with a defined inverse.
+    RollbackMigration,
 }
 
 impl SchemaMutateAction {
@@ -34,6 +41,9 @@ impl SchemaMutateAction {
             Self::AlterColumn => "alter column",
             Self::DropColumn => "drop column",
             Self::TruncateTable => "truncate table",
+            Self::PlanMigration => "plan migration",
+            Self::ApplyMigration => "apply migration",
+            Self::RollbackMigration => "rollback migration",
         }
     }
 }
@@ -63,6 +73,15 @@ pub struct SchemaMutateParams {
     /// Accepted approval id from the queue (R2-05). `confirm` is not approval.
     #[serde(default)]
     pub approval_id: Option<String>,
+    /// Multi-statement migration body (plan_migration only).
+    #[serde(default)]
+    pub statements: Option<Vec<String>>,
+    /// Plan id from plan_migration (apply/rollback only).
+    #[serde(default)]
+    pub plan_id: Option<String>,
+    /// Validate and report without executing anything (R2-06).
+    #[serde(default)]
+    pub dry_run: Option<bool>,
     #[serde(default)]
     pub source: Option<String>,
 }
@@ -75,6 +94,9 @@ pub struct CreateTableParams {
     pub approval_id: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
+    /// Validate and report without executing (R2-06).
+    #[serde(default)]
+    pub dry_run: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -87,6 +109,15 @@ pub struct DropTableParams {
     /// Accepted approval id from the queue (R2-05). `confirm` is not approval.
     #[serde(default)]
     pub approval_id: Option<String>,
+    /// Multi-statement migration body (plan_migration only).
+    #[serde(default)]
+    pub statements: Option<Vec<String>>,
+    /// Plan id from plan_migration (apply/rollback only).
+    #[serde(default)]
+    pub plan_id: Option<String>,
+    /// Validate and report without executing anything (R2-06).
+    #[serde(default)]
+    pub dry_run: Option<bool>,
     #[serde(default)]
     pub source: Option<String>,
 }
@@ -101,6 +132,15 @@ pub struct TruncateTableParams {
     /// Accepted approval id from the queue (R2-05). `confirm` is not approval.
     #[serde(default)]
     pub approval_id: Option<String>,
+    /// Multi-statement migration body (plan_migration only).
+    #[serde(default)]
+    pub statements: Option<Vec<String>>,
+    /// Plan id from plan_migration (apply/rollback only).
+    #[serde(default)]
+    pub plan_id: Option<String>,
+    /// Validate and report without executing anything (R2-06).
+    #[serde(default)]
+    pub dry_run: Option<bool>,
     #[serde(default)]
     pub source: Option<String>,
 }
@@ -115,6 +155,9 @@ pub struct AddColumnParams {
     pub approval_id: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
+    /// Validate and report without executing (R2-06).
+    #[serde(default)]
+    pub dry_run: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -127,6 +170,9 @@ pub struct AlterColumnParams {
     pub approval_id: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
+    /// Validate and report without executing (R2-06).
+    #[serde(default)]
+    pub dry_run: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -140,6 +186,15 @@ pub struct DropColumnParams {
     /// Accepted approval id from the queue (R2-05). `confirm` is not approval.
     #[serde(default)]
     pub approval_id: Option<String>,
+    /// Multi-statement migration body (plan_migration only).
+    #[serde(default)]
+    pub statements: Option<Vec<String>>,
+    /// Plan id from plan_migration (apply/rollback only).
+    #[serde(default)]
+    pub plan_id: Option<String>,
+    /// Validate and report without executing anything (R2-06).
+    #[serde(default)]
+    pub dry_run: Option<bool>,
     #[serde(default)]
     pub source: Option<String>,
 }
@@ -170,6 +225,9 @@ pub async fn handle_create_table(
             column: None,
             confirm: None,
             approval_id: params.approval_id,
+            statements: None,
+            plan_id: None,
+            dry_run: params.dry_run,
             source: params.source,
         },
     )
@@ -190,6 +248,9 @@ pub async fn handle_drop_table(
             column: None,
             confirm: params.confirm,
             approval_id: params.approval_id,
+            statements: None,
+            plan_id: None,
+            dry_run: params.dry_run,
             source: params.source,
         },
     )
@@ -210,6 +271,9 @@ pub async fn handle_truncate_table(
             column: None,
             confirm: params.confirm,
             approval_id: params.approval_id,
+            statements: None,
+            plan_id: None,
+            dry_run: params.dry_run,
             source: params.source,
         },
     )
@@ -230,6 +294,9 @@ pub async fn handle_add_column(
             column: Some(params.column),
             confirm: None,
             approval_id: params.approval_id,
+            statements: None,
+            plan_id: None,
+            dry_run: params.dry_run,
             source: params.source,
         },
     )
@@ -250,6 +317,9 @@ pub async fn handle_alter_column(
             column: Some(params.column),
             confirm: None,
             approval_id: params.approval_id,
+            statements: None,
+            plan_id: None,
+            dry_run: params.dry_run,
             source: params.source,
         },
     )
@@ -270,10 +340,158 @@ pub async fn handle_drop_column(
             column: Some(params.column),
             confirm: params.confirm,
             approval_id: params.approval_id,
+            statements: None,
+            plan_id: None,
+            dry_run: params.dry_run,
             source: params.source,
         },
     )
     .await
+}
+
+/// Plan a migration: validate every statement as DDL, derive an inverse where
+/// one is exact, store the plan. Nothing is executed.
+async fn plan_migration(
+    config: &Arc<AppConfig>,
+    params: SchemaMutateParams,
+) -> Result<CallToolResult, McpError> {
+    let source = config
+        .source(params.source.as_deref())
+        .map_err(|e| tool_error(e.to_string()))?;
+    let driver = source
+        .driver()
+        .await
+        .map_err(|e| tool_error_code(e.to_string(), ToolErrorKind::Execution))?;
+    let engine = driver.kind();
+    let mut statements = params.statements.clone().unwrap_or_default();
+    if let Some(ddl) = &params.ddl {
+        statements.push(ddl.clone());
+    }
+    if statements.is_empty() {
+        return Err(tool_error(
+            "plan_migration requires `statements` (or `ddl`)",
+        ));
+    }
+    for statement in &statements {
+        let prepared =
+            validate_and_prepare(statement, &[], engine, WriteMode::AllowDdl, config.max_rows)
+                .map_err(|e| tool_error_code(e.to_string(), ToolErrorKind::Guard))?;
+        if !matches!(prepared.class.sql_class(), SqlClass::Ddl) {
+            return Err(tool_error_code(
+                format!(
+                    "migration statement is classified {} ({:?}); only DDL is allowed",
+                    prepared.class.label(),
+                    prepared.class.sql_class()
+                ),
+                ToolErrorKind::Guard,
+            ));
+        }
+    }
+    let plan = config
+        .plans
+        .plan(&config.principal_id, &source.name, statements);
+    json_result(&serde_json::json!({
+        "ok": true,
+        "dry_run": true,
+        "plan_id": plan.id,
+        "statements": plan.statements,
+        "inverse_defined": plan.inverse.is_some(),
+        "inverse": plan.inverse,
+        "expires_unix": plan.expires_unix,
+        "source": source.name,
+    }))
+}
+
+/// Apply or roll back a stored migration plan.
+async fn apply_migration(
+    config: &Arc<AppConfig>,
+    params: SchemaMutateParams,
+    rollback: bool,
+) -> Result<CallToolResult, McpError> {
+    let plan_id = params
+        .plan_id
+        .as_deref()
+        .ok_or_else(|| tool_error("plan_id is required for apply_migration/rollback_migration"))?;
+    let source = config
+        .source(params.source.as_deref())
+        .map_err(|e| tool_error(e.to_string()))?;
+    let driver = source
+        .driver()
+        .await
+        .map_err(|e| tool_error_code(e.to_string(), ToolErrorKind::Execution))?;
+    let engine = driver.kind();
+    config.plans.gc();
+    let plan = config
+        .plans
+        .get(plan_id, &config.principal_id, &source.name)
+        .map_err(|e| tool_error_code(e.to_string(), ToolErrorKind::Validation))?;
+
+    let statements = if rollback {
+        if !plan.applied {
+            return Err(tool_error(
+                "migration plan has not been applied; there is nothing to roll back",
+            ));
+        }
+        plan.inverse
+            .clone()
+            .ok_or_else(|| tool_error("no inverse is defined for this plan; rollback is refused"))?
+    } else {
+        plan.statements.clone()
+    };
+
+    // Applying and rolling back a migration always needs an accepted approval.
+    let tool = if rollback {
+        "rollback_migration"
+    } else {
+        "apply_migration"
+    };
+    crate::approval::require_forced(
+        config,
+        tool,
+        &source.name,
+        &format!("{tool} plan {plan_id}"),
+        params.approval_id.as_deref(),
+        true,
+    )?;
+
+    let mut opts = exec_options(config);
+    opts.write_mode = WriteMode::AllowDdl;
+    let mut executed = Vec::new();
+    for statement in &statements {
+        validate_and_prepare(statement, &[], engine, WriteMode::AllowDdl, config.max_rows)
+            .map_err(|e| tool_error_code(e.to_string(), ToolErrorKind::Guard))?;
+        execute_query(&driver, statement, &[], &opts)
+            .await
+            .map_err(|e| {
+                let message = format!(
+                    "migration stopped after {} of {} statements: {}",
+                    executed.len(),
+                    statements.len(),
+                    e
+                );
+                tool_error_code(message, exec_error_kind(&e))
+            })?;
+        executed.push(statement.clone());
+    }
+    if rollback {
+        config
+            .plans
+            .mark_rolled_back(plan_id)
+            .map_err(|e| tool_error_code(e.to_string(), ToolErrorKind::Validation))?;
+    } else {
+        config
+            .plans
+            .mark_applied(plan_id)
+            .map_err(|e| tool_error_code(e.to_string(), ToolErrorKind::Validation))?;
+    }
+    json_result(&serde_json::json!({
+        "ok": true,
+        "dry_run": false,
+        "plan_id": plan_id,
+        "direction": if rollback { "rollback" } else { "apply" },
+        "executed": executed,
+        "source": source.name,
+    }))
 }
 
 pub async fn handle_schema_mutate(
@@ -287,6 +505,19 @@ pub async fn handle_schema_mutate(
         ));
     }
 
+    match params.action {
+        SchemaMutateAction::PlanMigration => {
+            return plan_migration(config, params).await;
+        }
+        SchemaMutateAction::ApplyMigration => {
+            return apply_migration(config, params, false).await;
+        }
+        SchemaMutateAction::RollbackMigration => {
+            return apply_migration(config, params, true).await;
+        }
+        _ => {}
+    }
+
     let source = config
         .source(params.source.as_deref())
         .map_err(|e| tool_error(e.to_string()))?;
@@ -297,6 +528,18 @@ pub async fn handle_schema_mutate(
     let engine = driver.kind();
 
     let sql = build_ddl_sql(&params, engine)?;
+
+    // R2-06: universal dry run — validate and report, execute nothing.
+    if params.dry_run.unwrap_or(false) {
+        let payload = serde_json::json!({
+            "ok": true,
+            "dry_run": true,
+            "sql": sql,
+            "action": params.action.label(),
+            "source": source.name,
+        });
+        return json_result(&payload);
+    }
 
     // R2-05: destructive DDL needs an accepted approval when the process
     // requires one. `confirm: true` is checked by build_ddl_sql and remains a
@@ -387,6 +630,11 @@ fn build_ddl_sql_unchecked(
             let qualified = qualify_table(params.schema.as_deref(), table, engine);
             Ok(format!("DROP TABLE {qualified}"))
         }
+        SchemaMutateAction::PlanMigration
+        | SchemaMutateAction::ApplyMigration
+        | SchemaMutateAction::RollbackMigration => Err(tool_error(
+            "migration actions are handled before SQL assembly",
+        )),
         SchemaMutateAction::TruncateTable => {
             require_confirm(params)?;
             let table = require_table(params)?;
@@ -626,6 +874,9 @@ mod tests {
             }),
             confirm: None,
             approval_id: None,
+            statements: None,
+            plan_id: None,
+            dry_run: None,
             source: None,
         };
         let sql = build_ddl_sql(&params, EngineKind::MySql).unwrap();
@@ -646,6 +897,9 @@ mod tests {
             }),
             confirm: None,
             approval_id: None,
+            statements: None,
+            plan_id: None,
+            dry_run: None,
             source: None,
         };
         let sql = build_ddl_sql(&params, EngineKind::Postgres).unwrap();
@@ -669,6 +923,9 @@ mod tests {
             }),
             confirm: None,
             approval_id: None,
+            statements: None,
+            plan_id: None,
+            dry_run: None,
             source: None,
         };
         assert!(build_ddl_sql(&params, EngineKind::Sqlite).is_err());
@@ -691,6 +948,9 @@ mod tests {
             }),
             confirm: Some(true),
             approval_id: None,
+            statements: None,
+            plan_id: None,
+            dry_run: None,
             source: None,
         }
     }

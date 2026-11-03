@@ -49,7 +49,20 @@ pub fn require(
     summary: &str,
     approval_id: Option<&str>,
 ) -> Result<(), McpError> {
-    if !config.require_approval {
+    require_forced(config, tool, source, summary, approval_id, false)
+}
+
+/// Like [`require`], but `force` demands an approval even when the process
+/// flag is off (migration apply always needs one, per the V2 contract).
+pub fn require_forced(
+    config: &Arc<AppConfig>,
+    tool: &str,
+    source: &str,
+    summary: &str,
+    approval_id: Option<&str>,
+    force: bool,
+) -> Result<(), McpError> {
+    if !config.require_approval && !force {
         return Ok(());
     }
     let queue = &config.approvals;

@@ -75,6 +75,13 @@ step-by-step mapping is in
   `cursor_expired` / `cursor_invalid` / `cursor_*` codes. Cursor mode requires
   a single-table SELECT ordered by one unique column that is also selected;
   other first-page requests keep the legacy offset behaviour.
+- **Migration plans and universal dry run.** `schema_mutate` gained
+  `plan_migration`, `apply_migration` and `rollback_migration`: plans validate
+  through the guard, derive an inverse only where one is exact, live for one
+  hour, and never execute at plan time. Apply requires `plan_id` plus an
+  accepted approval; rollback requires an applied plan with a defined inverse.
+  `dry_run: true` on any DDL action or on `execute_sql` validates and reports
+  the prepared statement without executing it or requiring an approval.
 - **Destructive-DDL approvals.** With `--require-approval`, drop/truncate/
   drop-column actions (tool wrappers and raw `execute_sql`) return
   `approval_required` with a single-use id that expires after 15 minutes.

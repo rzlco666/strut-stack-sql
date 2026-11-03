@@ -67,6 +67,7 @@ async fn config_with_deny(deny_columns: Vec<String>) -> (Arc<AppConfig>, Arc<dyn
         policy: policy(WriteMode::AllowDdl),
         require_approval: false,
         approvals: std::sync::Arc::new(strut_stack_sql::core::approvals::ApprovalQueue::new()),
+        plans: std::sync::Arc::new(strut_sql_core::migrations::PlanStore::new()),
         tables: strut_stack_sql::core::auth::TablePolicy::default(),
         ephemeral: false,
         hide_endpoints: None,

@@ -226,7 +226,7 @@ DDL tools appear **only** when `--full-tools` **and** `--allow-ddl` (hidden in r
 
 | Tool | Purpose |
 |------|---------|
-| `schema_mutate` | Unified DDL (`action`: create_table, drop_table, …) |
+| `schema_mutate` | Unified DDL (`action`: create_table, drop_table, …) plus `plan_migration` / `apply_migration` / `rollback_migration` |
 | `create_table` | Alias — `ddl` CREATE TABLE string |
 | `drop_table` | Alias — needs `confirm: true` |
 | `add_column` | Alias — `table` + `column` |
@@ -235,6 +235,36 @@ DDL tools appear **only** when `--full-tools` **and** `--allow-ddl` (hidden in r
 | `truncate_table` | Alias — needs `confirm: true` |
 
 Destructive ops (`drop_*`, `truncate_table`) require `"confirm": true`. Prefer `search_objects` in default mode to save tokens.
+
+### Migrations and dry run (`schema_mutate`)
+
+`schema_mutate` also plans and applies multi-statement migrations without
+adding tools to the surface:
+
+```json
+{ "action": "plan_migration",
+  "statements": ["CREATE TABLE audit (id INT)", "ALTER TABLE audit ADD COLUMN note TEXT"] }
+{ "action": "apply_migration", "plan_id": "pln_…", "approval_id": "apr_…" }
+{ "action": "rollback_migration", "plan_id": "pln_…", "approval_id": "apr_…" }
+```
+
+- **plan** validates every statement as DDL (the guard runs), derives an
+  inverse where one is exact (`CREATE TABLE` → `DROP TABLE`,
+  `ALTER TABLE … ADD COLUMN` → `DROP COLUMN`), stores an in-memory plan for
+  one hour and executes nothing. It returns `plan_id`, `inverse_defined`,
+  `inverse` and `expires_unix`.
+- **apply** requires `plan_id` and an accepted `approval_id` — always, even
+  when the process-level approval flag is off. Statements run in order; a
+  failure reports how many statements already ran and stops (no implicit
+  rollback).
+- **rollback** is only possible for a plan that was applied and has a derived
+  inverse; otherwise it is refused with `no inverse is defined` / `nothing to
+  roll back`.
+- **dry run is universal**: `dry_run: true` on any DDL action (including the
+  alias tools) or on `execute_sql` validates through the guard and returns the
+  prepared SQL, the classification and the limit decisions, executing nothing
+  and requiring no approval. A statement the guard rejects (for example a
+  write in read-only mode) is still rejected in a dry run.
 
 ## Supported SQL surface
 

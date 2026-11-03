@@ -87,6 +87,7 @@ async fn sqlite_config(write_mode: WriteMode) -> AppConfig {
         deny_columns: vec![],
         require_approval: false,
         approvals: std::sync::Arc::new(strut_stack_sql::core::approvals::ApprovalQueue::new()),
+        plans: std::sync::Arc::new(strut_sql_core::migrations::PlanStore::new()),
         tables: strut_stack_sql::core::auth::TablePolicy::default(),
         allow_explain_analyze: false,
         principal_id: "local".into(),
@@ -151,6 +152,7 @@ async fn seed_users(config: &Arc<AppConfig>) {
             format: None,
             summary: None,
             approval_id: None,
+            dry_run: None,
         },
     )
     .await;
@@ -167,6 +169,7 @@ async fn seed_users(config: &Arc<AppConfig>) {
             format: None,
             summary: None,
             approval_id: None,
+            dry_run: None,
         },
     )
     .await;
@@ -212,6 +215,7 @@ async fn guard_blocks_dml_in_readonly() {
             format: None,
             summary: None,
             approval_id: None,
+            dry_run: None,
         },
     )
     .await;
@@ -234,6 +238,7 @@ async fn guard_blocks_ddl_in_readonly() {
             format: None,
             summary: None,
             approval_id: None,
+            dry_run: None,
         },
     )
     .await;
@@ -256,6 +261,7 @@ async fn guard_blocks_transaction_control() {
             format: None,
             summary: None,
             approval_id: None,
+            dry_run: None,
         },
     )
     .await;
@@ -278,6 +284,7 @@ async fn guard_blocks_multi_statement() {
             format: None,
             summary: None,
             approval_id: None,
+            dry_run: None,
         },
     )
     .await;
@@ -300,6 +307,7 @@ async fn guard_blocks_empty_query() {
             format: None,
             summary: None,
             approval_id: None,
+            dry_run: None,
         },
     )
     .await;
@@ -322,6 +330,7 @@ async fn guard_blocks_grant() {
             format: None,
             summary: None,
             approval_id: None,
+            dry_run: None,
         },
     )
     .await;
@@ -347,6 +356,7 @@ async fn params_basic_select() {
             format: None,
             summary: None,
             approval_id: None,
+            dry_run: None,
         },
     )
     .await;
@@ -372,6 +382,7 @@ async fn params_unicode_and_emoji() {
             format: None,
             summary: None,
             approval_id: None,
+            dry_run: None,
         },
     )
     .await;
@@ -388,6 +399,7 @@ async fn params_unicode_and_emoji() {
             format: None,
             summary: None,
             approval_id: None,
+            dry_run: None,
         },
     )
     .await;
@@ -410,6 +422,7 @@ async fn params_null_value() {
             format: None,
             summary: None,
             approval_id: None,
+            dry_run: None,
         },
     )
     .await;
@@ -435,6 +448,7 @@ async fn params_missing_placeholder_rejected() {
             format: None,
             summary: None,
             approval_id: None,
+            dry_run: None,
         },
     )
     .await;
@@ -457,6 +471,7 @@ async fn params_extra_rejected() {
             format: None,
             summary: None,
             approval_id: None,
+            dry_run: None,
         },
     )
     .await;
@@ -483,6 +498,7 @@ async fn injection_param_treated_as_data() {
             format: None,
             summary: None,
             approval_id: None,
+            dry_run: None,
         },
     )
     .await;
@@ -501,6 +517,7 @@ async fn injection_param_treated_as_data() {
             format: None,
             summary: None,
             approval_id: None,
+            dry_run: None,
         },
     )
     .await;
@@ -524,6 +541,7 @@ async fn injection_union_in_param_is_literal() {
             format: None,
             summary: None,
             approval_id: None,
+            dry_run: None,
         },
     )
     .await;
@@ -548,6 +566,7 @@ async fn injection_or_in_param_is_literal() {
             format: None,
             summary: None,
             approval_id: None,
+            dry_run: None,
         },
     )
     .await;
@@ -576,6 +595,7 @@ async fn types_large_int_and_float() {
             format: None,
             summary: None,
             approval_id: None,
+            dry_run: None,
         },
     )
     .await;
@@ -600,6 +620,7 @@ async fn count_serializes_as_number_not_bool() {
             format: None,
             summary: None,
             approval_id: None,
+            dry_run: None,
         },
     )
     .await;
@@ -627,6 +648,7 @@ async fn batch_legacy_strings() {
             format: None,
             summary: None,
             approval_id: None,
+            dry_run: None,
         },
     )
     .await;
@@ -653,6 +675,7 @@ async fn batch_parameterized() {
             format: None,
             summary: None,
             approval_id: None,
+            dry_run: None,
         },
     )
     .await;
@@ -678,6 +701,7 @@ async fn batch_mixed_valid_and_invalid() {
             format: None,
             summary: None,
             approval_id: None,
+            dry_run: None,
         },
     )
     .await;
@@ -707,6 +731,7 @@ async fn pagination_offset_and_size() {
             format: None,
             summary: None,
             approval_id: None,
+            dry_run: None,
         },
     )
     .await;
@@ -724,6 +749,7 @@ async fn pagination_offset_and_size() {
                 format: None,
                 summary: None,
                 approval_id: None,
+                dry_run: None,
             },
         )
         .await;
@@ -741,6 +767,7 @@ async fn pagination_offset_and_size() {
             format: None,
             summary: None,
             approval_id: None,
+            dry_run: None,
         },
     )
     .await;
@@ -760,6 +787,7 @@ async fn pagination_offset_and_size() {
             format: None,
             summary: None,
             approval_id: None,
+            dry_run: None,
         },
     )
     .await;
@@ -798,6 +826,7 @@ async fn ddl_through_execute_sql_invalidates_schema_cache() {
             format: None,
             summary: None,
             approval_id: None,
+            dry_run: None,
         },
     )
     .await;
@@ -819,6 +848,7 @@ async fn ddl_through_execute_sql_invalidates_schema_cache() {
             format: None,
             summary: None,
             approval_id: None,
+            dry_run: None,
         },
     )
     .await;
@@ -903,6 +933,7 @@ async fn postgres_config() -> Option<AppConfig> {
         deny_columns: vec![],
         require_approval: false,
         approvals: std::sync::Arc::new(strut_stack_sql::core::approvals::ApprovalQueue::new()),
+        plans: std::sync::Arc::new(strut_sql_core::migrations::PlanStore::new()),
         tables: strut_stack_sql::core::auth::TablePolicy::default(),
         allow_explain_analyze: false,
         principal_id: "local".into(),
@@ -939,6 +970,7 @@ async fn postgres_parameterized_select() {
             format: None,
             summary: None,
             approval_id: None,
+            dry_run: None,
         },
     )
     .await;
@@ -1007,6 +1039,7 @@ async fn mysql_config() -> Option<AppConfig> {
         deny_columns: vec![],
         require_approval: false,
         approvals: std::sync::Arc::new(strut_stack_sql::core::approvals::ApprovalQueue::new()),
+        plans: std::sync::Arc::new(strut_sql_core::migrations::PlanStore::new()),
         tables: strut_stack_sql::core::auth::TablePolicy::default(),
         allow_explain_analyze: false,
         principal_id: "local".into(),
@@ -1051,6 +1084,7 @@ async fn mysql_show_processlist_allowed() {
             format: None,
             summary: None,
             approval_id: None,
+            dry_run: None,
         },
     )
     .await;
@@ -1075,6 +1109,7 @@ async fn mysql_count_serializes_as_number() {
             format: None,
             summary: None,
             approval_id: None,
+            dry_run: None,
         },
     )
     .await;
@@ -1657,13 +1692,21 @@ async fn principal_cannot_reach_a_source_it_was_not_granted() {
     force_columnar_test_format();
     let driver_a = SqliteDriver::from_connection_string_with_options(
         "sqlite::memory:",
-        &ConnectOptions { pool_size: 1, read_only: false, ..ConnectOptions::default() },
+        &ConnectOptions {
+            pool_size: 1,
+            read_only: false,
+            ..ConnectOptions::default()
+        },
     )
     .await
     .expect("sqlite driver a");
     let driver_b = SqliteDriver::from_connection_string_with_options(
         "sqlite::memory:",
-        &ConnectOptions { pool_size: 1, read_only: false, ..ConnectOptions::default() },
+        &ConnectOptions {
+            pool_size: 1,
+            read_only: false,
+            ..ConnectOptions::default()
+        },
     )
     .await
     .expect("sqlite driver b");
@@ -1707,8 +1750,18 @@ async fn principal_cannot_reach_a_source_it_was_not_granted() {
     config.default_source = "a".into();
     config.full_tools = true;
     config.http_tokens = vec![
-        HttpToken { name: "pa".into(), token: "pa-secret".into(), mode: WriteMode::ReadOnly, sources: vec!["a".into()] },
-        HttpToken { name: "pb".into(), token: "pb-secret".into(), mode: WriteMode::ReadOnly, sources: vec!["b".into()] },
+        HttpToken {
+            name: "pa".into(),
+            token: "pa-secret".into(),
+            mode: WriteMode::ReadOnly,
+            sources: vec!["a".into()],
+        },
+        HttpToken {
+            name: "pb".into(),
+            token: "pb-secret".into(),
+            mode: WriteMode::ReadOnly,
+            sources: vec!["b".into()],
+        },
     ];
     config.policy = test_policy(WriteMode::ReadOnly, true, &config.http_tokens);
     let (app, _ct) = build_http_router(config);
@@ -1726,22 +1779,38 @@ async fn principal_cannot_reach_a_source_it_was_not_granted() {
 
     // Direct access to the other source is denied, with no data or URL leak.
     for (tool, args) in [
-        ("execute_sql", json!({ "sql": "SELECT v FROM secrets_b", "source": "b" })),
+        (
+            "execute_sql",
+            json!({ "sql": "SELECT v FROM secrets_b", "source": "b" }),
+        ),
         (
             "execute_sql",
             json!({ "queries": ["SELECT v FROM secrets_b"], "source": "b" }),
         ),
-        ("search_objects", json!({ "object_type": "table", "keyword": "secrets_b", "source": "b" })),
-        ("analyze_query_performance", json!({ "sql": "SELECT v FROM secrets_b", "source": "b" })),
+        (
+            "search_objects",
+            json!({ "object_type": "table", "keyword": "secrets_b", "source": "b" }),
+        ),
+        (
+            "analyze_query_performance",
+            json!({ "sql": "SELECT v FROM secrets_b", "source": "b" }),
+        ),
     ] {
         let (status, body) = mcp_call(app.clone(), Some("pa-secret"), tool, args).await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "{tool} reached source b: {body}");
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "{tool} reached source b: {body}"
+        );
         assert!(
             body.contains("authorization denied") || body.contains("not allowed to use source"),
             "{tool}: {body}"
         );
         assert!(!body.contains("beta-secret"), "{tool} leaked rows: {body}");
-        assert!(!body.contains("sqlite://b"), "{tool} leaked source URL: {body}");
+        assert!(
+            !body.contains("sqlite://b"),
+            "{tool} leaked source URL: {body}"
+        );
     }
 
     // The inverse direction works: principal b reads b explicitly; the default
@@ -1762,7 +1831,11 @@ async fn principal_cannot_reach_a_source_it_was_not_granted() {
         json!({ "sql": "SELECT v FROM secrets_a" }),
     )
     .await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "default source leaked: {body}");
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "default source leaked: {body}"
+    );
     assert!(!body.contains("alpha-secret"), "{body}");
     let (status, body) = mcp_call(
         app,

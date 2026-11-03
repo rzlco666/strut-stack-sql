@@ -66,6 +66,7 @@ async fn config(require_approval: bool) -> (Arc<AppConfig>, Arc<dyn EngineDriver
         policy: Policy::new(Tier::Ddl, true, false).with_local_default(),
         require_approval,
         approvals: std::sync::Arc::new(strut_stack_sql::core::approvals::ApprovalQueue::new()),
+        plans: std::sync::Arc::new(strut_sql_core::migrations::PlanStore::new()),
         tables: Default::default(),
         ephemeral: false,
         hide_endpoints: None,
@@ -114,6 +115,9 @@ fn drop_params(confirm: bool, approval_id: Option<String>) -> DropTableParams {
         schema: None,
         confirm: Some(confirm),
         approval_id,
+        statements: None,
+        plan_id: None,
+        dry_run: None,
         source: None,
     }
 }

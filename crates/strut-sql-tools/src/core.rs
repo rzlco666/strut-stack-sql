@@ -10,7 +10,9 @@ use strut_sql_core::config::AppConfig;
 use strut_sql_core::redact::redact_url;
 use strut_sql_driver_api::EngineKind;
 use strut_sql_format::{format_columnar, resolve_result_format, to_json_text, ResultFormat};
-use strut_sql_guard::{classify_sql, keyset_shape, SqlClass};
+use strut_sql_guard::{
+    classify_sql, keyset_shape, validate_and_prepare_with_options, PrepareOptions, SqlClass,
+};
 
 use crate::exec::{
     execute_batch, execute_keyset_page, execute_query, BatchLimits, BatchResult, ExecError,
@@ -90,6 +92,9 @@ pub struct ExecuteSqlParams {
     /// Accepted approval id for destructive DDL (R2-05).
     #[serde(default)]
     pub approval_id: Option<String>,
+    /// Validate and report the prepared statement without executing (R2-06).
+    #[serde(default)]
+    pub dry_run: Option<bool>,
 }
 
 /// Compact machine schema for the summary mode. The full field list lives in
@@ -358,6 +363,41 @@ pub async fn handle_execute_sql(
         .driver()
         .await
         .map_err(|e| tool_error_code(e.to_string(), ToolErrorKind::Execution))?;
+    // R2-06: dry run validates through the same guard and returns the prepared
+    // statement, executing nothing (no pool checkout for writes happens here).
+    if params.dry_run.unwrap_or(false) {
+        let prepared = validate_and_prepare_with_options(
+            &sql,
+            &query_params,
+            driver.kind(),
+            config.write_mode,
+            config.max_rows,
+            PrepareOptions {
+                page_offset: 0,
+                page_size: None,
+                table_policy: if config.tables.is_empty() {
+                    None
+                } else {
+                    Some(config.tables.clone())
+                },
+            },
+        )
+        .map_err(|e| tool_error_code(e.to_string(), ToolErrorKind::Guard))?;
+        let payload = serde_json::json!({
+            "ok": true,
+            "dry_run": true,
+            "source": source.name,
+            "class": prepared.class.label(),
+            "sql": prepared.sql,
+            "param_count": prepared.params.len(),
+            "limit_injected": prepared.limit_injected,
+            "limit_clamped": prepared.limit_clamped,
+        });
+        return Ok(CallToolResult::success(vec![ContentBlock::text(
+            to_json_text(&payload),
+        )]));
+    }
+
     // R2-05: raw destructive DDL needs an accepted approval too; the tool
     // wrappers are not the only way to reach a DROP.
     if config.require_approval {

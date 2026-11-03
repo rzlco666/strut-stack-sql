@@ -77,6 +77,7 @@ async fn config_with(tables: TablePolicy) -> (Arc<AppConfig>, Arc<dyn EngineDriv
         policy: policy_with(tables.clone()),
         require_approval: false,
         approvals: std::sync::Arc::new(strut_stack_sql::core::approvals::ApprovalQueue::new()),
+        plans: std::sync::Arc::new(strut_sql_core::migrations::PlanStore::new()),
         tables,
         ephemeral: false,
         hide_endpoints: None,
@@ -126,6 +127,7 @@ fn exec_params(sql: &str) -> ExecuteSqlParams {
         format: None,
         summary: None,
         approval_id: None,
+        dry_run: None,
     }
 }
 

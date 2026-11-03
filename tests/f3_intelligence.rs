@@ -78,6 +78,7 @@ async fn test_config(
         deny_columns: vec![],
         require_approval: false,
         approvals: std::sync::Arc::new(strut_stack_sql::core::approvals::ApprovalQueue::new()),
+        plans: std::sync::Arc::new(strut_sql_core::migrations::PlanStore::new()),
         tables: strut_stack_sql::core::auth::TablePolicy::default(),
         allow_explain_analyze: false,
         principal_id: name.into(),
@@ -122,6 +123,7 @@ async fn exec(config: &Arc<AppConfig>, name: &str, sql: &str, params: Vec<Value>
                 format: None,
                 summary: None,
                 approval_id: None,
+                dry_run: None,
             },
         )
         .await
@@ -493,6 +495,7 @@ async fn error_categories_are_distinct_and_retryable_is_explicit() {
             format: None,
             summary: None,
             approval_id: None,
+            dry_run: None,
         },
     )
     .await
@@ -513,6 +516,7 @@ async fn error_categories_are_distinct_and_retryable_is_explicit() {
             format: None,
             summary: None,
             approval_id: None,
+            dry_run: None,
         },
     )
     .await

@@ -578,6 +578,8 @@ pub struct AppConfig {
     pub require_approval: bool,
     /// Shared approval queue (in-memory, 15-minute TTL).
     pub approvals: std::sync::Arc<crate::approvals::ApprovalQueue>,
+    /// Shared migration plan store (in-memory, 1-hour TTL).
+    pub plans: std::sync::Arc<crate::migrations::PlanStore>,
     /// Effective table allow/deny, row-filter and mask rules (R2-04). Empty
     /// for the unscoped process view; populated from the grant by
     /// [`AppConfig::scoped_for`].
@@ -622,6 +624,7 @@ impl AppConfig {
         scoped.tables = authz.tables.clone();
         // The queue is process-shared: scoped views must see the same entries.
         scoped.approvals = self.approvals.clone();
+        scoped.plans = self.plans.clone();
         if let Some(max_rows) = authz.max_rows {
             scoped.max_rows = scoped.max_rows.min(max_rows);
         }
@@ -1065,6 +1068,7 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
             require_approval: cli.require_approval
                 || env_truthy("STRUT_STACK_SQL_REQUIRE_APPROVAL"),
             approvals: std::sync::Arc::new(crate::approvals::ApprovalQueue::new()),
+            plans: std::sync::Arc::new(crate::migrations::PlanStore::new()),
             tables: crate::auth::TablePolicy::default(),
             ephemeral: false,
             hide_endpoints,
@@ -1176,6 +1180,7 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
         policy,
         require_approval: cli.require_approval || env_truthy("STRUT_STACK_SQL_REQUIRE_APPROVAL"),
         approvals: std::sync::Arc::new(crate::approvals::ApprovalQueue::new()),
+        plans: std::sync::Arc::new(crate::migrations::PlanStore::new()),
         tables: crate::auth::TablePolicy::default(),
         ephemeral,
         hide_endpoints,
