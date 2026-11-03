@@ -80,6 +80,8 @@ pub struct ExecOptions {
     pub source: String,
     /// Include the prepared SQL text in the trace event (opt-in).
     pub trace_sql: bool,
+    /// Per-principal concurrency limiter (R2-08); `None` disables it.
+    pub limiter: Option<Arc<strut_sql_core::limits::PrincipalLimiter>>,
 }
 
 /// Hard governance limits for one `execute_batch` call (PRD-F2-10).
@@ -99,6 +101,8 @@ pub async fn execute_query(
     opts: &ExecOptions,
 ) -> Result<QueryResult, ExecError> {
     let engine = driver.kind();
+    // R2-08: one principal cannot hold more than its share of the pool.
+    let _permit = acquire_principal_slot(opts)?;
     let prepared = validate_and_prepare_with_options(
         sql,
         params,
@@ -265,6 +269,7 @@ pub async fn execute_keyset_page(
     page_size: u32,
 ) -> Result<KeysetPage, ExecError> {
     let engine = driver.kind();
+    let _permit = acquire_principal_slot(opts)?;
     let (prepared, shape) = validate_and_prepare_keyset(
         sql,
         params,
@@ -322,6 +327,21 @@ pub async fn execute_keyset_page(
         descending: shape.descending,
         page_size: page,
     })
+}
+
+fn acquire_principal_slot(
+    opts: &ExecOptions,
+) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, ExecError> {
+    let Some(limiter) = &opts.limiter else {
+        return Ok(None);
+    };
+    match limiter.try_acquire(&opts.principal) {
+        Some(permit) => Ok(Some(permit)),
+        None if limiter.per_principal() == 0 => Ok(None),
+        None => Err(ExecError::Other(
+            "this principal already has its maximum concurrent queries; retry shortly".into(),
+        )),
+    }
 }
 
 pub async fn execute_batch(
@@ -779,6 +799,7 @@ mod tests {
             principal: String::new(),
             source: String::new(),
             trace_sql: false,
+            limiter: None,
         }
     }
 

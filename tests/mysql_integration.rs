@@ -50,6 +50,7 @@ fn exec_opts() -> ExecOptions {
         principal: String::new(),
         source: String::new(),
         trace_sql: false,
+        limiter: None,
     }
 }
 

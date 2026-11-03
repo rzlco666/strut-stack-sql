@@ -17,12 +17,19 @@ pub const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 2;
 pub const TCP_PREFLIGHT_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Lazily-constructed, shared driver for one configured source.
+/// Consecutive connect failures before the breaker opens.
+pub const BREAKER_FAILURE_THRESHOLD: u32 = 5;
+/// How long the breaker stays open before one probe is allowed.
+pub const BREAKER_OPEN: Duration = Duration::from_secs(30);
+
 #[derive(Clone)]
 pub struct LazyDriver {
     url: String,
     engine: EngineKind,
     options: ConnectOptions,
     inner: Arc<Mutex<Option<Arc<dyn EngineDriver>>>>,
+    failures: Arc<std::sync::atomic::AtomicU32>,
+    open_until: Arc<Mutex<Option<std::time::Instant>>>,
 }
 
 impl std::fmt::Debug for LazyDriver {
@@ -53,6 +60,8 @@ impl LazyDriver {
                 statement_timeout,
             },
             inner: Arc::new(Mutex::new(None)),
+            failures: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            open_until: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -73,19 +82,52 @@ impl LazyDriver {
                 statement_timeout: Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECS.max(10)),
             },
             inner: Arc::new(Mutex::new(Some(driver))),
+            failures: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            open_until: Arc::new(Mutex::new(None)),
         }
     }
 
     pub async fn get(&self) -> Result<Arc<dyn EngineDriver>> {
+        // Circuit breaker: five consecutive connect failures open it for 30 s.
+        // After that one probe is allowed (half-open); a failed probe reopens.
+        if let Some(until) = *self.open_until.lock().await {
+            let now = std::time::Instant::now();
+            if now < until {
+                let remaining = (until - now).as_secs().max(1);
+                anyhow::bail!(
+                    "source {} is failing repeatedly; fast-fail for {remaining}s (circuit breaker)",
+                    redact_url(&self.url)
+                );
+            }
+            // Half-open: clear the window and let exactly this attempt probe.
+            *self.open_until.lock().await = None;
+            self.failures.store(0, std::sync::atomic::Ordering::Relaxed);
+        }
         let mut guard = self.inner.lock().await;
         if let Some(driver) = guard.as_ref() {
             return Ok(driver.clone());
         }
-        let driver = connect_driver(&self.url, self.engine, &self.options)
-            .await
-            .map_err(|e| anyhow::anyhow!("cannot connect to {}: {}", redact_url(&self.url), e))?;
-        *guard = Some(driver.clone());
-        Ok(driver)
+        match connect_driver(&self.url, self.engine, &self.options).await {
+            Ok(driver) => {
+                self.failures.store(0, std::sync::atomic::Ordering::Relaxed);
+                *guard = Some(driver.clone());
+                Ok(driver)
+            }
+            Err(e) => {
+                let failures = self
+                    .failures
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    + 1;
+                if failures >= BREAKER_FAILURE_THRESHOLD {
+                    *self.open_until.lock().await = Some(std::time::Instant::now() + BREAKER_OPEN);
+                }
+                Err(anyhow::anyhow!(
+                    "cannot connect to {}: {}",
+                    redact_url(&self.url),
+                    e
+                ))
+            }
+        }
     }
 
     pub async fn ping(&self) -> Result<()> {

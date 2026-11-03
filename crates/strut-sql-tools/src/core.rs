@@ -145,6 +145,11 @@ pub fn exec_options(config: &AppConfig) -> ExecOptions {
         principal: principal_tag(&config.principal_id),
         source: String::new(),
         trace_sql: config.trace_sql,
+        limiter: if config.limiter.per_principal() == 0 {
+            None
+        } else {
+            Some(config.limiter.clone())
+        },
     }
 }
 

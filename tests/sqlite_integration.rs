@@ -41,6 +41,7 @@ fn exec_opts(write_mode: WriteMode) -> ExecOptions {
         principal: String::new(),
         source: String::new(),
         trace_sql: false,
+        limiter: None,
     }
 }
 

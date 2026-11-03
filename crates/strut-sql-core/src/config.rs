@@ -299,6 +299,10 @@ pub struct Cli {
     #[arg(long)]
     pub allow_unauthenticated_http: bool,
 
+    /// Directories or files a SQLite source may live under (repeatable).
+    #[arg(long, global = true, value_delimiter = ',')]
+    pub sqlite_allowlist: Vec<PathBuf>,
+
     /// Include the prepared SQL text in trace/log events (off by default;
     /// ignored when the grant carries table rules or row filters).
     #[arg(long, global = true)]
@@ -609,6 +613,10 @@ pub struct AppConfig {
     /// Trace events may carry the prepared SQL text (R2-07). Never enabled
     /// when the grant narrows tables: the statement may name them.
     pub trace_sql: bool,
+    /// SQLite sources must live under one of these paths when non-empty.
+    pub sqlite_allowlist: Vec<PathBuf>,
+    /// Per-principal query concurrency limit (R2-08); 0 disables it.
+    pub limiter: std::sync::Arc<crate::limits::PrincipalLimiter>,
     /// Shared approval queue (in-memory, 15-minute TTL).
     pub approvals: std::sync::Arc<crate::approvals::ApprovalQueue>,
     /// Shared migration plan store (in-memory, 1-hour TTL).
@@ -655,6 +663,7 @@ impl AppConfig {
         scoped.principal_id = authz.principal_id.clone();
         scoped.query_history = authz.query_history;
         scoped.tables = authz.tables.clone();
+        scoped.limiter = self.limiter.clone();
         if !scoped.tables.is_empty() {
             scoped.trace_sql = false;
         }
@@ -978,6 +987,81 @@ fn build_policy(
     Ok(policy.with_local_default())
 }
 
+/// Extract the filesystem path from a sqlite URL. `None` for in-memory
+/// databases (which are always allowed).
+pub fn sqlite_path(url: &str) -> Option<PathBuf> {
+    let rest = url
+        .strip_prefix("sqlite://")
+        .or_else(|| url.strip_prefix("sqlite:"))?;
+    let rest = rest.split('?').next().unwrap_or(rest);
+    if rest.is_empty() || rest == ":memory:" || rest == "memory:" {
+        return None;
+    }
+    Some(PathBuf::from(rest))
+}
+
+/// Reject SQLite sources outside the configured allowlist (R2-08, fail closed).
+fn enforce_sqlite_allowlist(
+    sources: &std::collections::HashMap<String, ResolvedSource>,
+    allowlist: &[PathBuf],
+) -> anyhow::Result<()> {
+    if allowlist.is_empty() {
+        return Ok(());
+    }
+    let mut names: Vec<&String> = sources.keys().collect();
+    names.sort();
+    for name in names {
+        let source = &sources[name];
+        if !matches!(source.engine, EngineKind::Sqlite) {
+            continue;
+        }
+        let Some(path) = sqlite_path(&source.url) else {
+            continue; // in-memory
+        };
+        let absolute = if path.is_absolute() {
+            path.clone()
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(&path))
+                .unwrap_or(path.clone())
+        };
+        let resolved = absolute
+            .canonicalize()
+            .or_else(|_| -> std::io::Result<PathBuf> {
+                let parent = absolute
+                    .parent()
+                    .ok_or_else(|| std::io::Error::other("no parent directory"))?
+                    .canonicalize()?;
+                Ok(parent.join(absolute.file_name().unwrap_or_default()))
+            })
+            .unwrap_or(absolute);
+        let allowed = allowlist.iter().any(|root| {
+            let root = if root.is_absolute() {
+                root.clone()
+            } else {
+                std::env::current_dir()
+                    .map(|cwd| cwd.join(root))
+                    .unwrap_or_else(|_| root.clone())
+            };
+            let root = root.canonicalize().unwrap_or(root);
+            resolved == root || resolved.starts_with(&root)
+        });
+        if !allowed {
+            anyhow::bail!(
+                "SQLite source '{name}' points outside the allowlist: {} (allowed: {}); \
+                 pass --sqlite-allowlist to widen it",
+                resolved.display(),
+                allowlist
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
+    Ok(())
+}
+
 pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
     validate_cli_numbers(cli)?;
     let workspace = cli.workspace.clone();
@@ -1076,6 +1160,7 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
         )?;
         let mut policy = policy;
         policy.set_local_query_history(env_truthy("STRUT_STACK_SQL_QUERY_HISTORY"));
+        enforce_sqlite_allowlist(&sources, &cli.sqlite_allowlist)?;
         return Ok(AppConfig {
             write_mode,
             full_tools: cli.full_tools,
@@ -1102,6 +1187,10 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
             oauth,
             policy,
             trace_sql: cli.trace_sql,
+            sqlite_allowlist: cli.sqlite_allowlist.clone(),
+            limiter: std::sync::Arc::new(crate::limits::PrincipalLimiter::new(
+                cli.pool_size as usize,
+            )),
             require_approval: cli.require_approval
                 || env_truthy("STRUT_STACK_SQL_REQUIRE_APPROVAL"),
             approvals: std::sync::Arc::new(crate::approvals::ApprovalQueue::new()),
@@ -1190,6 +1279,7 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
     let mut policy = policy;
     policy.set_local_query_history(env_truthy("STRUT_STACK_SQL_QUERY_HISTORY"));
 
+    enforce_sqlite_allowlist(&sources, &cli.sqlite_allowlist)?;
     Ok(AppConfig {
         write_mode,
         full_tools: cli.full_tools,
@@ -1216,6 +1306,8 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
         oauth,
         policy,
         trace_sql: cli.trace_sql,
+        sqlite_allowlist: cli.sqlite_allowlist.clone(),
+        limiter: std::sync::Arc::new(crate::limits::PrincipalLimiter::new(cli.pool_size as usize)),
         require_approval: cli.require_approval || env_truthy("STRUT_STACK_SQL_REQUIRE_APPROVAL"),
         approvals: std::sync::Arc::new(crate::approvals::ApprovalQueue::new()),
         plans: std::sync::Arc::new(crate::migrations::PlanStore::new()),
@@ -1973,6 +2065,7 @@ max_rows = 7
             allow_unauthenticated_http: false,
             allow_grants: false,
             trace_sql: false,
+            sqlite_allowlist: Vec::new(),
             require_approval: false,
             allow_explain_analyze: false,
             http_rate_limit_per_minute: 600,

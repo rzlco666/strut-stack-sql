@@ -79,6 +79,8 @@ async fn config_with(tables: TablePolicy) -> (Arc<AppConfig>, Arc<dyn EngineDriv
         approvals: std::sync::Arc::new(strut_stack_sql::core::approvals::ApprovalQueue::new()),
         plans: std::sync::Arc::new(strut_sql_core::migrations::PlanStore::new()),
         trace_sql: false,
+        sqlite_allowlist: Vec::new(),
+        limiter: std::sync::Arc::new(strut_sql_core::limits::PrincipalLimiter::new(0)),
         tables,
         ephemeral: false,
         hide_endpoints: None,
@@ -101,6 +103,7 @@ fn opts() -> ExecOptions {
         principal: String::new(),
         source: String::new(),
         trace_sql: false,
+        limiter: None,
     }
 }
 

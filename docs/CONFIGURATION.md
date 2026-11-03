@@ -249,6 +249,24 @@ Rules:
   flag required by the DDL tools, is never recorded in the queue and never
   satisfies a pending approval.
 
+## Hardening
+
+- **SQLite allowlist.** `--sqlite-allowlist DIR[,DIR…]` (repeatable) constrains
+  every file-backed SQLite source to those directories. A source outside them
+  is rejected at startup, before any tool call; `sqlite::memory:` is always
+  allowed. Relative paths resolve against the working directory and symlinks
+  are canonicalized before the check. Default: no restriction.
+- **Per-source circuit breaker.** A source that fails to connect five times in
+  a row is fast-failed for 30 seconds; during that window tool calls return
+  `source … is failing repeatedly (circuit breaker)` without touching the
+  network. The first attempt after the window is a probe: success closes the
+  breaker, failure reopens it. Successes reset the counter.
+- **Per-principal query ceiling.** Each principal may hold at most
+  `--pool-size` concurrent queries on a source; beyond that, calls fail with a
+  retryable "maximum concurrent queries" error instead of queueing behind one
+  caller. HTTP callers additionally have the per-token request rate limit
+  (`--http-rate-limit-per-minute`, default 600).
+
 ## Maintenance commands
 
 ```bash

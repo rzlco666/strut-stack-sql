@@ -66,6 +66,8 @@ async fn config(require_approval: bool) -> (Arc<AppConfig>, Arc<dyn EngineDriver
         approvals: std::sync::Arc::new(strut_stack_sql::core::approvals::ApprovalQueue::new()),
         plans: std::sync::Arc::new(strut_stack_sql::core::migrations::PlanStore::new()),
         trace_sql: false,
+        sqlite_allowlist: Vec::new(),
+        limiter: std::sync::Arc::new(strut_sql_core::limits::PrincipalLimiter::new(0)),
         tables: Default::default(),
         ephemeral: false,
         hide_endpoints: None,
@@ -88,6 +90,7 @@ fn opts() -> ExecOptions {
         principal: String::new(),
         source: String::new(),
         trace_sql: false,
+        limiter: None,
     }
 }
 

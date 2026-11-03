@@ -331,6 +331,8 @@ mod http_oauth {
             approvals: std::sync::Arc::new(strut_sql_core::approvals::ApprovalQueue::new()),
             plans: std::sync::Arc::new(strut_sql_core::migrations::PlanStore::new()),
             trace_sql: false,
+            sqlite_allowlist: Vec::new(),
+            limiter: std::sync::Arc::new(strut_sql_core::limits::PrincipalLimiter::new(0)),
             tables: strut_sql_core::auth::TablePolicy::default(),
             ephemeral: false,
             hide_endpoints: None,

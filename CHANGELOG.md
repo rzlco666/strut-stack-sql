@@ -75,6 +75,12 @@ step-by-step mapping is in
   `cursor_expired` / `cursor_invalid` / `cursor_*` codes. Cursor mode requires
   a single-table SELECT ordered by one unique column that is also selected;
   other first-page requests keep the legacy offset behaviour.
+- **Hardening.** File-backed SQLite sources can be constrained to an allowlist
+  (`--sqlite-allowlist`), rejected at startup when outside it. A per-source
+  circuit breaker fast-fails for 30 s after five consecutive connect failures
+  and probes once before closing. A per-principal query ceiling (one principal
+  cannot hold more than `--pool-size` concurrent queries) complements the
+  existing per-token HTTP rate limit.
 - **Doctor and V1 migration CLI.** `strut-stack-sql doctor` validates the real
   configuration, connects to every source, reports degraded capabilities and
   exits `0/1/2/3` (ok / config error / connection failure / degraded).
