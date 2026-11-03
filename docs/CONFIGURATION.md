@@ -171,6 +171,39 @@ STRUT_STACK_SQL_OAUTH_AUDIENCE="https://mcp.example.com/mcp" \
   issuance.
 - Token material is never logged.
 
+## HTTP export (NDJSON / CSV)
+
+`POST /export` streams rows for bulk export without going through JSON-RPC.
+stdio stays paginated JSON; this endpoint exists only when `--http` is used.
+
+```bash
+curl -sS -X POST http://127.0.0.1:8080/export \
+  -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"sql":"SELECT id, email FROM users ORDER BY id","format":"ndjson"}'
+```
+
+| Field | Notes |
+|---|---|
+| `sql` | one read-only statement (same guard as `execute_sql`) |
+| `params` | optional bound values |
+| `source` | optional source name |
+| `format` | `ndjson` or `csv` |
+
+- Authentication and authorization are the same as `/mcp`: bearer token or
+  OAuth, then `Policy::authorize` for `execute_sql` at **read** tier on the
+  requested source. A caller without a grant gets `403 authorization_denied`.
+- The statement runs with a forced read-only write mode, so DML/DDL is denied
+  with `403 guard_denied` even on a DDL-tier token.
+- Rows are capped by `--max-rows`; the response is chunked so each chunk stays
+  within `--max-bytes` (`content-type: application/x-ndjson` or `text/csv`).
+- `--deny-columns` redaction applies to exported cells.
+- NDJSON: one JSON object per row. CSV: header row, RFC 4180 quoting, and
+  **NULL is written as an empty field**; the response carries
+  `x-meta-null-as-empty: true` so clients can tell that apart from a missing
+  header. `x-meta-rows` and `x-meta-columns` describe the stream.
+- The audit log records one `export` event per request (source, principal,
+  rows, columns, format) — never parameter values.
+
 The HTTP transport pins MCP spec **2025-06-18**. An unsupported
 `MCP-Protocol-Version` header is rejected with 400; an `initialize` body that
 requests an older/unknown version is answered with 2025-06-18. Browser-style

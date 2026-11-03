@@ -57,6 +57,7 @@ use strut_sql_tools::intel::{
     RelationshipGraphParams, SchemaContextParams, SuggestJoinsParams,
 };
 
+pub mod export;
 pub mod oauth;
 
 pub use oauth::{OAuthValidator, ProtectedResourceMetadata};
@@ -698,13 +699,13 @@ pub async fn run_stdio(config: AppConfig) -> Result<()> {
 
 #[derive(Clone)]
 pub struct HttpState {
-    config: Arc<AppConfig>,
+    pub(crate) config: Arc<AppConfig>,
     /// Present when OAuth is configured; served at
     /// `/.well-known/oauth-protected-resource`.
     protected_resource: Option<Arc<ProtectedResourceMetadata>>,
     /// Extra non-loopback origins allowed to call the MCP endpoint
     /// (`STRUT_STACK_SQL_ALLOWED_ORIGINS`, comma-separated).
-    allowed_origins: Arc<Vec<String>>,
+    pub(crate) allowed_origins: Arc<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -1265,10 +1266,20 @@ pub fn build_http_router_with_auth(
     let mcp_router = Router::new()
         .nest_service("/mcp", service)
         .layer(axum::middleware::from_fn_with_state(
-            auth_state,
+            auth_state.clone(),
             http_auth_middleware,
         ))
         .layer(axum::middleware::from_fn(mcp_protocol_version_middleware));
+
+    // /export authenticates exactly like /mcp (API keys and OAuth), then
+    // authorizes through the same Policy in its handler.
+    let export_router = Router::new()
+        .route("/export", axum::routing::post(export::export_handler))
+        .with_state(http_state.clone())
+        .layer(axum::middleware::from_fn_with_state(
+            auth_state.clone(),
+            http_auth_middleware,
+        ));
 
     let router = Router::new()
         .route("/livez", get(livez))
@@ -1284,6 +1295,7 @@ pub fn build_http_router_with_auth(
         )
         .with_state(http_state)
         .merge(mcp_router)
+        .merge(export_router)
         .layer(axum::middleware::from_fn_with_state(
             origin_state,
             validate_origin_middleware,

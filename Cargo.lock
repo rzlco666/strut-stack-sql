@@ -2636,6 +2636,7 @@ version = "2.0.0"
 dependencies = [
  "anyhow",
  "axum",
+ "futures-util",
  "jsonwebtoken",
  "reqwest",
  "rmcp",

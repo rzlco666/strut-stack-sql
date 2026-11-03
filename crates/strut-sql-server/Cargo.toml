@@ -14,6 +14,7 @@ strut-sql-guard = { path = "../strut-sql-guard" }
 strut-sql-tools = { path = "../strut-sql-tools" }
 anyhow = "1"
 axum = "0.8"
+futures-util = "0.3"
 rmcp = { version = "2", features = [
     "server",
     "macros",

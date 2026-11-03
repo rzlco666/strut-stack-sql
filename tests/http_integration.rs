@@ -1514,6 +1514,96 @@ async fn two_principals_get_different_invocation_results() {
     assert_ne!(rw_status, StatusCode::FORBIDDEN, "{rw_body}");
 }
 
+async fn post_export(app: axum::Router, token: Option<&str>, body: Value) -> (StatusCode, String) {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri("/export")
+        .header("content-type", "application/json");
+    if let Some(t) = token {
+        builder = builder.header("authorization", format!("Bearer {t}"));
+    }
+    let response = app
+        .oneshot(builder.body(Body::from(body.to_string())).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    (status, String::from_utf8_lossy(&bytes).to_string())
+}
+
+#[tokio::test]
+async fn export_streams_ndjson_and_csv_with_null_semantics() {
+    let config = sqlite_config_with_tokens(
+        WriteMode::AllowDdl,
+        vec![
+            test_token("reader", "reader-secret", WriteMode::ReadOnly),
+            test_token("writer", "writer-secret", WriteMode::AllowDdl),
+        ],
+    )
+    .await;
+    let (app, _ct) = build_http_router(config);
+    // Seed a row with a NULL column; export itself is exercised with the
+    // read-only token below.
+    let (status, body) = mcp_call(
+        app.clone(),
+        Some("writer-secret"),
+        "execute_sql",
+        json!({ "sql": "CREATE TABLE export_t (id INTEGER, name TEXT)" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = mcp_call(
+        app.clone(),
+        Some("writer-secret"),
+        "execute_sql",
+        json!({ "sql": "INSERT INTO export_t (id, name) VALUES (1, 'a'), (2, NULL)" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body) = post_export(
+        app.clone(),
+        Some("reader-secret"),
+        json!({ "sql": "SELECT id, name FROM export_t ORDER BY id", "format": "ndjson" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let lines: Vec<&str> = body.lines().collect();
+    assert_eq!(lines.len(), 2, "{body}");
+    assert_eq!(lines[0], r#"{"id":1,"name":"a"}"#);
+    assert_eq!(lines[1], r#"{"id":2,"name":null}"#);
+
+    let (status, body) = post_export(
+        app.clone(),
+        Some("reader-secret"),
+        json!({ "sql": "SELECT id, name FROM export_t ORDER BY id", "format": "csv" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, "id,name\n1,a\n2,\n", "NULL must be an empty CSV field: {body:?}");
+
+    // Writes are refused on the export path even at DDL process tier.
+    let (status, body) = post_export(
+        app.clone(),
+        Some("reader-secret"),
+        json!({ "sql": "DELETE FROM export_t", "format": "ndjson" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(body.contains("guard_denied"), "{body}");
+
+    // Wrong token never reaches the handler.
+    let (status, _body) = post_export(
+        app,
+        Some("nope"),
+        json!({ "sql": "SELECT 1", "format": "ndjson" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
 fn admin_policy(gate_open: bool) -> Policy {
     let mut policy = Policy::new(Tier::Ddl, true, gate_open);
     policy.add_grant(Grant::new("root", GrantSource::Any, Tier::Admin));

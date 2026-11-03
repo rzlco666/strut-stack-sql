@@ -75,6 +75,11 @@ step-by-step mapping is in
   `cursor_expired` / `cursor_invalid` / `cursor_*` codes. Cursor mode requires
   a single-table SELECT ordered by one unique column that is also selected;
   other first-page requests keep the legacy offset behaviour.
+- **HTTP export (NDJSON / CSV).** `POST /export` streams rows with the same
+  authentication and Policy authorization as `/mcp`, a forced read-only write
+  mode, `--max-rows`/`--max-bytes` caps, response chunks bounded by
+  `--max-bytes`, and deny-column redaction. CSV writes NULL as an empty field
+  and advertises `x-meta-null-as-empty: true`. stdio stays paginated JSON.
 - **Server-side summary mode.** `execute_sql({summary: …})` builds `count`,
   `sample` or `aggregate` (count/avg/sum/min/max, optional `group_by`) without
   accepting SQL from the caller. Identifiers are validated against the catalog

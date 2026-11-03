@@ -103,6 +103,7 @@ fail-soft per item unless `--fail-fast`.
 |---|---|---|
 | stdio | (default) | MCP over stdin/stdout; diagnostics and audit on stderr |
 | Streamable HTTP | `--http 127.0.0.1:8080` | `/mcp`, `/livez`, `/readyz`, OAuth resource metadata; sessions bound to a principal |
+| HTTP export | `POST /export` | NDJSON/CSV streaming; same auth and Policy as `/mcp`, forced read-only, chunked at `--max-bytes` |
 
 The server pins MCP specification **2025-06-18**. Older requested versions are
 answered with 2025-06-18; unsupported `MCP-Protocol-Version` headers are
