@@ -189,7 +189,7 @@ fn authorization_error(denial: &Denial) -> McpError {
 #[tool_router]
 impl McpSqlServer {
     #[tool(
-        description = "Search schemas, tables, columns, or indexes. Results are ranked exact > prefix > substring > comment; include_score opts into per-object scores."
+        description = "Search schemas, tables, columns, or indexes. Ranked exact > prefix > substring > comment; include_score adds scores."
     )]
     async fn search_objects(
         &self,
@@ -239,7 +239,7 @@ impl McpSqlServer {
     }
 
     #[tool(
-        description = "EXPLAIN advisor: normalized plan nodes + tiered issues + index advice. analyze:true runs EXPLAIN ANALYZE (opt-in, PostgreSQL/MySQL)."
+        description = "EXPLAIN advisor: normalized plan, tiered issues, index advice. analyze:true runs EXPLAIN ANALYZE (opt-in)."
     )]
     async fn analyze_query_performance(
         &self,
@@ -1370,6 +1370,16 @@ pub async fn run_http(config: AppConfig, addr: &str) -> Result<()> {
         "strut-stack-sql HTTP listening on http://{addr}/mcp (liveness: /livez, readiness: /readyz)"
     );
 
+    // Keep-alive MCP clients issue many small POSTs on one connection. Without
+    // TCP_NODELAY the kernel can hold a response segment waiting for a delayed
+    // ACK (~40 ms on Linux), which shows up as per-call latency; measured in
+    // the 2.0.0 benchmark harness (R1-04).
+    use axum::serve::ListenerExt;
+    let listener = listener.tap_io(|stream| {
+        if let Err(err) = stream.set_nodelay(true) {
+            tracing::debug!(error = %err, "failed to set TCP_NODELAY on accepted connection");
+        }
+    });
     axum::serve(listener, router)
         .with_graceful_shutdown(async move {
             shutdown_signal().await;
