@@ -57,6 +57,7 @@ use strut_sql_tools::intel::{
     RelationshipGraphParams, SchemaContextParams, SuggestJoinsParams,
 };
 
+pub mod approvals_http;
 pub mod export;
 pub mod oauth;
 
@@ -100,6 +101,53 @@ impl McpSqlServer {
         Self {
             config: Arc::new(config),
             tool_router: Self::tool_router(),
+        }
+    }
+
+    /// Ask the client to confirm a destructive action (R2-05). Returns the
+    /// accepted approval id, or an `approval_required` error when the client
+    /// cannot be asked (the HTTP queue is then the only path).
+    async fn elicit_approval(
+        &self,
+        context: &RequestContext<rmcp::RoleServer>,
+        principal: &str,
+        source: &str,
+        tool: &str,
+        summary: &str,
+    ) -> Result<String, McpError> {
+        use rmcp::service::ElicitationError;
+
+        let entry = self
+            .config
+            .approvals
+            .request(principal, source, tool, summary);
+        let message = format!(
+            "Approve '{tool}'? {summary}. This executes immediately after approval \
+             and cannot be undone; the approval expires in 15 minutes (id {}).",
+            entry.id
+        );
+        let reply = context.peer.elicit::<ApprovalReply>(message).await;
+        match reply {
+            Ok(Some(reply)) if reply.approve => {
+                if self
+                    .config
+                    .approvals
+                    .decide(&entry.id, principal, true)
+                    .is_none()
+                {
+                    return Err(approval_rejected("approval could not be recorded"));
+                }
+                Ok(entry.id)
+            }
+            Ok(_) => {
+                self.config.approvals.decide(&entry.id, principal, false);
+                Err(approval_rejected("destructive action was not approved"))
+            }
+            Err(ElicitationError::CapabilityNotSupported) => Err(approval_required_error(&entry)),
+            Err(_) => {
+                self.config.approvals.decide(&entry.id, principal, false);
+                Err(approval_rejected("destructive action was not approved"))
+            }
         }
     }
 
@@ -178,6 +226,76 @@ fn required_tier_for_call(
         }
     }
     required
+}
+
+/// Elicitation reply for destructive actions (R2-05).
+#[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+struct ApprovalReply {
+    /// Approve the destructive action.
+    approve: bool,
+}
+rmcp::elicit_safe!(ApprovalReply);
+
+/// Tools/actions that need an approval when the process requires one.
+fn destructive_call(
+    tool: &str,
+    arguments: &serde_json::Map<String, serde_json::Value>,
+) -> Option<(&'static str, String)> {
+    let table = arguments
+        .get("table")
+        .and_then(|v| v.as_str())
+        .unwrap_or("<table>");
+    match tool {
+        "drop_table" => Some(("drop_table", format!("drop table {table}"))),
+        "truncate_table" => Some(("truncate_table", format!("truncate table {table}"))),
+        "drop_column" => {
+            let column = arguments
+                .get("column")
+                .and_then(|c| c.get("name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("<column>");
+            Some(("drop_column", format!("drop column {column} on {table}")))
+        }
+        "schema_mutate" => match arguments.get("action").and_then(|v| v.as_str()) {
+            Some("drop_table") => Some(("drop_table", format!("drop table {table}"))),
+            Some("truncate_table") => Some(("truncate_table", format!("truncate table {table}"))),
+            Some("drop_column") => Some(("drop_column", format!("drop column on {table}"))),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn approval_required_error(entry: &strut_sql_core::approvals::ApprovalEntry) -> McpError {
+    let message = format!(
+        "approval required for {}: accept approval {} through the HTTP queue, then retry with approval_id",
+        entry.tool, entry.id
+    );
+    McpError::new(
+        rmcp::model::ErrorCode(-32015),
+        message.clone(),
+        Some(serde_json::json!({
+            "code": "approval_required",
+            "message": message,
+            "retryable": false,
+            "approval_id": entry.id,
+            "expires_unix": entry.expires_unix,
+            "ttl_seconds": strut_sql_core::approvals::APPROVAL_TTL_SECS,
+            "accept_path": format!("/approvals/{}/accept", entry.id),
+        })),
+    )
+}
+
+fn approval_rejected(message: &str) -> McpError {
+    McpError::new(
+        rmcp::model::ErrorCode(-32015),
+        message.to_string(),
+        Some(serde_json::json!({
+            "code": "approval_rejected",
+            "message": message,
+            "retryable": false,
+        })),
+    )
 }
 
 fn authorization_error(denial: &Denial) -> McpError {
@@ -587,6 +705,33 @@ impl ServerHandler for McpSqlServer {
                         tier = "admin",
                         "admin_gate"
                     );
+                }
+                // R2-05: destructive DDL. When approvals are required and the
+                // client supports MCP elicitation, ask the user first; an
+                // accepted answer becomes a single-use approval id. Clients
+                // without elicitation fall through to the handler, which
+                // returns `approval_required` for the HTTP queue.
+                let mut request = request;
+                if self.config.require_approval {
+                    if let Some((label, summary)) = destructive_call(&tool, &arguments) {
+                        let has_id = arguments
+                            .get("approval_id")
+                            .and_then(|v| v.as_str())
+                            .is_some();
+                        if !has_id {
+                            match self
+                                .elicit_approval(&context, &principal.id, &source, label, &summary)
+                                .await
+                            {
+                                Ok(id) => {
+                                    if let Some(args) = request.arguments.as_mut() {
+                                        args.insert("approval_id".into(), serde_json::json!(id));
+                                    }
+                                }
+                                Err(err) => return Err(err),
+                            }
+                        }
+                    }
                 }
                 // The handlers read their limits from AppConfig; hand them a
                 // scoped view carrying the grant's ceiling and effective mode.
@@ -1273,6 +1418,25 @@ pub fn build_http_router_with_auth(
 
     // /export authenticates exactly like /mcp (API keys and OAuth), then
     // authorizes through the same Policy in its handler.
+    let approval_routes = Router::new()
+        .route(
+            "/approvals",
+            axum::routing::get(approvals_http::list_approvals),
+        )
+        .route(
+            "/approvals/{id}/accept",
+            axum::routing::post(approvals_http::accept_approval),
+        )
+        .route(
+            "/approvals/{id}/reject",
+            axum::routing::post(approvals_http::reject_approval),
+        )
+        .with_state(http_state.clone())
+        .layer(axum::middleware::from_fn_with_state(
+            auth_state.clone(),
+            http_auth_middleware,
+        ));
+
     let export_router = Router::new()
         .route("/export", axum::routing::post(export::export_handler))
         .with_state(http_state.clone())
@@ -1296,6 +1460,7 @@ pub fn build_http_router_with_auth(
         .with_state(http_state)
         .merge(mcp_router)
         .merge(export_router)
+        .merge(approval_routes)
         .layer(axum::middleware::from_fn_with_state(
             origin_state,
             validate_origin_middleware,

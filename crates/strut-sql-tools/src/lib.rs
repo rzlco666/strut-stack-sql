@@ -1,3 +1,4 @@
+pub mod approval;
 pub mod audit;
 pub mod bind;
 pub mod core;

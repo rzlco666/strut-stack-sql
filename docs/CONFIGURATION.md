@@ -214,6 +214,41 @@ STRUT_STACK_SQL_OAUTH_AUDIENCE="https://mcp.example.com/mcp" \
   issuance.
 - Token material is never logged.
 
+## Destructive DDL approvals (R2-05)
+
+Start the server with `--require-approval` (or
+`STRUT_STACK_SQL_REQUIRE_APPROVAL=1`) to require an accepted approval for
+`drop_table`, `truncate_table`, `drop_column`, and the matching `schema_mutate`
+actions, including the same statements sent through `execute_sql`.
+
+Flow:
+
+1. The call fails with `approval_required` (-32015) and `data.approval_id`,
+   `data.expires_unix`, `data.accept_path`. Nothing is executed or locked.
+2. The caller (or an operator on the same machine) decides it:
+
+   ```bash
+   curl -sS -H "authorization: Bearer $TOKEN" http://127.0.0.1:8080/approvals
+   curl -sS -X POST -H "authorization: Bearer $TOKEN" \
+        http://127.0.0.1:8080/approvals/<id>/accept
+   ```
+
+3. The same principal retries the call with `approval_id: "<id>"` and, for the
+   DDL tools, `confirm: true`. The approval is consumed by that one execution.
+
+Rules:
+
+- Queue entries expire after **15 minutes** and are single-use; a replay
+  returns `approval_rejected`.
+- Decisions are bound to the requesting principal. Another principal cannot
+  accept or reject an entry, and the API does not reveal whether an id exists.
+- Clients that support MCP elicitation are asked directly by the server; the
+  accepted answer becomes the same kind of single-use approval. Clients
+  without elicitation use the HTTP queue.
+- **`confirm: true` is not an approval.** It remains the legacy confirmation
+  flag required by the DDL tools, is never recorded in the queue and never
+  satisfies a pending approval.
+
 ## HTTP export (NDJSON / CSV)
 
 `POST /export` streams rows for bulk export without going through JSON-RPC.

@@ -75,6 +75,14 @@ step-by-step mapping is in
   `cursor_expired` / `cursor_invalid` / `cursor_*` codes. Cursor mode requires
   a single-table SELECT ordered by one unique column that is also selected;
   other first-page requests keep the legacy offset behaviour.
+- **Destructive-DDL approvals.** With `--require-approval`, drop/truncate/
+  drop-column actions (tool wrappers and raw `execute_sql`) return
+  `approval_required` with a single-use id that expires after 15 minutes.
+  Approvals are accepted through the MCP elicitation flow when the client
+  supports it, or via the HTTP queue (`GET /approvals`,
+  `POST /approvals/{id}/accept|reject`), bound to the requesting principal.
+  `confirm: true` stays a legacy confirmation flag and is never treated as an
+  approval.
 - **Table allow/deny, row filters and column masking.** `[[grants]]` gained
   `allow_tables`, `deny_tables`, `row_filters` and `mask` (partial | hash |
   null). Deny wins over allow; row filters are injected into the AST as

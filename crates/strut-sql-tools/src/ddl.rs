@@ -24,6 +24,20 @@ pub enum SchemaMutateAction {
     TruncateTable,
 }
 
+impl SchemaMutateAction {
+    /// Stable label used for approval summaries and tool names.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::CreateTable => "create table",
+            Self::DropTable => "drop table",
+            Self::AddColumn => "add column",
+            Self::AlterColumn => "alter column",
+            Self::DropColumn => "drop column",
+            Self::TruncateTable => "truncate table",
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ColumnDef {
     pub name: String,
@@ -46,6 +60,9 @@ pub struct SchemaMutateParams {
     pub column: Option<ColumnDef>,
     #[serde(default)]
     pub confirm: Option<bool>,
+    /// Accepted approval id from the queue (R2-05). `confirm` is not approval.
+    #[serde(default)]
+    pub approval_id: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
 }
@@ -54,6 +71,8 @@ pub struct SchemaMutateParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CreateTableParams {
     pub ddl: String,
+    #[serde(default)]
+    pub approval_id: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
 }
@@ -65,6 +84,9 @@ pub struct DropTableParams {
     pub schema: Option<String>,
     #[serde(default)]
     pub confirm: Option<bool>,
+    /// Accepted approval id from the queue (R2-05). `confirm` is not approval.
+    #[serde(default)]
+    pub approval_id: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
 }
@@ -76,6 +98,9 @@ pub struct TruncateTableParams {
     pub schema: Option<String>,
     #[serde(default)]
     pub confirm: Option<bool>,
+    /// Accepted approval id from the queue (R2-05). `confirm` is not approval.
+    #[serde(default)]
+    pub approval_id: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
 }
@@ -87,6 +112,8 @@ pub struct AddColumnParams {
     #[serde(default)]
     pub schema: Option<String>,
     #[serde(default)]
+    pub approval_id: Option<String>,
+    #[serde(default)]
     pub source: Option<String>,
 }
 
@@ -96,6 +123,8 @@ pub struct AlterColumnParams {
     pub column: ColumnDef,
     #[serde(default)]
     pub schema: Option<String>,
+    #[serde(default)]
+    pub approval_id: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
 }
@@ -108,6 +137,9 @@ pub struct DropColumnParams {
     pub schema: Option<String>,
     #[serde(default)]
     pub confirm: Option<bool>,
+    /// Accepted approval id from the queue (R2-05). `confirm` is not approval.
+    #[serde(default)]
+    pub approval_id: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
 }
@@ -137,6 +169,7 @@ pub async fn handle_create_table(
             ddl: Some(params.ddl),
             column: None,
             confirm: None,
+            approval_id: params.approval_id,
             source: params.source,
         },
     )
@@ -156,6 +189,7 @@ pub async fn handle_drop_table(
             ddl: None,
             column: None,
             confirm: params.confirm,
+            approval_id: params.approval_id,
             source: params.source,
         },
     )
@@ -175,6 +209,7 @@ pub async fn handle_truncate_table(
             ddl: None,
             column: None,
             confirm: params.confirm,
+            approval_id: params.approval_id,
             source: params.source,
         },
     )
@@ -194,6 +229,7 @@ pub async fn handle_add_column(
             ddl: None,
             column: Some(params.column),
             confirm: None,
+            approval_id: params.approval_id,
             source: params.source,
         },
     )
@@ -213,6 +249,7 @@ pub async fn handle_alter_column(
             ddl: None,
             column: Some(params.column),
             confirm: None,
+            approval_id: params.approval_id,
             source: params.source,
         },
     )
@@ -232,6 +269,7 @@ pub async fn handle_drop_column(
             ddl: None,
             column: Some(params.column),
             confirm: params.confirm,
+            approval_id: params.approval_id,
             source: params.source,
         },
     )
@@ -259,6 +297,28 @@ pub async fn handle_schema_mutate(
     let engine = driver.kind();
 
     let sql = build_ddl_sql(&params, engine)?;
+
+    // R2-05: destructive DDL needs an accepted approval when the process
+    // requires one. `confirm: true` is checked by build_ddl_sql and remains a
+    // separate legacy flag — it is not an approval.
+    if crate::approval::destructive_label(params.action.label()) {
+        let tool = params.action.label().to_ascii_lowercase().replace(' ', "_");
+        let summary = format!(
+            "{tool} on {}",
+            params
+                .table
+                .clone()
+                .or_else(|| params.ddl.clone())
+                .unwrap_or_else(|| "<unknown>".into())
+        );
+        crate::approval::require(
+            config,
+            &tool,
+            &source.name,
+            &summary,
+            params.approval_id.as_deref(),
+        )?;
+    }
 
     validate_and_prepare(&sql, &[], engine, WriteMode::AllowDdl, config.max_rows)
         .map_err(|e| tool_error_code(e.to_string(), ToolErrorKind::Guard))?;
@@ -565,6 +625,7 @@ mod tests {
                 nullable: None,
             }),
             confirm: None,
+            approval_id: None,
             source: None,
         };
         let sql = build_ddl_sql(&params, EngineKind::MySql).unwrap();
@@ -584,6 +645,7 @@ mod tests {
                 nullable: None,
             }),
             confirm: None,
+            approval_id: None,
             source: None,
         };
         let sql = build_ddl_sql(&params, EngineKind::Postgres).unwrap();
@@ -606,6 +668,7 @@ mod tests {
                 nullable: None,
             }),
             confirm: None,
+            approval_id: None,
             source: None,
         };
         assert!(build_ddl_sql(&params, EngineKind::Sqlite).is_err());
@@ -627,6 +690,7 @@ mod tests {
                 nullable: None,
             }),
             confirm: Some(true),
+            approval_id: None,
             source: None,
         }
     }

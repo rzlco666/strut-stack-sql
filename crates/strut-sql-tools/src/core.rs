@@ -87,6 +87,9 @@ pub struct ExecuteSqlParams {
     #[serde(default)]
     #[schemars(schema_with = "summary_schema")]
     pub summary: Option<crate::summary::SummaryParams>,
+    /// Accepted approval id for destructive DDL (R2-05).
+    #[serde(default)]
+    pub approval_id: Option<String>,
 }
 
 /// Compact machine schema for the summary mode. The full field list lives in
@@ -355,6 +358,23 @@ pub async fn handle_execute_sql(
         .driver()
         .await
         .map_err(|e| tool_error_code(e.to_string(), ToolErrorKind::Execution))?;
+    // R2-05: raw destructive DDL needs an accepted approval too; the tool
+    // wrappers are not the only way to reach a DROP.
+    if config.require_approval {
+        if let Ok(class) = classify_sql(&sql, driver.kind()) {
+            if crate::approval::destructive_label(class.label()) {
+                let tool = class.label().to_ascii_lowercase().replace(' ', "_");
+                let summary = format!("{tool} via execute_sql");
+                crate::approval::require(
+                    config,
+                    &tool,
+                    &source.name,
+                    &summary,
+                    params.approval_id.as_deref(),
+                )?;
+            }
+        }
+    }
     let started = Instant::now();
 
     // R2-01: cursor pagination. Attempted when the caller passes a cursor, or

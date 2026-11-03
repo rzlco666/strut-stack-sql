@@ -1895,6 +1895,7 @@ dependencies = [
  "tokio-util",
  "tower-service",
  "tracing",
+ "url",
  "uuid",
 ]
 
@@ -2533,6 +2534,7 @@ dependencies = [
  "strut-sql-driver-sqlite",
  "strut-sql-guard",
  "subtle",
+ "thiserror",
  "tokio",
  "toml",
  "tracing",
@@ -2640,6 +2642,7 @@ dependencies = [
  "jsonwebtoken",
  "reqwest",
  "rmcp",
+ "schemars",
  "serde",
  "serde_json",
  "strut-sql-core",

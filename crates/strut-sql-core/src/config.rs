@@ -274,6 +274,11 @@ pub struct Cli {
     #[arg(long)]
     pub allow_unauthenticated_http: bool,
 
+    /// Require an accepted approval for destructive DDL (drop/truncate/drop
+    /// column). Also: STRUT_STACK_SQL_REQUIRE_APPROVAL=1.
+    #[arg(long)]
+    pub require_approval: bool,
+
     /// Enable Admin-class SQL (GRANT/REVOKE) for principals whose grant has
     /// max_tier = "admin". Requires --allow-ddl as well. Also:
     /// STRUT_STACK_SQL_ALLOW_GRANTS=1. Default: denied even for Admin grants.
@@ -569,6 +574,10 @@ pub struct AppConfig {
     pub oauth: Option<OAuthSettings>,
     /// Authorization policy derived from tokens + TOML principals/grants.
     pub policy: Policy,
+    /// Destructive DDL requires an accepted approval (R2-05).
+    pub require_approval: bool,
+    /// Shared approval queue (in-memory, 15-minute TTL).
+    pub approvals: std::sync::Arc<crate::approvals::ApprovalQueue>,
     /// Effective table allow/deny, row-filter and mask rules (R2-04). Empty
     /// for the unscoped process view; populated from the grant by
     /// [`AppConfig::scoped_for`].
@@ -611,6 +620,8 @@ impl AppConfig {
         scoped.principal_id = authz.principal_id.clone();
         scoped.query_history = authz.query_history;
         scoped.tables = authz.tables.clone();
+        // The queue is process-shared: scoped views must see the same entries.
+        scoped.approvals = self.approvals.clone();
         if let Some(max_rows) = authz.max_rows {
             scoped.max_rows = scoped.max_rows.min(max_rows);
         }
@@ -1051,6 +1062,9 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
             allow_grants,
             oauth,
             policy,
+            require_approval: cli.require_approval
+                || env_truthy("STRUT_STACK_SQL_REQUIRE_APPROVAL"),
+            approvals: std::sync::Arc::new(crate::approvals::ApprovalQueue::new()),
             tables: crate::auth::TablePolicy::default(),
             ephemeral: false,
             hide_endpoints,
@@ -1160,6 +1174,8 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
         allow_grants,
         oauth,
         policy,
+        require_approval: cli.require_approval || env_truthy("STRUT_STACK_SQL_REQUIRE_APPROVAL"),
+        approvals: std::sync::Arc::new(crate::approvals::ApprovalQueue::new()),
         tables: crate::auth::TablePolicy::default(),
         ephemeral,
         hide_endpoints,
@@ -1912,6 +1928,7 @@ max_rows = 7
             http_token: None,
             allow_unauthenticated_http: false,
             allow_grants: false,
+            require_approval: false,
             allow_explain_analyze: false,
             http_rate_limit_per_minute: 600,
             ephemeral: false,

@@ -58,6 +58,8 @@ async fn config(write_mode: WriteMode) -> (Arc<AppConfig>, Arc<dyn EngineDriver>
         batch_max_bytes: 1024 * 1024,
         fail_fast: false,
         deny_columns: vec![],
+        require_approval: false,
+        approvals: std::sync::Arc::new(strut_stack_sql::core::approvals::ApprovalQueue::new()),
         tables: strut_stack_sql::core::auth::TablePolicy::default(),
         allow_explain_analyze: false,
         principal_id: "local".into(),
@@ -142,6 +144,7 @@ async fn page(
             source: None,
             format: None,
             summary: None,
+            approval_id: None,
         },
     )
     .await?;
