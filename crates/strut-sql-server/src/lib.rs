@@ -770,14 +770,33 @@ impl ServerHandler for McpSqlServer {
     async fn read_resource(
         &self,
         request: rmcp::model::ReadResourceRequestParams,
-        _context: RequestContext<rmcp::RoleServer>,
+        context: RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::ReadResourceResult, McpError> {
         let uri = request.uri.as_str();
+        // Resources go through the same Policy as tools: a caller without a
+        // read grant for the source cannot read the schema or policy summary.
+        let principal = principal_from_context(&self.config, &context);
+        let source = uri
+            .strip_prefix("strut://schema/")
+            .and_then(|rest| rest.split('/').next())
+            .filter(|source| !source.is_empty())
+            .unwrap_or(&self.config.default_source)
+            .to_string();
+        let authz =
+            match self
+                .config
+                .policy
+                .authorize(&principal, "resources.read", &source, Tier::Read)
+            {
+                Decision::Allow(authz) => authz,
+                Decision::Deny(denial) => return Err(authorization_error(&denial)),
+            };
+        let scoped = Arc::new(self.config.scoped_for(&authz));
         let contents = if uri == "strut://docs/sql-surface" {
             rmcp::model::ResourceContents::text(SQL_SURFACE_RESOURCE, uri)
                 .with_mime_type("text/markdown")
         } else if uri == "strut://policy/summary" {
-            let summary = policy_summary(&self.config);
+            let summary = policy_summary(&scoped);
             rmcp::model::ResourceContents::text(
                 serde_json::to_string_pretty(&summary).unwrap_or_default(),
                 uri,
@@ -1330,7 +1349,36 @@ fn check_jsonrpc_request(
     principal: &Principal,
     value: &Value,
 ) -> Option<String> {
-    if value.get("method").and_then(Value::as_str) != Some("tools/call") {
+    let method = value.get("method").and_then(Value::as_str)?;
+    if method == "resources/read" {
+        // Resources carry data (schema digest, policy summary), so they are
+        // authorized in the middleware exactly like tools/call; a principal
+        // without a read grant for the source must not reach the handler.
+        let params = value.get("params")?;
+        let uri = params
+            .get("uri")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let source = uri
+            .strip_prefix("strut://schema/")
+            .and_then(|rest| rest.split('/').next())
+            .filter(|source| !source.is_empty())
+            .unwrap_or(&config.default_source)
+            .to_string();
+        return match config
+            .policy
+            .authorize(principal, "resources.read", &source, Tier::Read)
+        {
+            Decision::Allow(_) => None,
+            Decision::Deny(denial) => Some(denial_message(
+                principal,
+                "resources/read",
+                &source,
+                &denial,
+            )),
+        };
+    }
+    if method != "tools/call" {
         return None;
     }
     let params = value.get("params")?;

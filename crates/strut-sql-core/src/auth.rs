@@ -76,6 +76,11 @@ pub const DDL_TOOLS: &[&str] = &[
 /// the caller raises the requirement to the classified SQL class before
 /// calling [`Policy::authorize`], so a write statement needs a write grant.
 pub fn tool_tier(tool: &str, full_tools: bool) -> Option<Tier> {
+    // Virtual tool names used by MCP resources: reading the schema/policy
+    // resources is a read-tier operation gated by the same Policy.
+    if matches!(tool, "resources.read" | "prompts.get") {
+        return Some(Tier::Read);
+    }
     if CORE_TOOLS.contains(&tool) {
         Some(Tier::Read)
     } else if FULL_INTROSPECT_TOOLS.contains(&tool) {

@@ -85,7 +85,10 @@ step-by-step mapping is in
   advertised: `strut://docs/sql-surface`, `strut://policy/summary` (effective
   policy without URLs or credentials) and the
   `strut://schema/{source}/{schema}` template (token budget 4000, schema-cache
-  TTL), plus the `diagnose`, `explore` and `safe-migration` prompts.
+  TTL), plus the `diagnose`, `explore` and `safe-migration` prompts. Resource
+  reads are authorized in the HTTP middleware exactly like `tools/call`, so a
+  principal without a read grant for the source cannot read the schema or
+  policy resources.
 - **Tool profiles.** `--profile lite|standard|full|admin` presets write mode,
   `--full-tools`, `--allow-grants` and destructive-DDL approvals. Every preset
   expands to ordinary flags plus grant TOML (tests parse the generated

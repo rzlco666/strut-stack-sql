@@ -1971,6 +1971,54 @@ async fn resources_and_prompts_are_exposed_and_policy_safe() {
     assert!(body.contains("unknown prompt"), "{body}");
 }
 
+#[tokio::test]
+async fn resources_require_a_grant_for_the_source() {
+    let mut config = sqlite_config_with_tokens(
+        WriteMode::ReadOnly,
+        vec![test_token("bob", "bob-secret", WriteMode::ReadOnly)],
+    )
+    .await;
+    config.policy = {
+        let mut policy = Policy::new(Tier::Read, true, false);
+        // Bob may read a source that is not the default one.
+        policy.add_grant(Grant::new(
+            "bob",
+            GrantSource::Name("other".into()),
+            Tier::Read,
+        ));
+        policy.with_local_default()
+    };
+    let (app, _ct) = build_http_router(config);
+    let (status, body) = mcp_roundtrip(
+        app.clone(),
+        Some("bob-secret"),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 21,
+            "method": "resources/read",
+            "params": { "uri": "strut://schema/default/main" }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(body.contains("not allowed to use source"), "{body}");
+    assert!(!body.contains("context"), "schema leaked: {body}");
+
+    let (status, body) = mcp_roundtrip(
+        app,
+        Some("bob-secret"),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 22,
+            "method": "resources/read",
+            "params": { "uri": "strut://policy/summary" }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(body.contains("not allowed to use source"), "{body}");
+}
+
 fn admin_policy(gate_open: bool) -> Policy {
     let mut policy = Policy::new(Tier::Ddl, true, gate_open);
     policy.add_grant(Grant::new("root", GrantSource::Any, Tier::Admin));
