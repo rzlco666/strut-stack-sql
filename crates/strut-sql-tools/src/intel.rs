@@ -22,10 +22,8 @@ pub struct RelationshipGraphParams {
     pub schema: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
-    /// Focus table; omit for the whole schema graph.
     #[serde(default)]
     pub table: Option<String>,
-    /// Traversal depth around `table` (default 2, max 4).
     #[serde(default)]
     pub depth: Option<usize>,
 }
@@ -46,13 +44,10 @@ pub struct SchemaContextParams {
     pub schema: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
-    /// Token budget (default 4000, max 32000).
     #[serde(default)]
     pub token_budget: Option<usize>,
-    /// Focus tables; expands around them through the FK graph.
     #[serde(default)]
     pub tables: Option<Vec<String>>,
-    /// Optional keyword relevance filter (table/column names and comments).
     #[serde(default)]
     pub keyword: Option<String>,
 }

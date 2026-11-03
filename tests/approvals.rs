@@ -122,8 +122,6 @@ fn drop_params(confirm: bool, approval_id: Option<String>) -> DropTableParams {
         schema: None,
         confirm: Some(confirm),
         approval_id,
-        statements: None,
-        plan_id: None,
         dry_run: None,
         source: None,
     }

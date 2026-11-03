@@ -70,13 +70,10 @@ pub struct SchemaMutateParams {
     pub column: Option<ColumnDef>,
     #[serde(default)]
     pub confirm: Option<bool>,
-    /// Accepted approval id from the queue (R2-05). `confirm` is not approval.
     #[serde(default)]
     pub approval_id: Option<String>,
-    /// Multi-statement migration body (plan_migration only).
     #[serde(default)]
     pub statements: Option<Vec<String>>,
-    /// Plan id from plan_migration (apply/rollback only).
     #[serde(default)]
     pub plan_id: Option<String>,
     /// Validate and report without executing anything (R2-06).
@@ -94,7 +91,6 @@ pub struct CreateTableParams {
     pub approval_id: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
-    /// Validate and report without executing (R2-06).
     #[serde(default)]
     pub dry_run: Option<bool>,
 }
@@ -106,15 +102,8 @@ pub struct DropTableParams {
     pub schema: Option<String>,
     #[serde(default)]
     pub confirm: Option<bool>,
-    /// Accepted approval id from the queue (R2-05). `confirm` is not approval.
     #[serde(default)]
     pub approval_id: Option<String>,
-    /// Multi-statement migration body (plan_migration only).
-    #[serde(default)]
-    pub statements: Option<Vec<String>>,
-    /// Plan id from plan_migration (apply/rollback only).
-    #[serde(default)]
-    pub plan_id: Option<String>,
     /// Validate and report without executing anything (R2-06).
     #[serde(default)]
     pub dry_run: Option<bool>,
@@ -129,15 +118,8 @@ pub struct TruncateTableParams {
     pub schema: Option<String>,
     #[serde(default)]
     pub confirm: Option<bool>,
-    /// Accepted approval id from the queue (R2-05). `confirm` is not approval.
     #[serde(default)]
     pub approval_id: Option<String>,
-    /// Multi-statement migration body (plan_migration only).
-    #[serde(default)]
-    pub statements: Option<Vec<String>>,
-    /// Plan id from plan_migration (apply/rollback only).
-    #[serde(default)]
-    pub plan_id: Option<String>,
     /// Validate and report without executing anything (R2-06).
     #[serde(default)]
     pub dry_run: Option<bool>,
@@ -155,7 +137,6 @@ pub struct AddColumnParams {
     pub approval_id: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
-    /// Validate and report without executing (R2-06).
     #[serde(default)]
     pub dry_run: Option<bool>,
 }
@@ -170,7 +151,6 @@ pub struct AlterColumnParams {
     pub approval_id: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
-    /// Validate and report without executing (R2-06).
     #[serde(default)]
     pub dry_run: Option<bool>,
 }
@@ -183,15 +163,8 @@ pub struct DropColumnParams {
     pub schema: Option<String>,
     #[serde(default)]
     pub confirm: Option<bool>,
-    /// Accepted approval id from the queue (R2-05). `confirm` is not approval.
     #[serde(default)]
     pub approval_id: Option<String>,
-    /// Multi-statement migration body (plan_migration only).
-    #[serde(default)]
-    pub statements: Option<Vec<String>>,
-    /// Plan id from plan_migration (apply/rollback only).
-    #[serde(default)]
-    pub plan_id: Option<String>,
     /// Validate and report without executing anything (R2-06).
     #[serde(default)]
     pub dry_run: Option<bool>,

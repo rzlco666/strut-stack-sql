@@ -367,9 +367,7 @@ fn authorization_error(denial: &Denial) -> McpError {
 
 #[tool_router]
 impl McpSqlServer {
-    #[tool(
-        description = "Search schemas, tables, columns, or indexes. Ranked exact > prefix > substring > comment; include_score adds scores."
-    )]
+    #[tool(description = "Search schemas, tables, columns, indexes (ranked).")]
     async fn search_objects(
         &self,
         params: Parameters<SearchObjectsParams>,
@@ -417,9 +415,7 @@ impl McpSqlServer {
         .await
     }
 
-    #[tool(
-        description = "EXPLAIN advisor: normalized plan, tiered issues, index advice. analyze:true runs EXPLAIN ANALYZE (opt-in)."
-    )]
+    #[tool(description = "EXPLAIN advisor; analyze:true runs EXPLAIN ANALYZE.")]
     async fn analyze_query_performance(
         &self,
         params: Parameters<AnalyzeQueryParams>,
@@ -491,7 +487,7 @@ impl McpSqlServer {
         .await
     }
 
-    #[tool(description = "List indexes (flat: name, columns, unique) for a schema or table.")]
+    #[tool(description = "List indexes.")]
     async fn list_indexes(
         &self,
         params: Parameters<ListIndexesParams>,
@@ -521,9 +517,7 @@ impl McpSqlServer {
         .await
     }
 
-    #[tool(
-        description = "One-shot schema survey: tables + approx row counts (planner stats; omit if unknown; use COUNT(*) for exact) + FKs, FK in/out counts, hubs, orphans."
-    )]
+    #[tool(description = "Schema survey: tables, approx rows, FKs, hubs/orphans.")]
     async fn schema_overview(
         &self,
         params: Parameters<SchemaOverviewParams>,
@@ -538,9 +532,7 @@ impl McpSqlServer {
         .await
     }
 
-    #[tool(
-        description = "Foreign-key relationship graph for a schema; optional focus table + depth (default 2, max 4)."
-    )]
+    #[tool(description = "FK relationship graph; optional focus + depth.")]
     async fn get_relationship_graph(
         &self,
         params: Parameters<RelationshipGraphParams>,
@@ -555,9 +547,7 @@ impl McpSqlServer {
         .await
     }
 
-    #[tool(
-        description = "Shortest FK join paths connecting 2-8 tables, with ready-to-copy join conditions; same-name column guesses are marked."
-    )]
+    #[tool(description = "Shortest FK join paths for 2-8 tables.")]
     async fn suggest_joins(
         &self,
         params: Parameters<SuggestJoinsParams>,
@@ -572,9 +562,7 @@ impl McpSqlServer {
         .await
     }
 
-    #[tool(
-        description = "Token-budgeted schema context digest (tables, columns, keys, FK relations, approx rows), expanded around focus tables via the FK graph."
-    )]
+    #[tool(description = "Token-budgeted schema digest.")]
     async fn get_schema_context(
         &self,
         params: Parameters<SchemaContextParams>,

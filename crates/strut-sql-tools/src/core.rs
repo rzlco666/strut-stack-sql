@@ -89,10 +89,8 @@ pub struct ExecuteSqlParams {
     #[serde(default)]
     #[schemars(schema_with = "summary_schema")]
     pub summary: Option<crate::summary::SummaryParams>,
-    /// Accepted approval id for destructive DDL (R2-05).
     #[serde(default)]
     pub approval_id: Option<String>,
-    /// Validate and report the prepared statement without executing (R2-06).
     #[serde(default)]
     pub dry_run: Option<bool>,
 }
@@ -104,7 +102,7 @@ pub struct ExecuteSqlParams {
 fn summary_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({
         "type": "object",
-        "description": "Server-built summary: count | sample | aggregate over a table (see docs/TOOLS.md)",
+        "description": "count|sample|aggregate (see TOOLS.md)",
     })
 }
 
