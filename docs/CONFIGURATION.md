@@ -249,6 +249,13 @@ Rules:
   flag required by the DDL tools, is never recorded in the queue and never
   satisfies a pending approval.
 
+## Tool profiles
+
+`--profile lite|standard|full|admin` presets the write mode, `--full-tools`,
+`--allow-grants` and the approval default. It is a preset over the same flags
+and grants (never a second authorization system). Explicit flags may raise a
+preset. Full mapping: [PROFILES.md](PROFILES.md).
+
 ## Hardening
 
 - **SQLite allowlist.** `--sqlite-allowlist DIR[,DIR…]` (repeatable) constrains

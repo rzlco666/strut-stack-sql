@@ -299,6 +299,11 @@ pub struct Cli {
     #[arg(long)]
     pub allow_unauthenticated_http: bool,
 
+    /// Tool profile preset: lite, standard, full, or admin (R4-02). Explicit
+    /// flags may raise, never lower, what the profile sets.
+    #[arg(long, global = true)]
+    pub profile: Option<String>,
+
     /// Directories or files a SQLite source may live under (repeatable).
     #[arg(long, global = true, value_delimiter = ',')]
     pub sqlite_allowlist: Vec<PathBuf>,
@@ -1071,16 +1076,29 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
     }
 
     let searched_paths = discover_dotenv();
-    let write_mode = if cli.allow_ddl {
+    let profile = match cli.profile.as_deref() {
+        Some(name) => Some(crate::profiles::parse(name).ok_or_else(|| {
+            anyhow::anyhow!("unknown profile '{name}' (expected lite, standard, full, or admin)")
+        })?),
+        None => None,
+    };
+    let flag_mode = if cli.allow_ddl {
         WriteMode::AllowDdl
     } else if cli.allow_writes {
         WriteMode::AllowWrites
     } else {
         WriteMode::ReadOnly
     };
+    let profile_mode = profile
+        .map(|profile| profile.max_tier.write_mode())
+        .unwrap_or(WriteMode::ReadOnly);
+    let write_mode = flag_mode.max(profile_mode);
+    let full_tools = cli.full_tools || profile.is_some_and(|profile| profile.full_tools);
+    let profile_approval = profile.is_some_and(|profile| profile.require_approval);
     let http_tokens = resolve_http_tokens(cli, write_mode)?;
     let hide_endpoints = resolve_hide_endpoints(cli);
-    let allow_grants = resolve_allow_grants(cli);
+    let allow_grants =
+        resolve_allow_grants(cli) || profile.is_some_and(|profile| profile.allow_grants);
     let allow_explain_analyze = resolve_allow_explain_analyze(cli);
     let oauth = resolve_oauth_settings()?;
 
@@ -1163,7 +1181,7 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
         enforce_sqlite_allowlist(&sources, &cli.sqlite_allowlist)?;
         return Ok(AppConfig {
             write_mode,
-            full_tools: cli.full_tools,
+            full_tools,
             max_rows: cli.max_rows,
             max_bytes: cli.max_bytes,
             query_timeout: Duration::from_secs(cli.query_timeout),
@@ -1192,6 +1210,7 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
                 cli.pool_size as usize,
             )),
             require_approval: cli.require_approval
+                || profile_approval
                 || env_truthy("STRUT_STACK_SQL_REQUIRE_APPROVAL"),
             approvals: std::sync::Arc::new(crate::approvals::ApprovalQueue::new()),
             plans: std::sync::Arc::new(crate::migrations::PlanStore::new()),
@@ -1282,7 +1301,7 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
     enforce_sqlite_allowlist(&sources, &cli.sqlite_allowlist)?;
     Ok(AppConfig {
         write_mode,
-        full_tools: cli.full_tools,
+        full_tools,
         max_rows: cli.max_rows,
         max_bytes: cli.max_bytes,
         query_timeout: Duration::from_secs(cli.query_timeout),
@@ -1308,7 +1327,9 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
         trace_sql: cli.trace_sql,
         sqlite_allowlist: cli.sqlite_allowlist.clone(),
         limiter: std::sync::Arc::new(crate::limits::PrincipalLimiter::new(cli.pool_size as usize)),
-        require_approval: cli.require_approval || env_truthy("STRUT_STACK_SQL_REQUIRE_APPROVAL"),
+        require_approval: cli.require_approval
+            || profile_approval
+            || env_truthy("STRUT_STACK_SQL_REQUIRE_APPROVAL"),
         approvals: std::sync::Arc::new(crate::approvals::ApprovalQueue::new()),
         plans: std::sync::Arc::new(crate::migrations::PlanStore::new()),
         tables: crate::auth::TablePolicy::default(),
@@ -2065,6 +2086,7 @@ max_rows = 7
             allow_unauthenticated_http: false,
             allow_grants: false,
             trace_sql: false,
+            profile: None,
             sqlite_allowlist: Vec::new(),
             require_approval: false,
             allow_explain_analyze: false,

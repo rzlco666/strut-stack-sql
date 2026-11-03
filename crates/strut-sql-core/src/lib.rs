@@ -5,6 +5,7 @@ pub mod doctor;
 pub mod limits;
 pub mod migrate;
 pub mod migrations;
+pub mod profiles;
 pub mod redact;
 pub mod registry;
 
@@ -15,4 +16,5 @@ pub use auth::{
 pub use config::{AppConfig, ResolvedSource, WriteMode};
 pub use limits::PrincipalLimiter;
 pub use migrations::{derive_inverse, MigrationError, MigrationPlan, PlanStore};
+pub use profiles::{Profile, PROFILES};
 pub use registry::{connect_driver, LazyDriver};

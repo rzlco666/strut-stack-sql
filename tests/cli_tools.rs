@@ -157,3 +157,82 @@ async fn scoped_config_clears_trace_sql_when_a_grant_narrows_tables() {
     let scoped = config.scoped_for(&authz);
     assert!(!scoped.trace_sql, "narrowed grants never put SQL in traces");
 }
+
+#[tokio::test]
+async fn profiles_expand_to_flags_and_never_add_a_second_authorization_system() {
+    use strut_stack_sql::config::{load_config, WriteMode};
+
+    let lite = load_config(&cli(&[
+        "strut-stack-sql",
+        "--url",
+        "sqlite::memory:",
+        "--profile",
+        "lite",
+    ]))
+    .await
+    .expect("lite");
+    assert_eq!(lite.write_mode, WriteMode::ReadOnly);
+    assert!(!lite.full_tools);
+    assert!(!lite.allow_grants);
+    assert!(!lite.require_approval);
+
+    let standard = load_config(&cli(&[
+        "strut-stack-sql",
+        "--url",
+        "sqlite::memory:",
+        "--profile",
+        "standard",
+    ]))
+    .await
+    .expect("standard");
+    assert!(standard.full_tools);
+    assert_eq!(standard.write_mode, WriteMode::ReadOnly);
+
+    let full = load_config(&cli(&[
+        "strut-stack-sql",
+        "--url",
+        "sqlite::memory:",
+        "--profile",
+        "full",
+    ]))
+    .await
+    .expect("full");
+    assert_eq!(full.write_mode, WriteMode::AllowWrites);
+
+    let admin = load_config(&cli(&[
+        "strut-stack-sql",
+        "--url",
+        "sqlite::memory:",
+        "--profile",
+        "admin",
+    ]))
+    .await
+    .expect("admin");
+    assert_eq!(admin.write_mode, WriteMode::AllowDdl);
+    assert!(admin.allow_grants);
+    assert!(admin.require_approval);
+
+    // Explicit flags may raise a preset; they never lower it.
+    let raised = load_config(&cli(&[
+        "strut-stack-sql",
+        "--url",
+        "sqlite::memory:",
+        "--profile",
+        "standard",
+        "--allow-writes",
+    ]))
+    .await
+    .expect("raised");
+    assert_eq!(raised.write_mode, WriteMode::AllowWrites);
+    assert!(raised.full_tools);
+
+    let unknown = load_config(&cli(&[
+        "strut-stack-sql",
+        "--url",
+        "sqlite::memory:",
+        "--profile",
+        "nope",
+    ]))
+    .await;
+    assert!(unknown.is_err(), "unknown profile must fail at startup");
+}

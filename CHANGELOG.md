@@ -75,6 +75,11 @@ step-by-step mapping is in
   `cursor_expired` / `cursor_invalid` / `cursor_*` codes. Cursor mode requires
   a single-table SELECT ordered by one unique column that is also selected;
   other first-page requests keep the legacy offset behaviour.
+- **Tool profiles.** `--profile lite|standard|full|admin` presets write mode,
+  `--full-tools`, `--allow-grants` and destructive-DDL approvals. Every preset
+  expands to ordinary flags plus grant TOML (tests parse the generated
+  `[[grants]]`), so there is no second authorization system; explicit flags may
+  raise a preset.
 - **Hardening.** File-backed SQLite sources can be constrained to an allowlist
   (`--sqlite-allowlist`), rejected at startup when outside it. A per-source
   circuit breaker fast-fails for 30 s after five consecutive connect failures
