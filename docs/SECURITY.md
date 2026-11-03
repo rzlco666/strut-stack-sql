@@ -208,11 +208,17 @@ Three checks run before a release:
    and an unchanged database digest. Raw artifacts are attached to the release
    evidence, not regenerated for the docs.
 
-   Freeze result (2026-11-03, seed 20261103, 3,603 s wall clock): **3,159,868
-   attempts, 3,159,868 denied, 0 bypasses, 0 protocol errors, 0 crashes,
-   database digest unchanged** — `scripts/security/results/guard-fuzz-2.0.0.json`
-   records the counts and the binary SHA-256. Re-run with a fresh seed before
-   any release whose guard code changed.
+   Freeze results (both artifacts committed):
+
+   | Run | Seed | Duration | Attempts | Bypasses | Crashes | Database |
+   |---|---:|---:|---:|---:|---:|---|
+   | Final binary | 20261104 | 3,608 s | 4,518,876 | 0 | 0 | unchanged |
+   | Final binary (smoke, post-authz fix) | 20261105 | 600 s | 2,024,583 | 0 | 0 | unchanged |
+
+   `scripts/security/results/guard-fuzz-2.0.0-final.json` and
+   `…-final-smoke.json` carry the counts and binary SHA-256;
+   `…-2.0.0-initial.json` is the earlier run kept for history. Re-run with a
+   fresh seed before any release whose guard code changed.
 
 2. **No credentials in output, errors or logs.**
    `scripts/security/credential_leak_check.sh` drives a DSN with a password
