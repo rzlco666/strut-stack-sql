@@ -75,6 +75,12 @@ step-by-step mapping is in
   `cursor_expired` / `cursor_invalid` / `cursor_*` codes. Cursor mode requires
   a single-table SELECT ordered by one unique column that is also selected;
   other first-page requests keep the legacy offset behaviour.
+- **Full data-type matrix and pgvector as a data type.** CAPABILITIES.md now
+  documents how each engine's types reach result cells (including exact decimal
+  strings, binary hex tagging and PG arrays). With the `vector` extension, a
+  `vector(n)` column reads as an array of numbers; there is deliberately no
+  vector-search tool, and similarity queries stay ordinary SQL. A pgvector
+  conformance test runs against a real pgvector-enabled PostgreSQL.
 - **MCP resources and prompts.** `resources` and `prompts` capabilities are
   advertised: `strut://docs/sql-surface`, `strut://policy/summary` (effective
   policy without URLs or credentials) and the

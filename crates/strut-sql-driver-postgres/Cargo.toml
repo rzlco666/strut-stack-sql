@@ -9,6 +9,7 @@ repository = "https://github.com/rzlco666/strut-stack-sql"
 
 [dependencies]
 strut-sql-driver-api = { path = "../strut-sql-driver-api" }
+pgvector = { version = "0.4", features = ["sqlx"] }
 sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio-rustls",
     "postgres",

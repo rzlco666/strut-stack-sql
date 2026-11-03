@@ -823,6 +823,28 @@ fn decode_pg_cell(row: &PgRow, index: usize) -> Result<SqlValue, DriverError> {
         return Ok(SqlValue::String(v.to_string()));
     }
 
+    // pgvector (R4-03): a `vector` column is a data type, not a search API.
+    // Read it as an array of numbers when the extension is present.
+    if type_name.eq_ignore_ascii_case("vector") {
+        if let Ok(v) = row.try_get::<pgvector::Vector, _>(index) {
+            let numbers: Vec<serde_json::Value> = v
+                .as_slice()
+                .iter()
+                .map(|f| serde_json::json!(*f as f64))
+                .collect();
+            return Ok(SqlValue::Json(serde_json::Value::Array(numbers)));
+        }
+        // Fallback: pgvector's text form is "[1,2,3]".
+        if let Ok(text) = row.try_get::<String, _>(index) {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
+                if parsed.is_array() {
+                    return Ok(SqlValue::Json(parsed));
+                }
+            }
+        }
+        return Ok(SqlValue::String(format!("<undecoded {type_name} value>")));
+    }
+
     // bytea and arrays must never silently fall through to NULL.
     if type_name.eq_ignore_ascii_case("bytea") {
         if let Ok(v) = row.try_get::<Vec<u8>, _>(index) {

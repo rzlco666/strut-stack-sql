@@ -37,6 +37,40 @@ Tiers: **read** = any grant, **writes** = `--allow-writes` plus a Write grant,
 | `EXPLAIN ANALYZE` | Read | writes | yes | yes | **no** | Executes the statement; the advisor additionally needs `--allow-explain-analyze`. |
 | `GRANT` / `REVOKE` | Admin | admin | yes | yes | **no** | Requires `--allow-grants`. |
 
+## Data type matrix
+
+How a column value arrives in a result cell (JSON representation). A type not
+listed here is returned as text via the driver's fallback; it is never silently
+nulled.
+
+| Type | PostgreSQL | MySQL 8.4 | SQLite | Notes |
+|---|---|---|---|---|
+| integer / serial | number | number | number | i64 range preserved. |
+| bigint unsigned | number (decimal string beyond 2^53) | number | number | No float round-trip. |
+| real / double | number | number | number | |
+| numeric / decimal | number when exact in f64, else exact decimal **string** | same | text (no decimal type) | Precision is never silently lost. |
+| boolean | `true`/`false` | `true`/`false` (BOOL/TINYINT(1)) | number (0/1) | |
+| uuid | string | string (as stored) | text | |
+| timestamp / timestamptz | naive datetime / RFC 3339 string | datetime string | text | UTC offsets preserved for timestamptz. |
+| date / time | date string / time string | date/time string | text | |
+| json / jsonb | JSON value | JSON value | text | Valid JSON stays structured on PG/MySQL. |
+| bytea / blob / varbinary | tagged hex object | tagged hex object | tagged hex object | Binary is never dropped to null. |
+| arrays (`int[]`, `text[]`, …) | JSON array | — | — | Element-wise decode for common types. |
+| inet / citext | string | — | — | |
+| **vector** (pgvector) | **array of numbers** | — | — | Requires the `vector` extension; reads as `[1, 2.5, 3]`. There is **no** dedicated vector-search tool: query it with normal SQL (`ORDER BY embedding <-> $1`). |
+
+### pgvector
+
+`vector` is supported as a **data type**, not as a search API:
+
+- with `CREATE EXTENSION vector`, a `vector(n)` column decodes to a JSON array
+  of numbers (conformance case: `vector_columns_read_as_arrays_of_numbers`,
+  `#[ignore]`d unless a pgvector-enabled DSN is provided);
+- similarity queries are ordinary SQL through `execute_sql`
+  (`ORDER BY embedding <=> ?` with a `$vector` value written as a JSON array
+  string, or a literal `'[...]'`);
+- creating the extension requires DDL mode; reading the column does not.
+
 ## Not supported
 
 | Statement | PostgreSQL | MySQL 8.4 | SQLite | Reason |
