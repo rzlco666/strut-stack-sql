@@ -1,12 +1,12 @@
-# Dev Workflow — mcp-sql-rust
+# Dev Workflow — strut-stack-sql
 
 For humans and agents (Cursor / OpenCode).
 
 ## First-time setup
 
 ```bash
-git clone https://github.com/rzlco666/mcp-sql-rust.git
-cd mcp-sql-rust
+git clone https://github.com/rzlco666/strut-stack-sql.git
+cd strut-stack-sql
 # Rust 1.85+
 cargo build --release
 codegraph init

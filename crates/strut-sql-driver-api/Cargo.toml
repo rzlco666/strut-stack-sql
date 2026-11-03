@@ -1,6 +1,6 @@
 [package]
 name = "strut-sql-driver-api"
-version = "1.1.0"
+version.workspace = true
 edition = "2021"
 rust-version = "1.88"
 description = "Engine-neutral driver API for Strut Stack SQL"

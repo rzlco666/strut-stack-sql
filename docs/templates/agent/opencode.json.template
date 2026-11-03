@@ -7,20 +7,20 @@
   ],
   "command": {
     "dev": {
-      "description": "Develop mcp-sql-rust — explore, implement, test",
-      "template": "You are developing mcp-sql-rust (Rust MCP SQL server for MySQL/PostgreSQL).\n\nFollow:\n1. OMNI session status + omni_knowledge for topic\n2. codegraph_explore for src/** structural work\n3. Implement minimal change\n4. cargo test && cargo build\n5. Update docs if public behavior changed\n\n$ARGUMENTS\n\nConstraints:\n- Keep default tool surface at 3 tools unless --full-tools design\n- Columnar JSON only\n- AST guard before DB\n- No secrets in logs/tool output\n- Prefer CodeGraph + OMNI over dumping files"
+      "description": "Develop strut-stack-sql — explore, implement, test",
+      "template": "You are developing strut-stack-sql (Rust MCP SQL server for MySQL/PostgreSQL).\n\nFollow:\n1. OMNI session status + omni_knowledge for topic\n2. codegraph_explore for src/** structural work\n3. Implement minimal change\n4. cargo test && cargo build\n5. Update docs if public behavior changed\n\n$ARGUMENTS\n\nConstraints:\n- Keep default tool surface at 3 tools unless --full-tools design\n- Columnar JSON only\n- AST guard before DB\n- No secrets in logs/tool output\n- Prefer CodeGraph + OMNI over dumping files"
     },
     "guard": {
       "description": "Change or audit SQL guard / write tiers",
-      "template": "Work on SQL guard safety in mcp-sql-rust.\n\n1. Read docs/SECURITY.md + src/guard/\n2. codegraph_explore validate_and_prepare\n3. Implement with allow+deny tests\n4. cargo test\n\n$ARGUMENTS\n\nNever weaken deny list without explicit user request."
+      "template": "Work on SQL guard safety in strut-stack-sql.\n\n1. Read docs/SECURITY.md + src/guard/\n2. codegraph_explore validate_and_prepare\n3. Implement with allow+deny tests\n4. cargo test\n\n$ARGUMENTS\n\nNever weaken deny list without explicit user request."
     },
     "tools": {
       "description": "Add or change MCP tool surface",
-      "template": "Change MCP tools for mcp-sql-rust.\n\n1. Read docs/TOOLS.md + skill mcp-tools-surface\n2. Prefer params over new tools\n3. Wire CORE_TOOLS vs FULL_TOOLS correctly\n4. cargo test\n\n$ARGUMENTS"
+      "template": "Change MCP tools for strut-stack-sql.\n\n1. Read docs/TOOLS.md + skill mcp-tools-surface\n2. Prefer params over new tools\n3. Wire CORE_TOOLS vs FULL_TOOLS correctly\n4. cargo test\n\n$ARGUMENTS"
     },
     "review": {
       "description": "Readonly review of diff / module",
-      "template": "Review mcp-sql-rust changes (readonly).\n\nCheck: guard integrity, token efficiency, columnar format, no secrets, tests.\nUse codegraph_impact on changed symbols.\n\n$ARGUMENTS"
+      "template": "Review strut-stack-sql changes (readonly).\n\nCheck: guard integrity, token efficiency, columnar format, no secrets, tests.\nUse codegraph_impact on changed symbols.\n\n$ARGUMENTS"
     }
   }
 }

@@ -2,7 +2,7 @@ services:
   app:
     image: mcr.microsoft.com/devcontainers/base:ubuntu-24.04
     volumes:
-      - ..:/workspaces/mcp-sql-rust:cached
+      - ..:/workspaces/strut-stack-sql:cached
     command: sleep infinity
     depends_on:
       postgres:

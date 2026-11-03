@@ -80,6 +80,10 @@ jobs:
             ' server.json > server.json.tmp
           mv server.json.tmp server.json
           jq '{name, version, packages: [.packages[]|{identifier,fileSha256}]}' server.json
+          if jq -e '.packages[] | select((.fileSha256 // "") == "")' server.json >/dev/null; then
+            echo "ERROR: server.json has an empty fileSha256 (release artifact missing?)" >&2
+            exit 1
+          fi
 
       - name: Validate manifest
         run: ./mcp-publisher validate server.json

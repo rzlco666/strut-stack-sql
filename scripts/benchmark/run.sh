@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Benchmark mcp-sql-rust vs rival MCP SQL servers (PostgreSQL).
+# Benchmark strut-stack-sql vs rival MCP SQL servers (PostgreSQL).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -10,10 +10,10 @@ OUT="${DIR}/benchmark-results.json"
 
 # shellcheck source=/dev/null
 source "$LOCK"
-export SERVER_POSTGRES_NPM POSTGRES_MYSQL_MCP_NPM MYSQL_MCP_PYPI MCP_SQL_RUST_VERSION
+export SERVER_POSTGRES_NPM POSTGRES_MYSQL_MCP_NPM MYSQL_MCP_PYPI STRUT_STACK_SQL_VERSION
 
 DATABASE_URL="${DATABASE_URL:-postgresql://demo:demo@localhost:5433/demo}"
-BINARY="${BINARY:-${ROOT}/target/release/mcp-sql-rust}"
+BINARY="${BINARY:-${ROOT}/target/release/strut-stack-sql}"
 ITERATIONS="${ITERATIONS:-100}"
 WARMUP="${WARMUP:-5}"
 
@@ -27,7 +27,7 @@ require node
 require npx
 
 if [ ! -f "$BINARY" ]; then
-  echo "Building mcp-sql-rust release binary..."
+  echo "Building strut-stack-sql release binary..."
   (cd "$ROOT" && cargo build --release)
 fi
 
@@ -79,7 +79,7 @@ add_result() {
   RESULTS="$(node -e 'const r=JSON.parse(process.argv[1]); const row=JSON.parse(process.argv[2]); console.log(JSON.stringify(r.concat([row])));' "$RESULTS" "$row")"
 }
 
-add_result "$(run_case "mcp-sql-rust" "$BINARY" '[]' "execute_sql")"
+add_result "$(run_case "strut-stack-sql" "$BINARY" '[]' "execute_sql")"
 
 SP_ARGS="$(node -e "console.log(JSON.stringify(['-y', process.env.SERVER_POSTGRES_NPM, process.env.DATABASE_URL]))" SERVER_POSTGRES_NPM="$SERVER_POSTGRES_NPM" DATABASE_URL="$DATABASE_URL")"
 if ROW="$(run_case "server-postgres" "npx" "$SP_ARGS" "query" 2>/dev/null)"; then

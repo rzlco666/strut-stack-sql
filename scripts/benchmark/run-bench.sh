@@ -6,7 +6,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 RELEASE="${RELEASE:-2.0.0}"
-BINARY="${BINARY:-${ROOT}/target/release/mcp-sql-rust}"
+BINARY="${BINARY:-${ROOT}/target/release/strut-stack-sql}"
 ITERATIONS="${ITERATIONS:-120}"
 WARMUP="${WARMUP:-20}"
 COLD_RUNS="${COLD_RUNS:-20}"

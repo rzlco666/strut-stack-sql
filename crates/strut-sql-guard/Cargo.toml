@@ -1,6 +1,6 @@
 [package]
 name = "strut-sql-guard"
-version = "1.1.0"
+version.workspace = true
 edition = "2021"
 rust-version = "1.88"
 description = "SQL guard, classification and LIMIT enforcement for Strut Stack SQL"

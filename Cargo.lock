@@ -2520,7 +2520,7 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "strut-sql-core"
-version = "1.1.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2540,7 +2540,7 @@ dependencies = [
 
 [[package]]
 name = "strut-sql-driver-api"
-version = "1.1.0"
+version = "2.0.0"
 dependencies = [
  "async-trait",
  "bigdecimal",
@@ -2553,7 +2553,7 @@ dependencies = [
 
 [[package]]
 name = "strut-sql-driver-conformance"
-version = "1.1.0"
+version = "2.0.0"
 dependencies = [
  "async-trait",
  "strut-sql-driver-api",
@@ -2561,7 +2561,7 @@ dependencies = [
 
 [[package]]
 name = "strut-sql-driver-mysql"
-version = "1.1.0"
+version = "2.0.0"
 dependencies = [
  "async-trait",
  "bigdecimal",
@@ -2577,7 +2577,7 @@ dependencies = [
 
 [[package]]
 name = "strut-sql-driver-postgres"
-version = "1.1.0"
+version = "2.0.0"
 dependencies = [
  "async-trait",
  "bigdecimal",
@@ -2594,7 +2594,7 @@ dependencies = [
 
 [[package]]
 name = "strut-sql-driver-sqlite"
-version = "1.1.0"
+version = "2.0.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2611,7 +2611,7 @@ dependencies = [
 
 [[package]]
 name = "strut-sql-format"
-version = "1.1.0"
+version = "2.0.0"
 dependencies = [
  "schemars",
  "serde",
@@ -2620,7 +2620,7 @@ dependencies = [
 
 [[package]]
 name = "strut-sql-guard"
-version = "1.1.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -2632,7 +2632,7 @@ dependencies = [
 
 [[package]]
 name = "strut-sql-server"
-version = "1.1.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2654,7 +2654,7 @@ dependencies = [
 
 [[package]]
 name = "strut-sql-tools"
-version = "1.1.0"
+version = "2.0.0"
 dependencies = [
  "base64",
  "bigdecimal",
@@ -2677,7 +2677,7 @@ dependencies = [
 
 [[package]]
 name = "strut-stack-sql"
-version = "1.1.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "axum",

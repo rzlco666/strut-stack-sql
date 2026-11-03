@@ -1,4 +1,4 @@
--- Demo schema for mcp-sql-rust (PostgreSQL)
+-- Demo schema for strut-stack-sql (PostgreSQL)
 CREATE SCHEMA IF NOT EXISTS demo;
 SET search_path TO demo;
 

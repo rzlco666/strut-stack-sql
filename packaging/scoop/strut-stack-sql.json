@@ -1,11 +1,11 @@
 {
-  "version": "1.1.0",
+  "version": "2.0.0",
   "description": "Token-efficient MCP server for MySQL, PostgreSQL, and SQLite",
   "homepage": "https://github.com/rzlco666/strut-stack-sql",
   "license": "MIT",
   "architecture": {
     "64bit": {
-      "url": "https://github.com/rzlco666/strut-stack-sql/releases/download/v1.1.0/strut-stack-sql-windows-x64.zip",
+      "url": "https://github.com/rzlco666/strut-stack-sql/releases/download/v2.0.0/strut-stack-sql-windows-x64.zip",
       "hash": "UPDATE_AFTER_RELEASE"
     }
   },

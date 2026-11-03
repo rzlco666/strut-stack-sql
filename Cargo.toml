@@ -14,9 +14,12 @@ members = [
     "crates/strut-sql-server",
 ]
 
+[workspace.package]
+version = "2.0.0"
+
 [package]
 name = "strut-stack-sql"
-version = "1.1.0"
+version.workspace = true
 edition = "2021"
 rust-version = "1.88"
 description = "Strut Stack SQL — token-efficient MCP server for MySQL, PostgreSQL, and SQLite"
@@ -38,11 +41,6 @@ pkg-fmt = "zip"
 
 [[bin]]
 name = "strut-stack-sql"
-path = "src/main.rs"
-
-# Compat alias for one release cycle (mcp-sql-rust configs / wrappers).
-[[bin]]
-name = "mcp-sql-rust"
 path = "src/main.rs"
 
 [lib]
@@ -76,8 +74,8 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tower = { version = "0.5", features = ["util"] }
 
 [profile.release]
-opt-level = 3
-lto = "thin"
+opt-level = "s"
+lto = "fat"
 codegen-units = 1
 strip = "symbols"
 panic = "abort"

@@ -1,7 +1,7 @@
-# mcp-sql-rust — Agent Rules
+# strut-stack-sql — Agent Rules
 
 Token-efficient MCP server for **MySQL** + **PostgreSQL**, written in **Rust**.
-Repo: https://github.com/rzlco666/mcp-sql-rust
+Repo: https://github.com/rzlco666/strut-stack-sql
 
 ## Stack
 
@@ -19,7 +19,7 @@ Repo: https://github.com/rzlco666/mcp-sql-rust
 ## Commands
 
 ```bash
-cargo build --release          # binary: target/release/mcp-sql-rust
+cargo build --release          # binary: target/release/strut-stack-sql
 cargo test                     # unit + integration tests
 cargo run -- --help            # CLI help
 cargo run -- --http 127.0.0.1:8080

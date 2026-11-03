@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Benchmark mcp-sql-rust on MySQL (localhost docker compose).
+# Benchmark strut-stack-sql on MySQL (localhost docker compose).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -7,7 +7,7 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 CLIENT="${DIR}/mcp-client.mjs"
 
 DATABASE_URL="${DATABASE_URL:-mysql://demo:demo@127.0.0.1:3307/demo}"
-BINARY="${BINARY:-${ROOT}/target/release/mcp-sql-rust}"
+BINARY="${BINARY:-${ROOT}/target/release/strut-stack-sql}"
 ITERATIONS="${ITERATIONS:-50}"
 WARMUP="${WARMUP:-5}"
 
@@ -20,7 +20,7 @@ require() {
 require node
 
 if [ ! -f "$BINARY" ]; then
-  echo "Building mcp-sql-rust release binary..."
+  echo "Building strut-stack-sql release binary..."
   (cd "$ROOT" && cargo build --release)
 fi
 
@@ -38,7 +38,7 @@ fi
 ENV_JSON="$(node -e 'console.log(JSON.stringify({ DATABASE_URL: process.env.DATABASE_URL }))' DATABASE_URL="$DATABASE_URL")"
 TOOL_INPUT='{"sql":"SELECT id, email, name FROM demo.users WHERE id = 42"}'
 
-echo "==> mcp-sql-rust MySQL single SELECT" >&2
+echo "==> strut-stack-sql MySQL single SELECT" >&2
 node "$CLIENT" \
   --command "$BINARY" \
   --args "" \

@@ -32,18 +32,13 @@ const DEFAULT_ARGS = (process.env.MCP_SQL_ARGS || '--full-tools')
 function candidateBins() {
   const envBin =
     process.env.STRUT_STACK_SQL_BIN ||
-    process.env.MCP_SQL_RUST_BIN ||
     process.env.MCP_SQL_BIN;
   const home = process.env.HOME || '';
   return [
     envBin,
     'strut-stack-sql',
-    'strut-sql',
-    'mcp-sql-rust',
     home && join(home, '.local/bin/strut-stack-sql'),
-    home && join(home, '.local/bin/mcp-sql-rust'),
     home && join(home, '.cargo/bin/strut-stack-sql'),
-    home && join(home, '.cargo/bin/mcp-sql-rust'),
   ].filter(Boolean);
 }
 

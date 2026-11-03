@@ -108,7 +108,7 @@ jobs:
           cp "target/${{ matrix.target }}/release/strut-stack-sql.exe" mcpb-pack-win/strut-stack-sql.exe
           node -e "const fs=require('fs');const m=JSON.parse(fs.readFileSync('mcpb/manifest.json','utf8'));m.server.entry_point='strut-stack-sql.exe';m.server.mcp_config.command='\${__dirname}/strut-stack-sql.exe';fs.writeFileSync('mcpb-pack-win/manifest.json',JSON.stringify(m,null,2))"
           npm install -g @anthropic-ai/mcpb
-          mcpb pack mcpb-pack-win "dist/${{ matrix.asset }}.mcpb" || true
+          mcpb pack mcpb-pack-win "dist/${{ matrix.asset }}.mcpb"
 
       - uses: actions/setup-node@v4
         if: matrix.os != 'windows-latest'
@@ -120,7 +120,7 @@ jobs:
         shell: bash
         run: |
           npm install -g @anthropic-ai/mcpb
-          mcpb pack mcpb-pack "dist/${{ matrix.asset }}.mcpb" || true
+          mcpb pack mcpb-pack "dist/${{ matrix.asset }}.mcpb"
 
       - uses: actions/upload-artifact@v4
         with:

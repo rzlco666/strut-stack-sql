@@ -1,0 +1,9 @@
+services:
+  postgres:
+    container_name: strut-sql-ci-postgres
+    ports: !override
+      - "15433:5432"
+  mysql:
+    container_name: strut-sql-ci-mysql
+    ports: !override
+      - "13307:3306"
