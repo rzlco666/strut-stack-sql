@@ -298,6 +298,66 @@ fn approval_rejected(message: &str) -> McpError {
     )
 }
 
+/// Static docs resource: the SQL surface and contracts, kept short so it fits
+/// comfortably in a client context window.
+const SQL_SURFACE_RESOURCE: &str = r#"# Strut Stack SQL — SQL surface
+
+Read: SELECT, SHOW, DESCRIBE, EXPLAIN, read-only PRAGMAs.
+DML: INSERT/UPDATE/DELETE/MERGE (requires --allow-writes or --allow-ddl).
+DDL: CREATE/ALTER/DROP/TRUNCATE (requires --allow-ddl; destructive actions
+also require confirm=true and, with --require-approval, an accepted approval).
+Admin: GRANT/REVOKE (requires --allow-grants plus an Admin grant).
+Always rejected: COPY, ATTACH DATABASE, LOAD DATA, CALL/PREPARE/EXECUTE,
+SELECT ... INTO, INTO OUTFILE/DUMPFILE, transaction control.
+
+Caps: --max-rows auto-injects/clamps LIMIT; --max-bytes truncates columnar
+payloads; --query-timeout bounds execution; batches are capped by statement
+count, total deadline and total bytes. Results are columnar JSON by default.
+
+Errors (data.code): invalid_params, authorization_denied, guard_denied,
+execution_error (retryable), plus cursor_* and approval_* codes.
+"#;
+
+/// Effective policy for this caller, safe to hand to the client: no
+/// credentials, no URLs, no row-filter predicates.
+fn policy_summary(config: &AppConfig) -> serde_json::Value {
+    let mut sources: Vec<serde_json::Value> = config
+        .sources
+        .values()
+        .map(|source| {
+            serde_json::json!({
+                "name": source.name,
+                "engine": format!("{:?}", source.engine),
+            })
+        })
+        .collect();
+    sources.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    serde_json::json!({
+        "principal": config.principal_id,
+        "write_mode": format!("{:?}", config.write_mode),
+        "full_tools": config.full_tools,
+        "admin_gate_open": config.allow_grants,
+        "approvals_required": config.require_approval,
+        "default_source": config.default_source,
+        "sources": sources,
+        "deny_columns": config.deny_columns,
+        "table_rules": {
+            "allow": config.tables.allow.iter().map(|r| r.table.clone()).collect::<Vec<_>>(),
+            "deny": config.tables.deny.iter().map(|r| r.table.clone()).collect::<Vec<_>>(),
+            "row_filter_tables": config.tables.row_filters.iter().map(|r| r.table.clone()).collect::<Vec<_>>(),
+            "masked_columns": config.tables.masks.iter().map(|m| m.column.clone()).collect::<Vec<_>>(),
+        },
+        "caps": {
+            "max_rows": config.max_rows,
+            "max_bytes": config.max_bytes,
+            "batch_max_statements": config.batch_max_statements,
+            "batch_timeout_s": config.batch_timeout.as_secs(),
+            "batch_max_bytes": config.batch_max_bytes,
+            "principal_concurrency": config.limiter.per_principal(),
+        },
+    })
+}
+
 fn authorization_error(denial: &Denial) -> McpError {
     tool_error_code(
         format!("authorization denied: {denial}"),
@@ -664,12 +724,189 @@ impl ServerHandler for McpSqlServer {
                  for a real database.",
             );
         }
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new(
-                "strut-stack-sql",
-                env!("CARGO_PKG_VERSION"),
-            ))
-            .with_instructions(instructions)
+        ServerInfo::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .enable_prompts()
+                .build(),
+        )
+        .with_server_info(Implementation::new(
+            "strut-stack-sql",
+            env!("CARGO_PKG_VERSION"),
+        ))
+        .with_instructions(instructions)
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ListResourcesResult, McpError> {
+        let resources = vec![
+            rmcp::model::Resource::new("strut://docs/sql-surface", "sql-surface")
+                .with_description("Guard-classified SQL surface, caps and error contract")
+                .with_mime_type("text/markdown"),
+            rmcp::model::Resource::new("strut://policy/summary", "policy-summary")
+                .with_description(
+                    "Effective authorization for this caller: tier, sources, table rules, masks",
+                )
+                .with_mime_type("application/json"),
+        ];
+        Ok(rmcp::model::ListResourcesResult {
+            resources,
+            next_cursor: None,
+            meta: None,
+        })
+    }
+
+    async fn list_resource_templates(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ListResourceTemplatesResult, McpError> {
+        Ok(rmcp::model::ListResourceTemplatesResult {
+            resource_templates: vec![
+                rmcp::model::ResourceTemplate::new("strut://schema/{source}/{schema}", "schema")
+                    .with_title("Schema digest")
+                    .with_description(
+                        "Compact schema context for one source/schema; token budget defaults to 4000, cached for the schema-cache TTL",
+                    )
+                    .with_mime_type("application/json"),
+            ],
+            next_cursor: None,
+            meta: None,
+        })
+    }
+
+    async fn read_resource(
+        &self,
+        request: rmcp::model::ReadResourceRequestParams,
+        _context: RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ReadResourceResult, McpError> {
+        let uri = request.uri.as_str();
+        let contents = if uri == "strut://docs/sql-surface" {
+            rmcp::model::ResourceContents::text(SQL_SURFACE_RESOURCE, uri)
+                .with_mime_type("text/markdown")
+        } else if uri == "strut://policy/summary" {
+            let summary = policy_summary(&self.config);
+            rmcp::model::ResourceContents::text(
+                serde_json::to_string_pretty(&summary).unwrap_or_default(),
+                uri,
+            )
+            .with_mime_type("application/json")
+        } else if let Some(rest) = uri.strip_prefix("strut://schema/") {
+            let mut parts = rest.splitn(2, '/');
+            let source = parts.next().unwrap_or_default();
+            let schema = parts.next().unwrap_or_default();
+            let params = strut_sql_tools::intel::SchemaContextParams {
+                schema: if schema.is_empty() {
+                    None
+                } else {
+                    Some(schema.to_string())
+                },
+                source: if source.is_empty() {
+                    None
+                } else {
+                    Some(source.to_string())
+                },
+                token_budget: None,
+                tables: None,
+                keyword: None,
+            };
+            let result =
+                strut_sql_tools::intel::handle_get_schema_context(&self.config, params).await?;
+            let text = result
+                .content
+                .first()
+                .and_then(|block| block.as_text())
+                .map(|text| text.text.clone())
+                .unwrap_or_default();
+            rmcp::model::ResourceContents::text(text, uri).with_mime_type("application/json")
+        } else {
+            return Err(McpError::invalid_params(
+                format!("unknown resource '{uri}'"),
+                None,
+            ));
+        };
+        Ok(rmcp::model::ReadResourceResult::new(vec![contents]))
+    }
+
+    async fn list_prompts(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ListPromptsResult, McpError> {
+        Ok(rmcp::model::ListPromptsResult {
+            prompts: vec![
+                rmcp::model::Prompt::new(
+                    "diagnose",
+                    Some("Diagnose slow or failing SQL with the advisor"),
+                    Some(vec![rmcp::model::PromptArgument::new("sql")
+                        .with_description("Statement to diagnose")
+                        .with_required(true)]),
+                ),
+                rmcp::model::Prompt::new(
+                    "explore",
+                    Some("Explore a schema before writing queries"),
+                    Some(vec![rmcp::model::PromptArgument::new("keyword")
+                        .with_description("Table or column keyword")
+                        .with_required(false)]),
+                ),
+                rmcp::model::Prompt::new(
+                    "safe-migration",
+                    Some("Plan, approve and apply a migration safely"),
+                    Some(vec![rmcp::model::PromptArgument::new("goal")
+                        .with_description("Migration goal")
+                        .with_required(true)]),
+                ),
+            ],
+            next_cursor: None,
+            meta: None,
+        })
+    }
+
+    async fn get_prompt(
+        &self,
+        request: rmcp::model::GetPromptRequestParams,
+        _context: RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::GetPromptResult, McpError> {
+        let argument = |name: &str| {
+            request
+                .arguments
+                .as_ref()
+                .and_then(|args| args.get(name))
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
+        let text = match request.name.as_str() {
+            "diagnose" => format!(
+                "Use analyze_query_performance on this statement, then summarize the dominant cost node, \
+                 any row-estimate misses, and the index advice. Statement:\n{}",
+                argument("sql")
+            ),
+            "explore" => format!(
+                "Start with schema_overview, then search_objects for '{}', then get_schema_context for the \
+                 tables you will touch. Report relations and the 3 riskiest columns (nullable/FK/deny-listed).",
+                argument("keyword")
+            ),
+            "safe-migration" => format!(
+                "Goal: {}.\n1. Call schema_mutate with action=plan_migration and the statements.\n2. Review \
+                 the returned inverse_defined/inverse.\n3. Apply with plan_id + an accepted approval_id.\n4. \
+                 Verify with describe_table. Rollback only if an inverse is defined.",
+                argument("goal")
+            ),
+            other => {
+                return Err(McpError::invalid_params(
+                    format!("unknown prompt '{other}'"),
+                    None,
+                ))
+            }
+        };
+        Ok(rmcp::model::GetPromptResult::new(vec![
+            rmcp::model::PromptMessage::new_text(rmcp::model::Role::User, text),
+        ]))
     }
 
     /// Single invocation-time authorization gate (PRD-F1-10). Runs before

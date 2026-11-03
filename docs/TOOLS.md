@@ -266,6 +266,28 @@ adding tools to the surface:
   and requiring no approval. A statement the guard rejects (for example a
   write in read-only mode) is still rejected in a dry run.
 
+## MCP resources and prompts
+
+Besides tools, the server exposes MCP **resources** and **prompts** (the
+`resources` and `prompts` capabilities are advertised in `initialize`).
+
+| Resource | Content | Budget / cache |
+|---|---|---|
+| `strut://docs/sql-surface` | the guard-classified SQL surface, caps and error codes (markdown) | static, < 2 KB |
+| `strut://policy/summary` | this caller's effective policy: tier, sources (names/engines only), table rules, masks, caps | JSON, no credentials/URLs |
+| `strut://schema/{source}/{schema}` | compact schema digest via the same builder as `get_schema_context` | `token_budget` default **4000** (max 32000 → ≤ ~128 KB of text), cached for the schema-cache TTL (`STRUT_STACK_SQL_SCHEMA_CACHE_TTL`, default 60 s) |
+
+The schema template is listed under `resources/templates/list`; reading an
+unknown URI or prompt name is an error, never an empty success. Resources obey
+the caller's Policy (deny/allow tables and masks are applied), and the policy
+summary deliberately omits source URLs.
+
+| Prompt | Arguments | What it asks the agent to do |
+|---|---|---|
+| `diagnose` | `sql` (required) | run `analyze_query_performance`, report the dominant node, estimate misses and index advice |
+| `explore` | `keyword` (optional) | `schema_overview` → `search_objects` → `get_schema_context`, then list risky columns |
+| `safe-migration` | `goal` (required) | `plan_migration` → review inverse → apply with an accepted approval → verify; rollback only when an inverse exists |
+
 ## Supported SQL surface
 
 The guard (`crates/strut-sql-guard/src/classify.rs`) decides everything. If a statement type

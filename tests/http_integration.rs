@@ -1857,6 +1857,120 @@ async fn principal_cannot_reach_a_source_it_was_not_granted() {
     assert!(!body.contains("alpha-secret"), "{body}");
 }
 
+#[tokio::test]
+async fn resources_and_prompts_are_exposed_and_policy_safe() {
+    let config = sqlite_config(WriteMode::ReadOnly).await;
+    let (app, _ct) = build_http_router(config);
+
+    let (status, body) = mcp_roundtrip(
+        app.clone(),
+        None,
+        json!({ "jsonrpc": "2.0", "id": 11, "method": "resources/list", "params": {} }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("strut://docs/sql-surface"), "{body}");
+    assert!(body.contains("strut://policy/summary"), "{body}");
+
+    let (status, body) = mcp_roundtrip(
+        app.clone(),
+        None,
+        json!({ "jsonrpc": "2.0", "id": 12, "method": "resources/templates/list", "params": {} }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("strut://schema/{source}/{schema}"), "{body}");
+
+    let (status, body) = mcp_roundtrip(
+        app.clone(),
+        None,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 13,
+            "method": "resources/read",
+            "params": { "uri": "strut://docs/sql-surface" }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("Always rejected"), "{body}");
+
+    let (status, body) = mcp_roundtrip(
+        app.clone(),
+        None,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 14,
+            "method": "resources/read",
+            "params": { "uri": "strut://policy/summary" }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // The summary must never carry credentials.
+    assert!(
+        !body.contains("sqlite://"),
+        "policy summary leaked a URL: {body}"
+    );
+    assert!(body.contains("write_mode"), "{body}");
+
+    let (status, body) = mcp_roundtrip(
+        app.clone(),
+        None,
+        json!({ "jsonrpc": "2.0", "id": 15, "method": "prompts/list", "params": {} }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    for prompt in ["diagnose", "explore", "safe-migration"] {
+        assert!(body.contains(prompt), "missing {prompt}: {body}");
+    }
+
+    let (status, body) = mcp_roundtrip(
+        app.clone(),
+        None,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 16,
+            "method": "prompts/get",
+            "params": { "name": "diagnose", "arguments": { "sql": "SELECT 1" } }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("analyze_query_performance"), "{body}");
+    assert!(body.contains("SELECT 1"), "{body}");
+
+    // The schema resource returns a JSON digest for a real source/schema.
+    let (status, body) = mcp_roundtrip(
+        app.clone(),
+        None,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 18,
+            "method": "resources/read",
+            "params": { "uri": "strut://schema/default/main" }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("context"), "schema digest missing: {body}");
+
+    // Unknown prompt is an error, not an empty success.
+    let (status, body) = mcp_roundtrip(
+        app,
+        None,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 17,
+            "method": "prompts/get",
+            "params": { "name": "nope" }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("unknown prompt"), "{body}");
+}
+
 fn admin_policy(gate_open: bool) -> Policy {
     let mut policy = Policy::new(Tier::Ddl, true, gate_open);
     policy.add_grant(Grant::new("root", GrantSource::Any, Tier::Admin));

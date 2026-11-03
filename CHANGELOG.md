@@ -75,6 +75,11 @@ step-by-step mapping is in
   `cursor_expired` / `cursor_invalid` / `cursor_*` codes. Cursor mode requires
   a single-table SELECT ordered by one unique column that is also selected;
   other first-page requests keep the legacy offset behaviour.
+- **MCP resources and prompts.** `resources` and `prompts` capabilities are
+  advertised: `strut://docs/sql-surface`, `strut://policy/summary` (effective
+  policy without URLs or credentials) and the
+  `strut://schema/{source}/{schema}` template (token budget 4000, schema-cache
+  TTL), plus the `diagnose`, `explore` and `safe-migration` prompts.
 - **Tool profiles.** `--profile lite|standard|full|admin` presets write mode,
   `--full-tools`, `--allow-grants` and destructive-DDL approvals. Every preset
   expands to ordinary flags plus grant TOML (tests parse the generated
