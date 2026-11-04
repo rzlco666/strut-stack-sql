@@ -89,7 +89,7 @@ fn parse_binary_param(s: &str) -> Result<Vec<u8>, String> {
             );
         }
         let mut out = Vec::with_capacity(hex.len() / 2);
-        for pair in hex.as_bytes().chunks_exact(2) {
+        for pair in hex.as_bytes().as_chunks::<2>().0 {
             let byte = std::str::from_utf8(pair)
                 .ok()
                 .and_then(|p| u8::from_str_radix(p, 16).ok())

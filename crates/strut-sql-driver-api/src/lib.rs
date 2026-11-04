@@ -337,6 +337,12 @@ pub struct CapabilityNote {
 }
 
 /// Engine driver trait - engine-neutral database operations.
+// `async_trait` (0.1.89) synthesizes a bare `#[must_use]` on every generated
+// method, whose return type (`Pin<Box<dyn Future<Output = Result<..>>>>`) is
+// already `must_use`. Clippy 1.99's `double_must_use` flags that as an error
+// and suggests adding a reason, but the attribute is emitted by the macro and
+// cannot be given one here. Suppress locally; behaviour is unchanged.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait EngineDriver: Send + Sync {
     /// Return the engine kind.

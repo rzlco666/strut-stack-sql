@@ -109,7 +109,7 @@ fn decode_sha256_hex(raw: &str) -> Option<[u8; 32]> {
         return None;
     }
     let mut out = [0u8; 32];
-    for (i, chunk) in raw.as_bytes().chunks_exact(2).enumerate() {
+    for (i, chunk) in raw.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let hi = (chunk[0] as char).to_digit(16)?;
         let lo = (chunk[1] as char).to_digit(16)?;
         out[i] = ((hi << 4) | lo) as u8;
