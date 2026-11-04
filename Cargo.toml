@@ -73,6 +73,15 @@ jsonwebtoken = { version = "11", features = ["rust_crypto"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tower = { version = "0.5", features = ["util"] }
 
+# Temporary upstream pin. jsonwebtoken 11.1.0 depends on p256/p384 0.13, which
+# pull elliptic-curve 0.13 -> crypto-bigint 0.5.x, affected by
+# RUSTSEC-2026-0387 (timing variability in constant-time operations). Upstream
+# PR https://github.com/Keats/jsonwebtoken/pull/551 upgrades the curve backend to
+# p256/p384 0.14 and requires crypto-bigint >= 0.7.6, with no public API change.
+# Remove this patch once a jsonwebtoken release on crates.io contains it.
+[patch.crates-io]
+jsonwebtoken = { git = "https://github.com/Keats/jsonwebtoken", rev = "3739623abb1d0fd4d87ca7a517ddcc3310307e2d" }
+
 [profile.release]
 opt-level = "s"
 lto = "fat"
