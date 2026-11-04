@@ -19,7 +19,7 @@ whenever it is selected:**
    2. CLI `--url-env <VAR>` (the named environment variable)
    3. `.env` discovery (walk cwd → parents), then environment:
       - `DATABASE_URL`
-      - `POSTGRES_URL` / `MYSQL_URL` / `SQLITE_URL`
+      - `POSTGRES_URL` / `MYSQL_URL` / `SQLITE_URL` / `DUCKDB_URL`
       - `POSTGRES_*` / `PG*` connection parts
       - `MYSQL_*` connection parts
    4. **Ephemeral fallback** — if nothing resolves, the server falls back
@@ -118,6 +118,12 @@ DATABASE_URL=mysql://user:pass@localhost:3306/app
 ```env
 DATABASE_URL=sqlite://./data/app.db
 DATABASE_URL=sqlite::memory:
+```
+
+```env
+DATABASE_URL=duckdb://./data/app.duckdb
+DATABASE_URL=duckdb::memory:
+DUCKDB_URL=duckdb://./data/analytics.duckdb
 ```
 
 ```env
@@ -263,6 +269,9 @@ preset. Full mapping: [PROFILES.md](PROFILES.md).
   is rejected at startup, before any tool call; `sqlite::memory:` is always
   allowed. Relative paths resolve against the working directory and symlinks
   are canonicalized before the check. Default: no restriction.
+- **DuckDB allowlist.** `--duckdb-allowlist DIR[,DIR…]` (repeatable) does the
+  same for file-backed DuckDB sources; `duckdb::memory:` is always allowed.
+  The two allowlists are independent: widening one never widens the other.
 - **Per-source circuit breaker.** A source that fails to connect five times in
   a row is fast-failed for 30 seconds; during that window tool calls return
   `source … is failing repeatedly (circuit breaker)` without touching the
@@ -303,7 +312,7 @@ renaming anything:
 | Field | Value |
 |---|---|
 | `otel.name` | `execute_sql` |
-| `db.system` | engine (postgresql/mysql/sqlite) |
+| `db.system` | engine (postgresql/mysql/sqlite/duckdb) |
 | `db.operation` | `execute` |
 | `strut.source` | configured source name |
 | `strut.principal` | 12 hex chars of SHA-256 of the principal id |

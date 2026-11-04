@@ -1,6 +1,6 @@
 //! EXPLAIN advisor v2 (PRD-F3-04/05/06).
 //!
-//! Plans from PostgreSQL, MySQL and SQLite are normalized to one flat node
+//! Plans from PostgreSQL, MySQL, SQLite and DuckDB are normalized to one flat node
 //! model. Detection is deterministic rule checking over plan + catalog
 //! stats; nothing here executes DDL. `EXPLAIN ANALYZE` is opt-in at the
 //! handler because it executes the statement.
@@ -16,12 +16,16 @@ use strut_sql_guard::{detect_anti_patterns, GuardError, PatternContext, WriteMod
 
 use crate::bind::to_sql_values;
 
+mod duckdb;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ExplainError {
     #[error(transparent)]
     Guard(#[from] GuardError),
     #[error("database error: {0}")]
     Database(String),
+    #[error("Unsupported: {0}")]
+    Unsupported(String),
     #[error("{0}")]
     Other(String),
 }
@@ -169,6 +173,10 @@ pub async fn analyze_query_with_options(
         (EngineKind::Postgres, false) => format!("EXPLAIN (FORMAT JSON) {}", prepared.sql),
         (EngineKind::MySql, true) => format!("EXPLAIN ANALYZE {}", prepared.sql),
         (EngineKind::MySql, false) => format!("EXPLAIN FORMAT=JSON {}", prepared.sql),
+        (EngineKind::DuckDb, true) => {
+            format!("EXPLAIN (ANALYZE, FORMAT JSON) {}", prepared.sql)
+        }
+        (EngineKind::DuckDb, false) => format!("EXPLAIN (FORMAT JSON) {}", prepared.sql),
         (EngineKind::Sqlite, false) => format!("EXPLAIN QUERY PLAN {}", prepared.sql),
         (EngineKind::Sqlite, true) => unreachable!("checked above"),
     };
@@ -182,7 +190,24 @@ pub async fn analyze_query_with_options(
     let result = tokio::time::timeout(timeout, driver.execute(&bound))
         .await
         .map_err(|_| ExplainError::Other("explain timeout".into()))?
-        .map_err(|e| ExplainError::Database(e.to_string()))?;
+        .map_err(|error| {
+            let message = error.to_string();
+            if engine == EngineKind::DuckDb {
+                let lower = message.to_ascii_lowercase();
+                if matches!(error, strut_sql_driver_api::DriverError::Unsupported(_))
+                    || ((lower.contains("not implemented") || lower.contains("not supported"))
+                        && (lower.contains("explain")
+                            || lower.contains("format")
+                            || lower.contains("json")))
+                {
+                    return ExplainError::Unsupported(format!(
+                        "DuckDB EXPLAIN{} (FORMAT JSON): {message}",
+                        if options.analyze { " ANALYZE" } else { "" }
+                    ));
+                }
+            }
+            ExplainError::Database(message)
+        })?;
 
     let mut summary = match engine {
         EngineKind::Sqlite => {
@@ -204,6 +229,7 @@ pub async fn analyze_query_with_options(
             let json = explain_json(&result.rows)?;
             normalize_mysql(&prepared.sql, json)
         }
+        EngineKind::DuckDb => duckdb::normalize(&prepared.sql, &result, options.analyze)?,
     };
     summary.analyze = options.analyze;
 
@@ -675,7 +701,11 @@ fn advise(summary: &mut ExplainSummary, stats: &[TableStats], engine: EngineKind
     let total_cost = summary.total_cost;
 
     for node in &summary.nodes {
-        let upper = node.node_type.to_uppercase();
+        let upper = if engine == EngineKind::DuckDb {
+            node.node_type.to_uppercase().replace('_', " ")
+        } else {
+            node.node_type.to_uppercase()
+        };
         let table_stats = node
             .relation
             .as_deref()
@@ -685,6 +715,7 @@ fn advise(summary: &mut ExplainSummary, stats: &[TableStats], engine: EngineKind
             .or_else(|| table_stats.and_then(|s| s.approx_rows));
 
         let full_scan = upper.contains("SEQ SCAN")
+            || upper.contains("SEQUENTIAL SCAN")
             || upper.contains("SCAN TABLE")
             || upper == "SCAN"
             || upper == "ALL"
@@ -702,11 +733,18 @@ fn advise(summary: &mut ExplainSummary, stats: &[TableStats], engine: EngineKind
                 severity,
                 "full_scan",
                 &message,
-                "Add an index on the filter/join columns, or narrow the predicate.",
+                if engine == EngineKind::DuckDb {
+                    "Sequential scans are normal in DuckDB; narrow predicates/projections and inspect selectivity before considering an ART index for selective equality lookups."
+                } else {
+                    "Add an index on the filter/join columns, or narrow the predicate."
+                },
             ));
             if let (Some(table), Some(columns)) = (
                 node.relation.as_deref(),
-                node.filter.as_deref().and_then(candidate_columns),
+                node.filter
+                    .as_deref()
+                    .filter(|_| engine != EngineKind::DuckDb)
+                    .and_then(candidate_columns),
             ) {
                 let covered = table_stats.is_some_and(|s| {
                     s.indexes.iter().any(|idx| {
@@ -751,7 +789,8 @@ fn advise(summary: &mut ExplainSummary, stats: &[TableStats], engine: EngineKind
         let expensive_sort = (upper.contains("SORT")
             || upper.contains("HASH")
             || upper.contains("AGGREGATE")
-            || upper.contains("TEMPORARY"))
+            || upper.contains("TEMPORARY")
+            || (engine == EngineKind::DuckDb && upper.contains("ORDER BY")))
             && estimated_rows.is_some_and(|rows| rows >= 100_000);
         if expensive_sort {
             issues.push(issue(

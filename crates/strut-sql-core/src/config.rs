@@ -245,7 +245,7 @@ pub enum Command {
 #[command(
     name = "strut-stack-sql",
     version,
-    about = "Strut Stack SQL — token-efficient MCP for MySQL, PostgreSQL, and SQLite"
+    about = "Strut Stack SQL — token-efficient MCP for MySQL, PostgreSQL, SQLite, and DuckDB"
 )]
 pub struct Cli {
     /// Maintenance subcommands. Without one the server starts normally.
@@ -264,7 +264,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,
 
-    /// Workspace root for .env discovery and SQLite relative paths.
+    /// Workspace root for .env discovery and embedded database relative paths.
     #[arg(long, global = true)]
     pub workspace: Option<PathBuf>,
 
@@ -307,6 +307,10 @@ pub struct Cli {
     /// Directories or files a SQLite source may live under (repeatable).
     #[arg(long, global = true, value_delimiter = ',')]
     pub sqlite_allowlist: Vec<PathBuf>,
+
+    /// Directories or files a DuckDB source may live under (repeatable).
+    #[arg(long, global = true, value_delimiter = ',')]
+    pub duckdb_allowlist: Vec<PathBuf>,
 
     /// Include the prepared SQL text in trace/log events (off by default;
     /// ignored when the grant carries table rules or row filters).
@@ -1005,22 +1009,48 @@ pub fn sqlite_path(url: &str) -> Option<PathBuf> {
     Some(PathBuf::from(rest))
 }
 
-/// Reject SQLite sources outside the configured allowlist (R2-08, fail closed).
-fn enforce_sqlite_allowlist(
+fn duckdb_path(url: &str) -> Option<PathBuf> {
+    if !url
+        .get(..7)
+        .is_some_and(|s| s.eq_ignore_ascii_case("duckdb:"))
+    {
+        return None;
+    }
+    let rest = &url[7..];
+    let rest = rest.strip_prefix("//").unwrap_or(rest);
+    if rest.is_empty() || rest == ":memory:" {
+        None
+    } else {
+        Some(PathBuf::from(rest))
+    }
+}
+
+/// Reject embedded sources outside their engine's configured allowlist.
+fn enforce_embedded_allowlist(
     sources: &std::collections::HashMap<String, ResolvedSource>,
     allowlist: &[PathBuf],
+    engine: EngineKind,
 ) -> anyhow::Result<()> {
     if allowlist.is_empty() {
         return Ok(());
     }
+    let (label, flag) = match engine {
+        EngineKind::Sqlite => ("SQLite", "--sqlite-allowlist"),
+        EngineKind::DuckDb => ("DuckDB", "--duckdb-allowlist"),
+        _ => unreachable!("filesystem allowlists apply only to embedded engines"),
+    };
     let mut names: Vec<&String> = sources.keys().collect();
     names.sort();
     for name in names {
         let source = &sources[name];
-        if !matches!(source.engine, EngineKind::Sqlite) {
+        if source.engine != engine {
             continue;
         }
-        let Some(path) = sqlite_path(&source.url) else {
+        let path = match engine {
+            EngineKind::DuckDb => duckdb_path(&source.url),
+            _ => sqlite_path(&source.url),
+        };
+        let Some(path) = path else {
             continue; // in-memory
         };
         let absolute = if path.is_absolute() {
@@ -1053,8 +1083,8 @@ fn enforce_sqlite_allowlist(
         });
         if !allowed {
             anyhow::bail!(
-                "SQLite source '{name}' points outside the allowlist: {} (allowed: {}); \
-                 pass --sqlite-allowlist to widen it",
+                "{label} source '{name}' points outside the allowlist: {} (allowed: {}); \
+                 pass {flag} to widen it",
                 resolved.display(),
                 allowlist
                     .iter()
@@ -1120,7 +1150,7 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
             // would silently point this source at the primary database
             // with the primary credentials.
             let url = resolve_source_url(&src.name, src.url.as_deref(), src.url_env.as_deref())?;
-            let url = resolve_sqlite_path(&url, workspace.as_deref());
+            let url = resolve_embedded_path(&url, workspace.as_deref());
             let engine = detect_engine(src.engine.as_deref(), &url)?;
             // SQL-BUG-09: duplicate names are a hard config error, not a
             // silent overwrite.
@@ -1178,7 +1208,8 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
         )?;
         let mut policy = policy;
         policy.set_local_query_history(env_truthy("STRUT_STACK_SQL_QUERY_HISTORY"));
-        enforce_sqlite_allowlist(&sources, &cli.sqlite_allowlist)?;
+        enforce_embedded_allowlist(&sources, &cli.sqlite_allowlist, EngineKind::Sqlite)?;
+        enforce_embedded_allowlist(&sources, &cli.duckdb_allowlist, EngineKind::DuckDb)?;
         return Ok(AppConfig {
             write_mode,
             full_tools,
@@ -1267,7 +1298,7 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
         }
     };
 
-    let url = resolve_sqlite_path(&url, workspace.as_deref());
+    let url = resolve_embedded_path(&url, workspace.as_deref());
     let engine = detect_engine(None, &url)?;
     sources.insert(
         "default".into(),
@@ -1298,7 +1329,8 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
     let mut policy = policy;
     policy.set_local_query_history(env_truthy("STRUT_STACK_SQL_QUERY_HISTORY"));
 
-    enforce_sqlite_allowlist(&sources, &cli.sqlite_allowlist)?;
+    enforce_embedded_allowlist(&sources, &cli.sqlite_allowlist, EngineKind::Sqlite)?;
+    enforce_embedded_allowlist(&sources, &cli.duckdb_allowlist, EngineKind::DuckDb)?;
     Ok(AppConfig {
         write_mode,
         full_tools,
@@ -1353,20 +1385,22 @@ fn discover_dotenv() -> Vec<PathBuf> {
     searched
 }
 
-fn resolve_sqlite_path(url: &str, workspace: Option<&Path>) -> String {
+fn resolve_embedded_path(url: &str, workspace: Option<&Path>) -> String {
     let lower = url.to_lowercase();
-    if !lower.starts_with("sqlite:") {
+    let scheme = if lower.starts_with("sqlite:") {
+        "sqlite"
+    } else if lower.starts_with("duckdb:") {
+        "duckdb"
+    } else {
         return url.to_string();
-    }
-    let path_part = url
-        .strip_prefix("sqlite://")
-        .or_else(|| url.strip_prefix("sqlite:"))
-        .unwrap_or(url);
+    };
+    let rest = &url[scheme.len() + 1..];
+    let path_part = rest.strip_prefix("//").unwrap_or(rest);
     if path_part.starts_with("./") || path_part.starts_with(".\\") {
         if let Some(ws) = workspace {
             let rel = path_part.trim_start_matches("./").trim_start_matches(".\\");
             let abs = ws.join(rel);
-            return format!("sqlite://{}", abs.display());
+            return format!("{scheme}://{}", abs.display());
         }
     }
     url.to_string()
@@ -1392,6 +1426,12 @@ fn resolve_url_from_env() -> Result<String> {
     }
 
     if let Ok(url) = std::env::var("SQLITE_URL") {
+        if !url.is_empty() {
+            return Ok(url);
+        }
+    }
+
+    if let Ok(url) = std::env::var("DUCKDB_URL") {
         if !url.is_empty() {
             return Ok(url);
         }
@@ -1551,6 +1591,7 @@ pub fn source_endpoint(url: &str, engine: EngineKind) -> SourceEndpoint {
             EngineKind::Postgres => "postgres".into(),
             EngineKind::MySql => "mysql".into(),
             EngineKind::Sqlite => "sqlite".into(),
+            EngineKind::DuckDb => "duckdb".into(),
         },
         host,
         port,
@@ -1582,6 +1623,11 @@ fn database_from_url(url: &str, engine: EngineKind) -> Option<String> {
                 Some(path.split('?').next().unwrap_or(path).to_string())
             }
         }
+        EngineKind::DuckDb => Some(
+            duckdb_path(url)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| ":memory:".into()),
+        ),
         EngineKind::Postgres | EngineKind::MySql => {
             let lower = url.to_ascii_lowercase();
             let rest = if lower.starts_with("postgresql://") {
@@ -1640,7 +1686,7 @@ mod tests {
 
     #[test]
     fn resolve_sqlite_relative_path() {
-        let url = resolve_sqlite_path("sqlite://./data.db", Some(Path::new("/workspace/proj")));
+        let url = resolve_embedded_path("sqlite://./data.db", Some(Path::new("/workspace/proj")));
         assert!(url.contains("/workspace/proj/data.db"));
     }
 
@@ -2088,6 +2134,7 @@ max_rows = 7
             trace_sql: false,
             profile: None,
             sqlite_allowlist: Vec::new(),
+            duckdb_allowlist: Vec::new(),
             require_approval: false,
             allow_explain_analyze: false,
             http_rate_limit_per_minute: 600,

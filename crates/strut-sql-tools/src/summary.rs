@@ -83,7 +83,7 @@ pub struct SummaryParams {
 fn quote_ident(name: &str, engine: EngineKind) -> String {
     match engine {
         EngineKind::MySql => format!("`{}`", name.replace('`', "``")),
-        EngineKind::Postgres | EngineKind::Sqlite => {
+        EngineKind::Postgres | EngineKind::Sqlite | EngineKind::DuckDb => {
             format!("\"{}\"", name.replace('"', "\"\""))
         }
     }
@@ -310,6 +310,7 @@ mod tests {
         assert_eq!(quote_ident("a`b", EngineKind::MySql), "`a``b`");
         assert_eq!(quote_ident("a\"b", EngineKind::Sqlite), "\"a\"\"b\"");
         assert_eq!(quote_ident("plain", EngineKind::Postgres), "\"plain\"");
+        assert_eq!(quote_ident("a\"b", EngineKind::DuckDb), "\"a\"\"b\"");
     }
 
     #[test]

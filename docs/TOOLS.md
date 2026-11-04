@@ -330,8 +330,8 @@ fell into the reject bucket without any doc saying so.)
 
 - SQLite read pragmas from the allowlist (`PRAGMA table_info('t')`,
   `index_list`, `foreign_key_list`, `database_list`, `page_count`, …).
-  State-changing pragmas are denied. See [CAPABILITIES.md](CAPABILITIES.md)
-  for the exact per-engine matrix.
+  State-changing pragmas are denied. DuckDB pragmas are not exposed at all.
+  See [CAPABILITIES.md](CAPABILITIES.md) for the exact per-engine matrix.
 
 ### Always rejected — in every mode, including `--allow-ddl`
 
@@ -344,7 +344,7 @@ fell into the reject bucket without any doc saying so.)
 | `LOAD DATA` | Server-side file ingestion |
 | `CALL`, `PREPARE`, `EXECUTE` (prepared-statement control) | Would bypass AST classification of the executed statement |
 | `SELECT … INTO`, `INTO OUTFILE`, `INTO DUMPFILE` in read modes | Creates tables/files; not a read |
-| Dangerous functions (per-engine denylist: `pg_read_file`, `LOAD_FILE`, `readfile`, `nextval`/`setval`, `pg_sleep`, `SLEEP`, `BENCHMARK`, …) | File access, sequence mutation, or DoS primitives |
+| Dangerous functions (per-engine denylist: `pg_read_file`, `LOAD_FILE`, `readfile`, `nextval`/`setval`, `pg_sleep`, `SLEEP`, `BENCHMARK`, DuckDB `read_*`/`*_scan`/`query`/`query_table`, …) | File access, sequence mutation, or DoS primitives |
 
 ### Not supported
 

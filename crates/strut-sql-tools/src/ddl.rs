@@ -656,6 +656,16 @@ fn build_ddl_sql_unchecked(
                         "ALTER TABLE {qualified} ALTER COLUMN {col} TYPE {data_type}"
                     ))
                 }
+                EngineKind::DuckDb => {
+                    if column.nullable.is_some() {
+                        return Err(tool_error(
+                            "alter_column on DuckDB supports type only; omit nullable and run SET/DROP NOT NULL via execute_sql",
+                        ));
+                    }
+                    Ok(format!(
+                        "ALTER TABLE {qualified} ALTER COLUMN {col} TYPE {data_type}"
+                    ))
+                }
                 EngineKind::Sqlite => Err(tool_error(
                     "alter_column unsupported on SQLite; recreate the table",
                 )),
@@ -822,7 +832,7 @@ fn quote_ident(name: &str, engine: EngineKind) -> String {
             let trimmed = name.trim().trim_matches('`');
             format!("`{}`", trimmed.replace('`', "``"))
         }
-        EngineKind::Postgres | EngineKind::Sqlite => {
+        EngineKind::Postgres | EngineKind::Sqlite | EngineKind::DuckDb => {
             let trimmed = name.trim().trim_matches('"');
             format!("\"{}\"", trimmed.replace('"', "\"\""))
         }
@@ -902,6 +912,18 @@ mod tests {
             source: None,
         };
         assert!(build_ddl_sql(&params, EngineKind::Sqlite).is_err());
+    }
+
+    #[test]
+    fn alter_column_duckdb_is_type_only() {
+        let mut params = mutate_params(SchemaMutateAction::AlterColumn, None, Some("BIGINT"));
+        let sql = build_ddl_sql(&params, EngineKind::DuckDb).unwrap();
+        let class = strut_sql_guard::classify_sql(&sql, EngineKind::DuckDb).unwrap();
+        assert_eq!(class.sql_class(), strut_sql_guard::SqlClass::Ddl);
+        params.column.as_mut().unwrap().nullable = Some(false);
+        assert!(build_ddl_sql(&params, EngineKind::DuckDb).is_err());
+        params.column.as_mut().unwrap().nullable = Some(true);
+        assert!(build_ddl_sql(&params, EngineKind::DuckDb).is_err());
     }
 
     fn mutate_params(

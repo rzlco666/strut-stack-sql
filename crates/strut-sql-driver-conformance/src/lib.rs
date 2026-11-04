@@ -3,6 +3,8 @@ use strut_sql_driver_api::TableInfo;
 use strut_sql_driver_api::{BoundQuery, EngineDriver, ObjectType, SchemaObject, SqlValue};
 
 /// Generic driver factory for conformance testing.
+// Match EngineDriver's workaround for async_trait's generated bare must_use.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait DriverFactory: Send + Sync {
     async fn create(

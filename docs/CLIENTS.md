@@ -21,8 +21,10 @@ over Streamable HTTP with `--http`. Relevant flags (verified with `--help`):
 | `--url-env DATABASE_URL` | Read the connection URL from an environment variable |
 | `--url URL` | Connection URL literal (avoid passwords in files) |
 | `--config FILE` | Multi-source TOML configuration |
-| `--workspace DIR` | Workspace root for `.env` discovery and relative SQLite paths |
+| `--workspace DIR` | Workspace root for `.env` discovery and relative embedded (SQLite/DuckDB) paths |
 | `--full-tools` | Expose the full 20-tool surface (requires `--allow-ddl` for the 7 DDL tools) |
+| `--sqlite-allowlist DIR[,DIR…]` | Constrain file-backed SQLite sources to those directories |
+| `--duckdb-allowlist DIR[,DIR…]` | Constrain file-backed DuckDB sources to those directories |
 | `--deny-columns a,b` | Redact matching result columns |
 | `--allow-writes` | Allow INSERT/UPDATE/DELETE — **not used in the safe examples below** |
 | `--allow-ddl` | Allow DDL (implies writes) — **not used in the safe examples below** |

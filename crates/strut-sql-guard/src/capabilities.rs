@@ -25,6 +25,7 @@ pub struct CapabilityRow {
     pub postgres: bool,
     pub mysql: bool,
     pub sqlite: bool,
+    pub duckdb: bool,
     /// Why the statement is unsupported / special.
     pub note: &'static str,
 }
@@ -35,6 +36,7 @@ impl CapabilityRow {
             EngineKind::Postgres => self.postgres,
             EngineKind::MySql => self.mysql,
             EngineKind::Sqlite => self.sqlite,
+            EngineKind::DuckDb => self.duckdb,
         }
     }
 }
@@ -48,6 +50,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         postgres: true,
         mysql: true,
         sqlite: true,
+        duckdb: true,
         note: "LIMIT is injected/clamped by the guard.",
     },
     CapabilityRow {
@@ -58,6 +61,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         postgres: true,
         mysql: true,
         sqlite: true,
+        duckdb: true,
         note: "Requires --allow-writes.",
     },
     CapabilityRow {
@@ -68,6 +72,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         postgres: true,
         mysql: true,
         sqlite: true,
+        duckdb: true,
         note: "Requires --allow-writes.",
     },
     CapabilityRow {
@@ -78,6 +83,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         postgres: true,
         mysql: true,
         sqlite: true,
+        duckdb: true,
         note: "Requires --allow-writes.",
     },
     CapabilityRow {
@@ -88,7 +94,8 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         postgres: true,
         mysql: false,
         sqlite: false,
-        note: "PostgreSQL 15+ only; MySQL/SQLite rejected as unsupported.",
+        duckdb: true,
+        note: "PostgreSQL 15+ and DuckDB; MySQL/SQLite rejected as unsupported.",
     },
     CapabilityRow {
         statement: "CREATE TABLE",
@@ -98,6 +105,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         postgres: true,
         mysql: true,
         sqlite: true,
+        duckdb: true,
         note: "Structured create_table also verifies the parsed class.",
     },
     CapabilityRow {
@@ -108,6 +116,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         postgres: true,
         mysql: true,
         sqlite: true,
+        duckdb: true,
         note: "SQLite supports a limited ALTER TABLE subset.",
     },
     CapabilityRow {
@@ -118,6 +127,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         postgres: true,
         mysql: true,
         sqlite: true,
+        duckdb: true,
         note: "Destructive tools require confirm:true.",
     },
     CapabilityRow {
@@ -128,6 +138,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         postgres: true,
         mysql: true,
         sqlite: false,
+        duckdb: true,
         note: "SQLite has no TRUNCATE; use DELETE (write tier).",
     },
     CapabilityRow {
@@ -138,6 +149,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         postgres: true,
         mysql: true,
         sqlite: true,
+        duckdb: true,
         note: "",
     },
     CapabilityRow {
@@ -148,6 +160,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         postgres: true,
         mysql: true,
         sqlite: true,
+        duckdb: true,
         note: "",
     },
     CapabilityRow {
@@ -158,6 +171,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         postgres: true,
         mysql: true,
         sqlite: false,
+        duckdb: true,
         note: "SQLite has no schema DDL.",
     },
     CapabilityRow {
@@ -168,7 +182,8 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         postgres: true,
         mysql: true,
         sqlite: false,
-        note: "SQLite has no CREATE DATABASE.",
+        duckdb: false,
+        note: "SQLite/DuckDB have no CREATE DATABASE; attaching databases is not exposed.",
     },
     CapabilityRow {
         statement: "CREATE FUNCTION",
@@ -178,6 +193,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         postgres: true,
         mysql: false,
         sqlite: false,
+        duckdb: false,
         note: "PostgreSQL only; sqlparser 0.62 cannot parse MySQL CREATE FUNCTION, so the server rejects it there.",
     },
     CapabilityRow {
@@ -188,7 +204,8 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         postgres: true,
         mysql: false,
         sqlite: false,
-        note: "PostgreSQL only; MySQL AUTO_INCREMENT and SQLite rowid replace it.",
+        duckdb: true,
+        note: "PostgreSQL and DuckDB; MySQL AUTO_INCREMENT and SQLite rowid replace it.",
     },
     CapabilityRow {
         statement: "COMMENT ON",
@@ -198,7 +215,8 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         postgres: true,
         mysql: false,
         sqlite: false,
-        note: "PostgreSQL syntax only; MySQL/SQLite carry comments in DDL.",
+        duckdb: false,
+        note: "DuckDB COMMENT ON is not parsed by sqlparser 0.62's DuckDbDialect; PostgreSQL syntax only on this surface.",
     },
     CapabilityRow {
         statement: "ALTER SEQUENCE",
@@ -208,6 +226,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         postgres: false,
         mysql: false,
         sqlite: false,
+        duckdb: false,
         note: "Not representable by sqlparser 0.62; rejected at parse time.",
     },
     CapabilityRow {
@@ -218,6 +237,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         postgres: true,
         mysql: false,
         sqlite: true,
+        duckdb: true,
         note: "Admin tier; requires an Admin grant plus --allow-grants.",
     },
     CapabilityRow {
@@ -228,6 +248,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         postgres: true,
         mysql: true,
         sqlite: true,
+        duckdb: true,
         note: "Admin tier; requires an Admin grant plus --allow-grants.",
     },
     CapabilityRow {
@@ -238,7 +259,8 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         postgres: false,
         mysql: false,
         sqlite: true,
-        note: "Allowlisted read pragmas only; write pragmas are denied.",
+        duckdb: false,
+        note: "SQLite allowlisted read pragmas only; DuckDB pragmas are not exposed.",
     },
     CapabilityRow {
         statement: "PRAGMA (write)",
@@ -248,6 +270,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         postgres: false,
         mysql: false,
         sqlite: false,
+        duckdb: false,
         note: "State-changing pragmas are never exposed.",
     },
     CapabilityRow {
@@ -258,7 +281,8 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         postgres: false,
         mysql: true,
         sqlite: false,
-        note: "MySQL introspection statements.",
+        duckdb: true,
+        note: "MySQL introspection statements; DuckDB supports SHOW TABLES only here.",
     },
     CapabilityRow {
         statement: "EXPLAIN",
@@ -268,6 +292,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         postgres: true,
         mysql: true,
         sqlite: true,
+        duckdb: true,
         note: "Plain EXPLAIN does not execute the inner statement.",
     },
     CapabilityRow {
@@ -278,6 +303,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         postgres: true,
         mysql: true,
         sqlite: false,
+        duckdb: true,
         note: "Executes the statement: requires write mode and --allow-explain-analyze in the advisor.",
     },
     CapabilityRow {
@@ -288,6 +314,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         postgres: true,
         mysql: true,
         sqlite: false,
+        duckdb: false,
         note: "Admin gate: requires an Admin grant and --allow-grants.",
     },
     CapabilityRow {
@@ -298,6 +325,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         postgres: true,
         mysql: true,
         sqlite: false,
+        duckdb: false,
         note: "Admin gate: requires an Admin grant and --allow-grants.",
     },
     CapabilityRow {
@@ -308,6 +336,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         postgres: false,
         mysql: false,
         sqlite: false,
+        duckdb: false,
         note: "Never exposed: sessions are managed by the server.",
     },
     CapabilityRow {
@@ -318,6 +347,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         postgres: false,
         mysql: false,
         sqlite: false,
+        duckdb: false,
         note: "Session state is managed by the server; not exposed.",
     },
     CapabilityRow {
@@ -328,6 +358,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         postgres: false,
         mysql: false,
         sqlite: false,
+        duckdb: false,
         note: "Administrative DDL outside the supported surface; use a database client.",
     },
     CapabilityRow {
@@ -338,6 +369,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         postgres: false,
         mysql: false,
         sqlite: false,
+        duckdb: false,
         note: "Permanently denied.",
     },
 ];
@@ -353,7 +385,8 @@ pub fn unsupported_statement(engine: EngineKind, stmt: &Statement) -> Option<Str
     };
     match stmt {
         Statement::CreateSequence { .. } => {
-            (engine != EngineKind::Postgres).then(|| unsupported_row("CREATE SEQUENCE"))
+            (!matches!(engine, EngineKind::Postgres | EngineKind::DuckDb))
+                .then(|| unsupported_row("CREATE SEQUENCE"))
         }
         Statement::Comment { .. } => {
             (engine != EngineKind::Postgres).then(|| unsupported_row("COMMENT ON"))
@@ -373,17 +406,16 @@ pub fn unsupported_statement(engine: EngineKind, stmt: &Statement) -> Option<Str
             (engine == EngineKind::Sqlite).then(|| unsupported_row("CREATE SCHEMA"))
         }
         Statement::CreateDatabase { .. } => {
-            (engine == EngineKind::Sqlite).then(|| unsupported_row("CREATE DATABASE"))
+            matches!(engine, EngineKind::Sqlite | EngineKind::DuckDb)
+                .then(|| unsupported_row("CREATE DATABASE"))
         }
-        Statement::CreateFunction(_) => {
-            (engine == EngineKind::Sqlite).then(|| unsupported_row("CREATE FUNCTION"))
-        }
+        Statement::CreateFunction(_) => matches!(engine, EngineKind::Sqlite | EngineKind::DuckDb)
+            .then(|| unsupported_row("CREATE FUNCTION")),
         Statement::Truncate { .. } => {
             (engine == EngineKind::Sqlite).then(|| unsupported_row("TRUNCATE TABLE"))
         }
-        Statement::Merge { .. } => {
-            (engine != EngineKind::Postgres).then(|| unsupported_row("MERGE"))
-        }
+        Statement::Merge { .. } => (!matches!(engine, EngineKind::Postgres | EngineKind::DuckDb))
+            .then(|| unsupported_row("MERGE")),
         Statement::Explain {
             analyze: true,
             statement,
@@ -395,6 +427,10 @@ pub fn unsupported_statement(engine: EngineKind, stmt: &Statement) -> Option<Str
             // The inner statement's own capability still applies.
             unsupported_statement(engine, statement)
         }
+        Statement::Explain { statement, .. } if engine == EngineKind::DuckDb => {
+            unsupported_statement(engine, statement)
+        }
+        Statement::ShowTables { .. } if engine == EngineKind::DuckDb => None,
         Statement::ShowTables { .. }
         | Statement::ShowColumns { .. }
         | Statement::ShowVariable { .. }
@@ -411,7 +447,8 @@ pub fn unsupported_statement(engine: EngineKind, stmt: &Statement) -> Option<Str
             (engine != EngineKind::MySql).then(|| unsupported_row("SHOW"))
         }
         Statement::Grant { .. } | Statement::Revoke { .. } => {
-            (engine == EngineKind::Sqlite).then(|| unsupported_row("GRANT/REVOKE"))
+            matches!(engine, EngineKind::Sqlite | EngineKind::DuckDb)
+                .then(|| unsupported_row("GRANT/REVOKE"))
         }
         Statement::StartTransaction { .. }
         | Statement::Commit { .. }
@@ -430,6 +467,7 @@ pub fn engine_label(engine: EngineKind) -> &'static str {
         EngineKind::Postgres => "postgres",
         EngineKind::MySql => "mysql",
         EngineKind::Sqlite => "sqlite",
+        EngineKind::DuckDb => "duckdb",
     }
 }
 
@@ -450,7 +488,12 @@ mod tests {
     #[test]
     fn every_supported_matrix_row_is_classified_and_runs_at_its_tier() {
         for row in CAPABILITY_MATRIX {
-            for engine in [EngineKind::Postgres, EngineKind::MySql, EngineKind::Sqlite] {
+            for engine in [
+                EngineKind::Postgres,
+                EngineKind::MySql,
+                EngineKind::Sqlite,
+                EngineKind::DuckDb,
+            ] {
                 if !row.supported(engine) {
                     continue;
                 }
@@ -484,7 +527,12 @@ mod tests {
     #[test]
     fn every_unsupported_matrix_row_is_rejected() {
         for row in CAPABILITY_MATRIX {
-            for engine in [EngineKind::Postgres, EngineKind::MySql, EngineKind::Sqlite] {
+            for engine in [
+                EngineKind::Postgres,
+                EngineKind::MySql,
+                EngineKind::Sqlite,
+                EngineKind::DuckDb,
+            ] {
                 if row.supported(engine) {
                     continue;
                 }
