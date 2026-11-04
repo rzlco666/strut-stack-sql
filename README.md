@@ -8,14 +8,14 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
   <a href="https://registry.modelcontextprotocol.io/v0/servers?search=io.github.rzlco666/strut-stack-sql"><img src="https://img.shields.io/badge/MCP%20Registry-io.github.rzlco666%2Fstrut--stack--sql-purple" alt="MCP Registry"></a>
   <img src="https://img.shields.io/badge/Rust-1.88%2B-orange" alt="Rust 1.88+">
-  <img src="https://img.shields.io/badge/engines-PostgreSQL%20%C2%B7%20MySQL%20%C2%B7%20SQLite-informational" alt="PostgreSQL · MySQL · SQLite">
+  <img src="https://img.shields.io/badge/engines-PostgreSQL%20%C2%B7%20MySQL%20%C2%B7%20SQLite%20%C2%B7%20DuckDB-informational" alt="PostgreSQL · MySQL · SQLite · DuckDB">
   <img src="https://img.shields.io/badge/version-2.0.0-success" alt="Version 2.0.0">
 </p>
 
 <p align="center">
   <strong>Light strut. Extreme load.</strong><br>
   A token-efficient <a href="https://modelcontextprotocol.io">MCP</a> server that lets AI agents query
-  <strong>PostgreSQL</strong>, <strong>MySQL</strong>, and <strong>SQLite</strong> — safely, in one small Rust binary.
+  <strong>PostgreSQL</strong>, <strong>MySQL</strong>, <strong>SQLite</strong>, and <strong>DuckDB</strong> — safely, in one small Rust binary.
 </p>
 
 ---
@@ -38,7 +38,7 @@ Strut Stack SQL does not charge them:
 - **3 tools by default.** The other 17 are opt-in: 10 introspection tools with `--full-tools`, and 7 DDL tools only when `--full-tools --allow-ddl` is set.
 - **Columnar results** — `{cols, rows, meta}` sends column names once, not once per row.
 - **Every statement passes one AST guard** — parsed with `sqlparser`, classified recursively (including CTE bodies), checked against a tier, LIMIT-clamped, and rejected *before* a pool connection is checked out.
-- **One static binary, three engines**, behind a stable driver contract.
+- **One static binary, four engines**, behind a stable driver contract.
 
 ## Install
 
@@ -143,14 +143,16 @@ flowchart LR
   DriverAPI --> PG[strut-sql-driver-postgres]
   DriverAPI --> MY[strut-sql-driver-mysql]
   DriverAPI --> SQ[strut-sql-driver-sqlite]
+  DriverAPI --> DK[strut-sql-driver-duckdb]
   PG --> DB[(PostgreSQL)]
   MY --> DB2[(MySQL)]
   SQ --> DB3[(SQLite)]
+  DK --> DB4[(DuckDB file / memory)]
   Tools --> Format[strut-sql-format]
   Server --> Core[strut-sql-core]
 ```
 
-Ten crates plus a thin binary. The core, guard, format, tools, and server crates never import a
+Eleven crates plus a thin binary. The core, guard, format, tools, and server crates never import a
 database library; only a driver crate does.
 
 | Crate | Responsibility |
@@ -160,6 +162,7 @@ database library; only a driver crate does.
 | `strut-sql-driver-postgres` | PostgreSQL driver |
 | `strut-sql-driver-mysql` | MySQL driver (`mysql://`; engine hint `mariadb` maps to it) |
 | `strut-sql-driver-sqlite` | SQLite driver |
+| `strut-sql-driver-duckdb` | DuckDB driver (embedded; `duckdb::memory:` or a file) |
 | `strut-sql-driver-conformance` | Shared Driver Conformance Test Kit |
 | `strut-sql-core` | Config v2, source/driver registries, `Principal` + `Policy`, audit, pool ownership |
 | `strut-sql-guard` | Recursive AST classification, function denylist, LIMIT management, complexity, placeholder scanner |
@@ -279,7 +282,7 @@ are recorded as `not_run`, together with the competitor comparison. Methodology 
 | [docs/CONFORMANCE.md](docs/CONFORMANCE.md) | MCP conformance gate and results |
 | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Measurements with their limits stated |
 | [docs/TEST_REPORT.md](docs/TEST_REPORT.md) | What the test suites cover |
-| [docs/POSTGRES.md](docs/POSTGRES.md) · [docs/MYSQL.md](docs/MYSQL.md) · [docs/SQLITE.md](docs/SQLITE.md) | Per-engine notes |
+| [docs/POSTGRES.md](docs/POSTGRES.md) · [docs/MYSQL.md](docs/MYSQL.md) · [docs/SQLITE.md](docs/SQLITE.md) · [docs/DUCKDB.md](docs/DUCKDB.md) | Per-engine notes |
 | [docs/MCP_REGISTRY.md](docs/MCP_REGISTRY.md) | MCP Registry / MCPB publishing |
 
 ## Contributing

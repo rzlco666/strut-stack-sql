@@ -1,5 +1,6 @@
 mod capabilities;
 mod classify;
+mod duckdb;
 mod params;
 mod patterns;
 mod policy;
@@ -10,7 +11,7 @@ use sqlparser::ast::{
     JoinConstraint, JoinOperator, LimitClause, ObjectName, Offset, OffsetRows, Query, Select,
     SelectItem, SetExpr, Statement, TableFactor, Value as SqlValue, Values,
 };
-use sqlparser::dialect::{Dialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect};
+use sqlparser::dialect::{Dialect, DuckDbDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect};
 use sqlparser::parser::Parser;
 
 use strut_sql_driver_api::EngineKind;
@@ -160,6 +161,7 @@ fn dialect_for(engine: EngineKind) -> Box<dyn Dialect> {
         EngineKind::Postgres => Box::new(PostgreSqlDialect {}),
         EngineKind::MySql => Box::new(MySqlDialect {}),
         EngineKind::Sqlite => Box::new(SQLiteDialect {}),
+        EngineKind::DuckDb => Box::new(DuckDbDialect),
     }
 }
 
@@ -473,20 +475,34 @@ fn denied_functions_for(engine: EngineKind) -> &'static [DeniedFunction] {
         EngineKind::Postgres => DENIED_FUNCTIONS_PG,
         EngineKind::MySql => DENIED_FUNCTIONS_MYSQL,
         EngineKind::Sqlite => DENIED_FUNCTIONS_SQLITE,
+        EngineKind::DuckDb => &[],
     }
 }
 
 fn check_denied_functions(stmt: &Statement, engine: EngineKind) -> Result<(), GuardError> {
     let denied = denied_functions_for(engine);
-    scan_statement_functions(stmt, &mut |name| {
-        if let Some(hit) = denied.iter().find(|d| d.name == name) {
+    let mut check = |name: &str| {
+        let reason = denied
+            .iter()
+            .find(|d| d.name == name)
+            .map(|d| d.reason)
+            .or_else(|| {
+                (engine == EngineKind::DuckDb)
+                    .then(|| duckdb::denied_function_reason(name))
+                    .flatten()
+            });
+        if let Some(reason) = reason {
             return Err(GuardError::Denied(format!(
-                "function '{name}' is not allowed: {}",
-                hit.reason
+                "function '{name}' is not allowed: {reason}"
             )));
         }
         Ok(())
-    })
+    };
+    if engine == EngineKind::DuckDb {
+        duckdb::scan_functions(stmt, &mut check)
+    } else {
+        scan_statement_functions(stmt, &mut check)
+    }
 }
 
 /// Last component of a possibly schema-qualified function name, lower-cased

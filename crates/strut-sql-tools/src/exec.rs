@@ -557,7 +557,7 @@ pub(crate) fn sql_value_to_json(value: SqlValue, engine: EngineKind) -> Value {
         SqlValue::Date(d) => Value::String(d.to_string()),
         SqlValue::DateTime(dt) => Value::String(dt.to_string()),
         SqlValue::Binary(b) => match engine {
-            EngineKind::Postgres | EngineKind::Sqlite => {
+            EngineKind::Postgres | EngineKind::Sqlite | EngineKind::DuckDb => {
                 let mut map = serde_json::Map::new();
                 map.insert("$blob_hex".into(), Value::String(bytes_to_hex(&b)));
                 Value::Object(map)
@@ -733,10 +733,12 @@ mod tests {
     }
 
     #[test]
-    fn binary_cells_are_tagged_hex_for_postgres_and_sqlite() {
+    fn binary_cells_are_tagged_hex_for_postgres_sqlite_and_duckdb() {
         let v = sql_value_to_json(SqlValue::Binary(b"edoc".to_vec()), EngineKind::Sqlite);
         assert_eq!(v, serde_json::json!({"$blob_hex": "65646f63"}));
         let v = sql_value_to_json(SqlValue::Binary(b"edoc".to_vec()), EngineKind::Postgres);
+        assert_eq!(v, serde_json::json!({"$blob_hex": "65646f63"}));
+        let v = sql_value_to_json(SqlValue::Binary(b"edoc".to_vec()), EngineKind::DuckDb);
         assert_eq!(v, serde_json::json!({"$blob_hex": "65646f63"}));
         let v = sql_value_to_json(SqlValue::Binary(b"edoc".to_vec()), EngineKind::MySql);
         assert_eq!(v, Value::String("65646f63".into()));

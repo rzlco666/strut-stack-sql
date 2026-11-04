@@ -18,10 +18,10 @@ flowchart LR
 
 ### 1. AST guard (`crates/strut-sql-guard/`)
 
-- Dialects: `PostgreSqlDialect` / `MySqlDialect` / `SQLiteDialect`
+- Dialects: `PostgreSqlDialect` / `MySqlDialect` / `SQLiteDialect` / `DuckDbDialect`
 - Reject empty / multi-statement strings
 - Classify: Read / Dml / Ddl / Admin / Txn / Other (unknown → deny)
-- Per-engine capability matrix (PRD-F3-09): unsupported statements are rejected before execution; see [CAPABILITIES.md](CAPABILITIES.md). `VACUUM`/`ANALYZE` are Admin; PG `CREATE SEQUENCE`/`COMMENT ON` are Ddl; SQLite read PRAGMAs are Read.
+- Per-engine capability matrix (PRD-F3-09): unsupported statements are rejected before execution; see [CAPABILITIES.md](CAPABILITIES.md). `VACUUM`/`ANALYZE` are Admin; PG `CREATE SEQUENCE`/`COMMENT ON` are Ddl; SQLite read PRAGMAs are Read; DuckDB exposes no PRAGMA, ATTACH, or extension statements.
 - Explicit deny labels: `COPY`, `CALL`, `ATTACH DATABASE`, `LOAD DATA`, `PREPARE`, `EXECUTE`
 - Complexity limits: max 8 joins, max subquery depth 5 (checked across the whole statement tree, including subqueries and CTE bodies)
 - Enforce against `WriteMode`
@@ -33,7 +33,7 @@ flowchart LR
 
 - **CTE bodies are classified recursively.** A `WITH x AS (DELETE … RETURNING …) SELECT …` is DML, not a read; the class of a query is the most dangerous class found anywhere in its tree (CTEs, subqueries, set operations).
 - **`SELECT … INTO` / `INTO OUTFILE` / `INTO DUMPFILE` are not reads.** They create tables or files and are denied in read-only mode.
-- **Dangerous functions are denied or tier-gated per engine** — file access (`pg_read_file`, `pg_ls_dir`, `lo_export`, MySQL `LOAD_FILE`, SQLite `readfile`/`writefile`), sequence mutation (`nextval`/`setval`), session/DoS functions (`pg_sleep`, `pg_terminate_backend`, MySQL `SLEEP`/`BENCHMARK`), and extension/plugin loaders (`dblink`, …). A function on the denylist can never ride along inside an otherwise innocent `SELECT`.
+- **Dangerous functions are denied or tier-gated per engine** — file access (`pg_read_file`, `pg_ls_dir`, `lo_export`, MySQL `LOAD_FILE`, SQLite `readfile`/`writefile`, DuckDB `read_*`/`*_scan`/`query`/`query_table`), sequence mutation (`nextval`/`setval`), session/DoS functions (`pg_sleep`, `pg_terminate_backend`, MySQL `SLEEP`/`BENCHMARK`), and extension/plugin loaders (`dblink`, …). A function on the denylist can never ride along inside an otherwise innocent `SELECT`.
 - **Parameterized row limits are clamped too.** `LIMIT ?` and `FETCH FIRST ? ROWS ONLY` are rewritten against `--max-rows` after parameter binding is accounted for — a parameter value can no longer widen a result past the cap.
 
 ### 1c. Timeouts
@@ -42,6 +42,7 @@ flowchart LR
 - Postgres: `SET statement_timeout` on each new pool connection
 - MySQL: `SET SESSION max_execution_time` (SELECT) on connect
 - SQLite: client timeout only (no server kill API via sqlx pool)
+- DuckDB: client timeout plus native `InterruptHandle` interruption from a watchdog thread
 
 ### 1b. Parameterized queries (`params`)
 
@@ -72,6 +73,8 @@ Transaction control (`BEGIN`/`COMMIT`/`ROLLBACK`/`SAVEPOINT`) is always blocked 
 - Postgres (read-only): `SET default_transaction_read_only = on`
 - MySQL (read-only): `SET SESSION TRANSACTION READ ONLY`
 - SQLite (read-only): `?mode=ro` on connect URL
+- DuckDB (read-only): `AccessMode::ReadOnly` on the connection (file databases; in-memory relies on the guard)
+- DuckDB (all modes): `enable_external_access=false`, extension autoload/autoinstall off, `--duckdb-allowlist` for file paths
 
 ### 4. Operational recommendation
 

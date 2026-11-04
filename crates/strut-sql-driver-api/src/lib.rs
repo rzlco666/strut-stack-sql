@@ -13,6 +13,7 @@ pub enum EngineKind {
     Postgres,
     MySql,
     Sqlite,
+    DuckDb,
 }
 
 /// Connection-pool options shared by every driver.

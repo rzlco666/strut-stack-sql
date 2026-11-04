@@ -672,6 +672,9 @@ pub async fn handle_analyze_query(
         crate::explain::ExplainError::Database(message) => {
             tool_error_code(message, ToolErrorKind::Execution)
         }
+        crate::explain::ExplainError::Unsupported(message) => {
+            tool_error_code(format!("Unsupported: {message}"), ToolErrorKind::Validation)
+        }
         crate::explain::ExplainError::Other(message) => {
             let kind = if message.contains("only supports")
                 || message.contains("not supported")

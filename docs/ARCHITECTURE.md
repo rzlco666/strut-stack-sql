@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Expose PostgreSQL, MySQL, and SQLite to AI agents over the
+Expose PostgreSQL, MySQL, SQLite, and DuckDB to AI agents over the
 [Model Context Protocol](https://modelcontextprotocol.io) with:
 
 - a small default tool surface and columnar results (token efficiency);
@@ -24,16 +24,18 @@ flowchart TB
   DriverAPI --> PG[strut-sql-driver-postgres]
   DriverAPI --> MY[strut-sql-driver-mysql]
   DriverAPI --> SQ[strut-sql-driver-sqlite]
+  DriverAPI --> DK[strut-sql-driver-duckdb]
   PG --> DB1[(PostgreSQL)]
   MY --> DB2[(MySQL)]
   SQ --> DB3[(SQLite)]
+  DK --> DB4[(DuckDB file / memory)]
   Tools --> Format[strut-sql-format columnar / rows]
   Format --> Agent
 ```
 
 ## Workspace layout
 
-One workspace, one shipped binary (`strut-stack-sql`). Ten crates carry the
+One workspace, one shipped binary (`strut-stack-sql`). Eleven crates carry the
 product; the binary crate is a thin entry point.
 
 ```
@@ -43,6 +45,7 @@ crates/
   strut-sql-driver-postgres/    # PostgreSQL driver
   strut-sql-driver-mysql/       # MySQL driver
   strut-sql-driver-sqlite/      # SQLite driver
+  strut-sql-driver-duckdb/      # DuckDB driver (embedded)
   strut-sql-driver-conformance/ # Driver Conformance Test Kit
   strut-sql-core/               # config, registries, Principal/Policy, pools
   strut-sql-guard/              # classification, denylist, LIMIT, placeholders

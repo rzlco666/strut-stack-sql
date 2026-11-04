@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Result};
 use strut_sql_driver_api::{ConnectOptions, DriverError, EngineDriver, EngineKind};
+use strut_sql_driver_duckdb::DuckDbDriver;
 use strut_sql_driver_mysql::MySqlDriver;
 use strut_sql_driver_postgres::PostgresDriver;
 use strut_sql_driver_sqlite::SqliteDriver;
@@ -142,7 +143,7 @@ pub async fn connect_driver(
     engine: EngineKind,
     options: &ConnectOptions,
 ) -> Result<Arc<dyn EngineDriver>, DriverError> {
-    if !matches!(engine, EngineKind::Sqlite) {
+    if !matches!(engine, EngineKind::Sqlite | EngineKind::DuckDb) {
         tcp_preflight(url, engine)
             .await
             .map_err(|e| DriverError::Connection(e.to_string()))?;
@@ -157,6 +158,9 @@ pub async fn connect_driver(
         }
         EngineKind::Sqlite => {
             Arc::new(*SqliteDriver::from_connection_string_with_options(url, options).await?)
+        }
+        EngineKind::DuckDb => {
+            Arc::new(*DuckDbDriver::from_connection_string_with_options(url, options).await?)
         }
     };
     Ok(driver)
@@ -225,6 +229,7 @@ pub fn detect_engine_from_url(hint: Option<&str>, url: &str) -> Result<EngineKin
             "postgres" | "postgresql" | "pg" => Ok(EngineKind::Postgres),
             "mysql" | "mariadb" => Ok(EngineKind::MySql),
             "sqlite" => Ok(EngineKind::Sqlite),
+            "duckdb" => Ok(EngineKind::DuckDb),
             other => bail!("unknown engine hint '{other}'"),
         };
     }
@@ -235,8 +240,10 @@ pub fn detect_engine_from_url(hint: Option<&str>, url: &str) -> Result<EngineKin
         Ok(EngineKind::MySql)
     } else if lower.starts_with("sqlite:") || lower.starts_with("sqlite://") {
         Ok(EngineKind::Sqlite)
+    } else if lower.starts_with("duckdb:") {
+        Ok(EngineKind::DuckDb)
     } else {
-        bail!("cannot detect engine from URL scheme; use postgresql://, mysql://, or sqlite:")
+        bail!("cannot detect engine from URL scheme; use postgresql://, mysql://, sqlite:, or duckdb:")
     }
 }
 

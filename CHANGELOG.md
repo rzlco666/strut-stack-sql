@@ -1,5 +1,21 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **DuckDB embedded driver (R3-01 probe).** `strut-sql-driver-duckdb` implements
+  the existing `EngineDriver` contract over one serialized connection:
+  `duckdb::memory:` and file databases, `?` parameter binding, lossless neutral
+  values (HUGEINT/UHUGEINT/DECIMAL, LIST/ARRAY, UUID, BLOB), native catalog
+  introspection, `EXPLAIN`/`EXPLAIN ANALYZE` plan normalization, and
+  `InterruptHandle` statement timeouts. Configuration accepts
+  `DATABASE_URL=duckdb:…`, `DUCKDB_URL`, `engine = "duckdb"` in a multi-source
+  TOML, and a separate `--duckdb-allowlist` for file access. The guard parses
+  with `DuckDbDialect`, denies DuckDB external readers, dynamic SQL, `ATTACH`,
+  and extension primitives, and walks table policy over the wider DuckDB AST.
+  External access is disabled on the connection itself.
+
 ## [2.0.0] — 2026-11-03
 
 Major, breaking release. There is no v1 compatibility layer: the tool surface,

@@ -293,8 +293,13 @@ pub fn enforce_table_policy(
     policy: &TablePolicy,
     engine: strut_sql_driver_api::EngineKind,
 ) -> Result<(), GuardError> {
-    let mut tables = Vec::new();
-    collect_statement_tables(statement, &mut tables);
+    let tables = if engine == strut_sql_driver_api::EngineKind::DuckDb {
+        crate::duckdb::policy_tables(statement, policy)?
+    } else {
+        let mut tables = Vec::new();
+        collect_statement_tables(statement, &mut tables);
+        tables
+    };
     let tables = dedup_tables(tables)?;
     for table in &tables {
         if !policy.allows_table(table.schema.as_deref(), &table.table) {
