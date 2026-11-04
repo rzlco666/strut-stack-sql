@@ -57,7 +57,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         duckdb: true,
         clickhouse: true,
         sqlserver: true,
-        note: "LIMIT is injected/clamped by the guard.", note: "Row bounds use LIMIT/FETCH, or TOP/OFFSET FETCH on SQL Server.",
+        note: "LIMIT is injected/clamped by the guard. Row bounds use LIMIT/FETCH, or TOP/OFFSET FETCH on SQL Server.",
     },
     CapabilityRow {
         statement: "INSERT",
@@ -226,7 +226,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         duckdb: false,
         clickhouse: false,
         sqlserver: false,
-        note: "PostgreSQL only; sqlparser 0.62 cannot parse MySQL CREATE FUNCTION, so the server rejects it there.", note: "PostgreSQL only; routine bodies are not safely representable for other engines by sqlparser 0.62.",
+        note: "PostgreSQL only; sqlparser 0.62 cannot parse MySQL CREATE FUNCTION, so the server rejects it there; routine bodies are not safely representable for other engines by sqlparser 0.62.",
     },
     CapabilityRow {
         statement: "CREATE SEQUENCE",
