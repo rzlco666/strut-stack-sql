@@ -8,14 +8,14 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
   <a href="https://registry.modelcontextprotocol.io/v0/servers?search=io.github.rzlco666/strut-stack-sql"><img src="https://img.shields.io/badge/MCP%20Registry-io.github.rzlco666%2Fstrut--stack--sql-purple" alt="MCP Registry"></a>
   <img src="https://img.shields.io/badge/Rust-1.88%2B-orange" alt="Rust 1.88+">
-  <img src="https://img.shields.io/badge/engines-PostgreSQL%20%C2%B7%20MySQL%20%C2%B7%20SQLite%20%C2%B7%20DuckDB-informational" alt="PostgreSQL · MySQL · SQLite · DuckDB">
+  <img src="https://img.shields.io/badge/engines-PostgreSQL%20%C2%B7%20MySQL%20%C2%B7%20SQLite%20%C2%B7%20DuckDB%20%C2%B7%20ClickHouse-informational" alt="PostgreSQL · MySQL · SQLite · DuckDB · ClickHouse">
   <img src="https://img.shields.io/badge/version-2.0.0-success" alt="Version 2.0.0">
 </p>
 
 <p align="center">
   <strong>Light strut. Extreme load.</strong><br>
   A token-efficient <a href="https://modelcontextprotocol.io">MCP</a> server that lets AI agents query
-  <strong>PostgreSQL</strong>, <strong>MySQL</strong>, <strong>SQLite</strong>, and <strong>DuckDB</strong> — safely, in one small Rust binary.
+  <strong>PostgreSQL</strong>, <strong>MySQL</strong>, <strong>SQLite</strong>, <strong>DuckDB</strong>, and <strong>ClickHouse</strong> — safely, in one small Rust binary.
 </p>
 
 ---
@@ -144,10 +144,12 @@ flowchart LR
   DriverAPI --> MY[strut-sql-driver-mysql]
   DriverAPI --> SQ[strut-sql-driver-sqlite]
   DriverAPI --> DK[strut-sql-driver-duckdb]
+  DriverAPI --> CH[strut-sql-driver-clickhouse]
   PG --> DB[(PostgreSQL)]
   MY --> DB2[(MySQL)]
   SQ --> DB3[(SQLite)]
   DK --> DB4[(DuckDB file / memory)]
+  CH --> DB5[(ClickHouse HTTP)]
   Tools --> Format[strut-sql-format]
   Server --> Core[strut-sql-core]
 ```
@@ -163,6 +165,7 @@ database library; only a driver crate does.
 | `strut-sql-driver-mysql` | MySQL driver (`mysql://`; engine hint `mariadb` maps to it) |
 | `strut-sql-driver-sqlite` | SQLite driver |
 | `strut-sql-driver-duckdb` | DuckDB driver (embedded; `duckdb::memory:` or a file) |
+| `strut-sql-driver-clickhouse` | ClickHouse driver (`clickhouse://`, `clickhouses://` for TLS; HTTP interface) |
 | `strut-sql-driver-conformance` | Shared Driver Conformance Test Kit |
 | `strut-sql-core` | Config v2, source/driver registries, `Principal` + `Policy`, audit, pool ownership |
 | `strut-sql-guard` | Recursive AST classification, function denylist, LIMIT management, complexity, placeholder scanner |

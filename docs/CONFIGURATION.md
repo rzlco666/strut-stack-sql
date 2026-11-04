@@ -126,6 +126,19 @@ DATABASE_URL=duckdb::memory:
 DUCKDB_URL=duckdb://./data/analytics.duckdb
 ```
 
+# ClickHouse HTTP interface (8123 plain, 8443 TLS)
+DATABASE_URL=clickhouse://user:pass@localhost:8123/default
+DATABASE_URL=clickhouses://user:pass@ch.example.com:8443/analytics
+```
+
+ClickHouse sources are detected from the `clickhouse://` / `clickhouses://`
+scheme; an `http://` or `https://` URL needs `engine = "clickhouse"` because
+the scheme alone is ambiguous. Unknown query parameters are passed to
+ClickHouse as per-request settings (for example
+`clickhouse://host/db?max_memory_usage=2000000000`), credentials travel as
+`X-ClickHouse-User` / `X-ClickHouse-Key` headers, and `?database=` overrides
+the path.
+
 ```env
 POSTGRES_HOST=localhost
 POSTGRES_PORT=5432
@@ -312,7 +325,7 @@ renaming anything:
 | Field | Value |
 |---|---|
 | `otel.name` | `execute_sql` |
-| `db.system` | engine (postgresql/mysql/sqlite/duckdb) |
+| `db.system` | engine (postgresql/mysql/sqlite/duckdb/clickhouse) |
 | `db.operation` | `execute` |
 | `strut.source` | configured source name |
 | `strut.principal` | 12 hex chars of SHA-256 of the principal id |

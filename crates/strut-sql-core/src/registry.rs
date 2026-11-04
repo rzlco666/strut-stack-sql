@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use anyhow::{bail, Result};
 use strut_sql_driver_api::{ConnectOptions, DriverError, EngineDriver, EngineKind};
-use strut_sql_driver_duckdb::DuckDbDriver;
 use strut_sql_driver_clickhouse::ClickHouseDriver;
+use strut_sql_driver_duckdb::DuckDbDriver;
 use strut_sql_driver_mysql::MySqlDriver;
 use strut_sql_driver_postgres::PostgresDriver;
 use strut_sql_driver_sqlite::SqliteDriver;
@@ -162,6 +162,7 @@ pub async fn connect_driver(
         }
         EngineKind::DuckDb => {
             Arc::new(*DuckDbDriver::from_connection_string_with_options(url, options).await?)
+        }
         EngineKind::ClickHouse => {
             Arc::new(*ClickHouseDriver::from_connection_string_with_options(url, options).await?)
         }

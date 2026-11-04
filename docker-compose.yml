@@ -34,3 +34,19 @@ services:
       timeout: 5s
       retries: 15
       start_period: 30s
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    container_name: mcp-sql-clickhouse
+    environment:
+      CLICKHOUSE_SKIP_USER_SETUP: "1"
+    ports:
+      - "8124:8123"
+    volumes:
+      - ./docker/seed/clickhouse.sql:/docker-entrypoint-initdb.d/01-seed.sql:ro
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s

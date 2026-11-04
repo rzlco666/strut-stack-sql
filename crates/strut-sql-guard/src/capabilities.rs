@@ -443,10 +443,11 @@ pub fn unsupported_statement(engine: EngineKind, stmt: &Statement) -> Option<Str
             matches!(engine, EngineKind::Sqlite | EngineKind::DuckDb)
                 .then(|| unsupported_row("CREATE DATABASE"))
         }
-        Statement::CreateFunction(_) => {
-            matches!(engine, EngineKind::Sqlite | EngineKind::DuckDb | EngineKind::ClickHouse)
-                .then(|| unsupported_row("CREATE FUNCTION"))
-        }
+        Statement::CreateFunction(_) => matches!(
+            engine,
+            EngineKind::Sqlite | EngineKind::DuckDb | EngineKind::ClickHouse
+        )
+        .then(|| unsupported_row("CREATE FUNCTION")),
         Statement::Truncate { .. } => {
             (engine == EngineKind::Sqlite).then(|| unsupported_row("TRUNCATE TABLE"))
         }

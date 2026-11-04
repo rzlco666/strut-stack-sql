@@ -1432,6 +1432,11 @@ fn resolve_url_from_env() -> Result<String> {
     }
 
     if let Ok(url) = std::env::var("DUCKDB_URL") {
+        if !url.is_empty() {
+            return Ok(url);
+        }
+    }
+
     if let Ok(url) = std::env::var("CLICKHOUSE_URL") {
         if !url.is_empty() {
             return Ok(url);
