@@ -1,80 +1,88 @@
-# Test Report — strut-stack-sql v1.1.0
+# Test Report — strut-stack-sql 2.0.0
 
 What the automated tests in this repository actually cover, counted from the
-code — no scorecards, no self-assessment. If a number here ever disagrees
-with a fresh count from the tree, the tree wins and this file is the bug.
+code — no scorecards, no self-assessment. If a number here disagrees with a
+fresh count from the tree, the tree wins and this file is the bug.
 
-- **Version:** 1.1.0
-- **Counted on:** 2026-11-02
-- **Counting method:** `grep -rn "#\[test\]\|#\[tokio::test\]" src tests`
-  (test attributes), cross-checked per file below. Snapshot taken while the
-  1.1.0 hardening was landing (count verified stable across two consecutive
-  counts); **recount at release freeze** before quoting externally.
+- **Version:** 2.0.0
+- **Counted on:** 2026-11-04 (final release-freeze recount, `cargo test --workspace`)
+- **Counting method:** `grep -rnE "^\s*#\[(tokio::)?test\b" --include=*.rs crates src tests`
+  for test attributes, then `grep -rnE "^\s*#\[ignore" …` for tests that need a live
+  engine, and finally the per-binary `test result:` lines of an actual
+  `cargo test --workspace` run. The final count is **398 functions, 381 run**;
+  `#[ignore]`d tests are 17: 9 MySQL integration, 5 HTTP integration (live
+  PostgreSQL/MySQL), 2 driver-conformance cases and the pgvector case.
+  Recount at every release freeze before quoting externally.
 
 ## Totals
 
 | | Count |
 |---|---:|
-| Test functions in `src/` (inline unit tests) | 139 |
-| Test functions in `tests/` (integration/unit files) | 62 |
-| **Total** | **201** |
-| Runnable by default (`cargo test`) | 187 |
-| `#[ignore]`d — need a live engine DSN | 14 |
+| Test functions in crate `src/` and `crates/*/tests/` | 264 |
+| Test functions in top-level `tests/` | 134 |
+| **Total** | **398** |
+| Runnable by default (`cargo test --workspace`) | 381 |
+| `#[ignore]`d — need a live engine (incl. pgvector) | 17 |
 
 ## Coverage matrix (per area)
 
 | Area | Files | Tests | Runs where |
 |---|---|---:|---|
-| SQL guard & classification | `src/guard/classify.rs` (12), `src/guard/mod.rs` (38), `src/guard/params.rs` (15) | 65 | Default |
-| Configuration & HTTP tokens | `src/config.rs` | 12 | Default |
-| DB layer (bind, exec, pool, schema, value) | `src/db/bind.rs` (6), `src/db/exec.rs` (1), `src/db/pool.rs` (3), `src/db/schema.rs` (18), `src/db/value.rs` (12) | 40 | Default |
-| Result formatting | `src/format/columnar.rs` | 7 | Default |
-| URL redaction | `src/redact.rs` | 6 | Default |
-| DDL tools | `src/tools/ddl.rs` | 9 | Default |
+| Guard & classification | `guard/classify.rs` (12), `guard/lib.rs` (38), `guard/params.rs` (15), `guard/patterns.rs` (4), `guard/capabilities.rs` (2) | 71 | Default |
+| Core config, policy, approvals, plans, limits | `core/approvals.rs` (4), `auth.rs` (13), `config.rs` (25), `limits.rs` (2), `migrations.rs` (5), `profiles.rs` (3), `redact.rs` (6), `registry.rs` (3) | 61 | Default |
+| Tool handlers | `tools/bind.rs` (8), `cursor`/`keyset`/`summary` (13), `ddl.rs` (9), `exec.rs` (10), `explain.rs` (6), `graph.rs` (4), `history.rs` (2), `introspect.rs` (11) | 63 | Default |
+| Driver API | `driver-api/src/lib.rs` | 3 | Default |
+| Driver crates | PostgreSQL (12 + conformance 1 ignored + pgvector 1 ignored), MySQL (12 + conformance 1 ignored), SQLite (7 + conformance 1) | 35 | Default; ignored cases need DSNs |
+| Server, auth, OAuth, export, resources | `server/src/lib.rs` (1), `export.rs` (3), `oauth.rs` (4), `server/tests/oauth_server.rs` (11) | 19 | Default |
+| Result formatting | `format/src/columnar.rs` | 12 | Default |
+| F3 schema intelligence | `tests/f3_intelligence.rs` | 10 | Default |
+| SQLite integration | `tests/sqlite_integration.rs` | 9 | Default |
+| HTTP / handler integration | `tests/http_integration.rs` | 50 (5 ignored) | Default + Docker CI |
+| MySQL integration | `tests/mysql_integration.rs` | 9 (all ignored) | Only with `MYSQL_DATABASE_URL` |
+| Cursor pagination | `tests/cursor_pagination.rs` | 6 | Default |
+| Summary mode | `tests/summary_mode.rs` | 7 | Default |
+| Table rules / masking | `tests/table_policy.rs` | 6 | Default |
+| Approvals | `tests/approvals.rs` | 6 | Default |
+| Migrations / dry run | `tests/migrations.rs` | 4 | Default |
+| Hardening | `tests/hardening.rs` | 4 | Default |
+| CLI tools (doctor/migrate/profiles) | `tests/cli_tools.rs` | 9 | Default |
 | Standalone unit tests | `tests/unit.rs` | 14 | Default |
-| SQLite integration | `tests/sqlite_integration.rs` | 6 | Default |
-| HTTP / handler integration | `tests/http_integration.rs` | 34 (28 default on SQLite + 6 ignored) | Default + CI docker job |
-| MySQL integration | `tests/mysql_integration.rs` | 8 (all ignored) | Only with `MYSQL_DATABASE_URL` |
 
 ## What runs in CI
 
 | Job | What it runs |
 |---|---|
-| `test` | `cargo test --all-targets` (the 187 default tests), then `cargo build --release` |
-| `lint` | `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`, `cargo audit` (RustSec) |
-| `integration-http-docker` | Seeds PostgreSQL 16 + MySQL 8.4 service containers, runs the 6 ignored HTTP integration tests against both engines |
-| `integration-mysql` (main pushes only) | The 8 MySQL integration tests when the `MYSQL_DATABASE_URL` secret is set; skips loudly otherwise |
+| `test` | `cargo test --all-targets`, then `cargo build --release` |
+| `conformance` | `scripts/conformance/run.sh` + `scripts/conformance/check_clients.py` against the release binary |
+| `integration-http-docker` | Seeds PostgreSQL 16 + MySQL 8.4 service containers and runs the ignored HTTP integration tests against both |
+| `integration-mysql` (main pushes only) | The ignored MySQL integration tests when `MYSQL_DATABASE_URL` is set; skips loudly otherwise |
+| `lint` | `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`, `cargo audit` |
 
-## 1.1.0 regression tests (named, by fix)
+## Regression families covered
 
-Each 1.1.0 audit fix ships with a test that fails on v1.0.4 behavior:
-
-| Fix | Tests |
-|---|---|
-| CTE writes classified as DML | `cte_delete_is_dml_not_read`, `cte_update_and_insert_are_dml`, `nested_cte_write_is_found`, `plain_cte_select_is_read` |
-| `SELECT INTO` / `INTO OUTFILE` not reads | `select_into_is_not_read`, `mysql_into_outfile_is_not_read` |
-| GRANT/REVOKE are Admin class, need `--allow-grants` | `grant_and_revoke_are_admin_not_ddl`, `grant_blocked_below_ddl_mode`, `grant_allowed_at_guard_level_in_ddl_mode` |
-| Parameterized LIMIT clamp | `parameterized_limit_clamp_preserves_placeholder`, `clamps_explicit_limit_above_max_rows`, `clamps_user_limit_to_max_rows` |
-| HTTP token parsing & modes | `parse_http_tokens_full_format`, `parse_http_tokens_rejects_garbage` |
-| Deterministic, strict TOML config | `toml_default_source_is_deterministic`, `toml_unknown_fields_rejected` |
-| URL redaction hardening | `redacts_password_containing_at_sign`, `redacts_password_containing_colon`, `redacts_sensitive_query_params` |
-| Value fidelity | `blob_hex_json_is_tagged_object`, `bytes_to_hex_encodes_ascii`, `bigdecimal_high_precision_falls_back_to_string`, `bigdecimal_exact_binary_friendly_stays_number` |
-| Param binding strictness | `param_count_mismatch_rejected`, `params_extra_rejected`, `params_missing_placeholder_rejected`, `unexpected_params_rejected` |
+- **Guard bypasses**: CTE writes, `SELECT … INTO`, `INTO OUTFILE`/`DUMPFILE`,
+  dangerous functions per engine, row-locking clauses, parameterized LIMIT and
+  `FETCH FIRST`, GRANT/REVOKE as Admin.
+- **Authorization**: principal × source × tier matrix, direct invocation of a
+  tool hidden from `list_tools`, Admin gate, non-loopback unauthenticated bind
+  refusal, token hashing and constant-time comparison.
+- **OAuth**: JWKS validation (`iss`/`aud`/`exp`), claim mapping, RFC 9728
+  metadata and challenges, fail-closed discovery.
+- **Type fidelity**: UUID, timestamps, high-precision decimals, JSON, bytea /
+  BLOB/VARBINARY, PostgreSQL arrays, MySQL BOOL.
+- **Robustness**: pagination offsets at and past the end, one oversized cell,
+  wrong pool variants, FK/index grouping across schemas, schema-cache
+  invalidation after DDL.
+- **Conformance**: stdio + HTTP lifecycle, 3-tool default and 20-tool
+  full+DDL surfaces, error shapes, batching, sessions, Origin checks, and the
+  six-client config matrix.
 
 ## Known gaps (stated, not hidden)
 
-- There is no coverage/line-percentage gate in CI yet.
-- Property-based tests for the placeholder scanner do not exist yet (the
-  scanner is covered by example-based tests in `src/guard/params.rs`).
-- MySQL integration tests depend on a repository secret and do not run on
-  pull requests from forks.
-- Performance is not asserted by tests; see [BENCHMARKS.md](BENCHMARKS.md)
-  for the (historical) measurements and their stated limits.
-
-## History note
-
-The v0.4.0 edition of this report claimed 69 tests and a 9.9/10 self
-scorecard. Both were stale by the time of the audit that produced 1.1.0
-(the code already contained more tests than the report claimed). The
-scorecard format is retired: this report now only states counts, coverage
-areas, and gaps.
+- There is no coverage/line-percentage gate in CI.
+- Placeholder-scanner property-based tests do not exist; example-based tests
+  cover escape/comment/dollar-quote cases.
+- MySQL and PostgreSQL integration tests require a live server; the Docker CI
+  job supplies both, but fork PRs without secrets skip the secret-gated job.
+- Performance is not asserted by `cargo test`; see
+  [BENCHMARKS.md](BENCHMARKS.md) for measured numbers and their limits.

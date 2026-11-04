@@ -49,7 +49,7 @@ Conventional Commits preferred:
 feat(guard): block EXPLAIN ANALYZE without --allow-writes
 fix(exec): preserve nulls in columnar decode
 docs: add INSTALL.md and compose quickstart
-chore: release v0.4.0 branding
+chore: release v2.0.0 branding
 ```
 
 ## Pull requests

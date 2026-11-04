@@ -10,8 +10,8 @@ All install paths for **strut-stack-sql**. Pick one channel; they install the sa
 | [Homebrew](#homebrew) | macOS |
 | [Docker](#docker-ghcr) | Servers, CI |
 | [Scoop / winget](#windows) | Windows |
-| [cargo-binstall](#cargo-binstall) | Rust developers |
-| [From source](#from-source) | Contributors |
+| [MCPB](#mcpb) | MCP Registry clients |
+| [From source](#from-source) | Contributors and custom builds |
 
 ## curl install script
 
@@ -23,10 +23,10 @@ strut-stack-sql --version
 Options:
 
 ```bash
-curl -fsSL .../install.sh | bash -s -- --version 1.0.0 --prefix ~/.local
+curl -fsSL .../install.sh | bash -s -- --version 2.0.0 --prefix ~/.local
 ```
 
-Installs `~/.local/bin/strut-stack-sql` and a `mcp-sql-rust` symlink (compat). Add `~/.local/bin` to `PATH` if needed.
+Installs `~/.local/bin/strut-stack-sql`. Add `~/.local/bin` to `PATH` if needed.
 
 ### Release asset names
 
@@ -60,11 +60,12 @@ scoop install rzlco666/strut-stack-sql
 winget install rzlco666.strut-stack-sql
 ```
 
-## cargo-binstall
+## MCPB
 
-```bash
-cargo binstall strut-stack-sql
-```
+Each GitHub Release attaches `strut-stack-sql-<platform>.mcpb` bundles. They
+are the packages referenced by [`server.json`](../server.json) for the MCP
+Registry; install them through a client that supports MCPB, or unpack the
+bundle and run the included `strut-stack-sql` binary.
 
 ## From source
 
@@ -89,8 +90,10 @@ Or: `cargo install --path . --force` (installs to `~/.cargo/bin`).
 ## After install
 
 ```bash
-strut-stack-sql --version
+strut-stack-sql --version   # strut-stack-sql 2.0.0
 # Cursor: see README quick start
 ```
 
-Migrating from `mcp-sql-rust`: the v1.0 binary alias `mcp-sql-rust` still works; prefer `strut-stack-sql` in new configs.
+Version 2.0.0 ships only the `strut-stack-sql` binary; the v1
+`mcp-sql-rust` alias is gone. Replace old commands and configs with
+`strut-stack-sql`.

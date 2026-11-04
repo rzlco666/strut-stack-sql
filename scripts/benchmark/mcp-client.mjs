@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Minimal MCP stdio client for benchmarks (newline-delimited JSON).
- * Usage: node mcp-client.mjs --command mcp-sql-rust --args '[]' --tool execute_sql --input '{"sql":"SELECT 1"}'
+ * Usage: node mcp-client.mjs --command strut-stack-sql --args '[]' --tool execute_sql --input '{"sql":"SELECT 1"}'
  */
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";

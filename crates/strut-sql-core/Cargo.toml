@@ -1,0 +1,28 @@
+[package]
+name = "strut-sql-core"
+version.workspace = true
+edition = "2021"
+rust-version = "1.88"
+description = "Configuration and driver registry for Strut Stack SQL"
+license = "MIT"
+repository = "https://github.com/rzlco666/strut-stack-sql"
+
+[dependencies]
+strut-sql-driver-api = { path = "../strut-sql-driver-api" }
+strut-sql-driver-postgres = { path = "../strut-sql-driver-postgres" }
+strut-sql-driver-mysql = { path = "../strut-sql-driver-mysql" }
+strut-sql-driver-sqlite = { path = "../strut-sql-driver-sqlite" }
+strut-sql-guard = { path = "../strut-sql-guard" }
+anyhow = "1"
+thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+dotenvy = "0.15"
+tracing = "0.1"
+tokio = { version = "1", features = ["net", "sync", "time"] }
+sha2 = "0.10"
+subtle = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

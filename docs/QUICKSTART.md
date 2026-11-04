@@ -75,7 +75,7 @@ With read-only mode (default), run queries against seed data:
 
 ```sql
 -- search_objects
-{ "pattern": "users", "object_types": ["table"] }
+{ "object_type": "table", "keyword": "users" }
 
 -- execute_sql
 { "sql": "SELECT id, email, name FROM demo.users WHERE id = $1", "params": [42] }

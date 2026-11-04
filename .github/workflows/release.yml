@@ -108,7 +108,7 @@ jobs:
           cp "target/${{ matrix.target }}/release/strut-stack-sql.exe" mcpb-pack-win/strut-stack-sql.exe
           node -e "const fs=require('fs');const m=JSON.parse(fs.readFileSync('mcpb/manifest.json','utf8'));m.server.entry_point='strut-stack-sql.exe';m.server.mcp_config.command='\${__dirname}/strut-stack-sql.exe';fs.writeFileSync('mcpb-pack-win/manifest.json',JSON.stringify(m,null,2))"
           npm install -g @anthropic-ai/mcpb
-          mcpb pack mcpb-pack-win "dist/${{ matrix.asset }}.mcpb" || true
+          mcpb pack mcpb-pack-win "dist/${{ matrix.asset }}.mcpb"
 
       - uses: actions/setup-node@v4
         if: matrix.os != 'windows-latest'
@@ -120,16 +120,49 @@ jobs:
         shell: bash
         run: |
           npm install -g @anthropic-ai/mcpb
-          mcpb pack mcpb-pack "dist/${{ matrix.asset }}.mcpb" || true
+          mcpb pack mcpb-pack "dist/${{ matrix.asset }}.mcpb"
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
           path: dist/
 
+  conformance:
+    name: Release gate (tests + MCP conformance)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Full test suite
+        run: cargo test --workspace
+
+      - name: Build release binary
+        run: cargo build --release --workspace
+
+      - name: Repo conformance runner (stdio + Streamable HTTP)
+        run: scripts/conformance/run.sh --json-out target/conformance/report.json
+
+      - name: Six-client configuration matrix
+        run: >-
+          python3 scripts/conformance/check_clients.py
+          --binary target/release/strut-stack-sql
+          --json-out target/conformance/clients.json
+
+      - name: Upload conformance reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-reports
+          path: target/conformance/
+          if-no-files-found: warn
+
   release:
     name: Publish GitHub Release
-    needs: build
+    needs: [build, conformance]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

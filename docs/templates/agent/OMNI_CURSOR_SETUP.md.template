@@ -1,4 +1,4 @@
-# OMNI + CodeGraph + Cursor Setup — mcp-sql-rust
+# OMNI + CodeGraph + Cursor Setup — strut-stack-sql
 
 ## Why
 
@@ -13,15 +13,15 @@ Agent sessions burn tokens on noisy `cargo test`, `git diff`, and `rg` output. O
 ## Project init
 
 ```bash
-cd /path/to/mcp-sql-rust
+cd /path/to/strut-stack-sql
 codegraph init
 codegraph status
 ```
 
-Trusted OMNI filter: [`.omni/filters/mcp-sql-rust.toml`](../.omni/filters/mcp-sql-rust.toml)
+Trusted OMNI filter: [`.omni/filters/strut-stack-sql.toml`](../.omni/filters/strut-stack-sql.toml)
 
 ```bash
-omni goal set 'mcp-sql-rust: powerful token-efficient MCP SQL (MySQL+Postgres)'
+omni goal set 'strut-stack-sql: powerful token-efficient MCP SQL (MySQL+Postgres)'
 omni remember 'Default tools: search_objects, execute_sql, analyze_query_performance'
 ```
 
@@ -66,4 +66,4 @@ codegraph files
 | Grep tool blocked | Use `omni_search` or Shell `rg` |
 | Read truncated | Pass `limit` ≤ 250 or use codegraph_node |
 | OMNI omitted block | `omni_retrieve` with hash |
-| Wrong cwd after rename | Re-open folder `mcp-sql-rust` |
+| Wrong cwd after rename | Re-open folder `strut-stack-sql` |

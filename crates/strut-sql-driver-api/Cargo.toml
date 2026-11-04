@@ -1,0 +1,17 @@
+[package]
+name = "strut-sql-driver-api"
+version.workspace = true
+edition = "2021"
+rust-version = "1.88"
+description = "Engine-neutral driver API for Strut Stack SQL"
+license = "MIT"
+repository = "https://github.com/rzlco666/strut-stack-sql"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-trait = "0.1"
+thiserror = "2"
+chrono = { version = "0.4", default-features = false, features = ["std", "serde"] }
+uuid = { version = "1", features = ["serde"] }
+bigdecimal = { version = "0.4", features = ["serde"] }

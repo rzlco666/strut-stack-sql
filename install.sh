@@ -92,8 +92,6 @@ fi
 tar -xzf "${TMPDIR}/${ARTIFACT}" -C "$TMPDIR"
 mkdir -p "${PREFIX}/bin"
 install -m 755 "${TMPDIR}/strut-stack-sql" "${PREFIX}/bin/strut-stack-sql"
-# Compat alias
-ln -sfn strut-stack-sql "${PREFIX}/bin/mcp-sql-rust"
 
 if ! echo ":$PATH:" | grep -q ":${PREFIX}/bin:"; then
   echo ""

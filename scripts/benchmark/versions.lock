@@ -1,5 +1,5 @@
 # Pinned versions for reproducible benchmarks (update deliberately)
-MCP_SQL_RUST_VERSION=0.4.0
+STRUT_STACK_SQL_VERSION=2.0.0
 SERVER_POSTGRES_NPM=@modelcontextprotocol/server-postgres@0.6.2
 POSTGRES_MYSQL_MCP_NPM=postgres-mysql-mcp-server@1.0.3
 MYSQL_MCP_PYPI=mysql-mcp-server==0.1.0

@@ -2,23 +2,19 @@
 # Update the Homebrew formulas to a released version, filling sha256 values
 # from that release's SHA256SUMS.
 #
-# Usage: scripts/bump-homebrew-formula.sh VERSION     (e.g. 1.1.0)
+# Usage: scripts/bump-homebrew-formula.sh VERSION     (e.g. 2.0.0)
 #
 # Artifact names follow .github/workflows/release.yml:
 #   strut-stack-sql-{macos-arm64,macos-x64,linux-arm64,linux-x64}.tar.gz
-# Both formulas are updated: packaging/homebrew/strut-stack-sql.rb (primary)
-# and packaging/homebrew/mcp-sql-rust.rb (compat name). In the manifests the
-# sha256 placeholder is the literal UPDATE_AFTER_RELEASE; this script replaces
-# it (or a previous release's hash) with the real digest, per artifact.
+# In the manifest the sha256 placeholder is the literal
+# UPDATE_AFTER_RELEASE; this script replaces it (or a previous release's
+# hash) with the real digest, per artifact.
 set -euo pipefail
 
-VERSION="${1:?usage: $0 VERSION (e.g. 1.1.0)}"
+VERSION="${1:?usage: $0 VERSION (e.g. 2.0.0)}"
 REPO="${REPO:-rzlco666/strut-stack-sql}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-FORMULAS=(
-  "${ROOT}/packaging/homebrew/strut-stack-sql.rb"
-  "${ROOT}/packaging/homebrew/mcp-sql-rust.rb"
-)
+FORMULAS=("${ROOT}/packaging/homebrew/strut-stack-sql.rb")
 SUMS_URL="https://github.com/${REPO}/releases/download/v${VERSION}/SHA256SUMS"
 TMP="$(mktemp)"
 trap 'rm -f "$TMP"' EXIT
@@ -64,10 +60,6 @@ for FORMULA in "${FORMULAS[@]}"; do
     -e "s/strut-stack-sql-x86_64-apple-darwin\.tar\.gz/${MACOS_X64}/g" \
     -e "s/strut-stack-sql-aarch64-unknown-linux-gnu\.tar\.gz/${LINUX_ARM}/g" \
     -e "s/strut-stack-sql-x86_64-unknown-linux-gnu\.tar\.gz/${LINUX_X64}/g" \
-    -e "s/mcp-sql-rust-aarch64-apple-darwin\.tar\.gz/${MACOS_ARM}/g" \
-    -e "s/mcp-sql-rust-x86_64-apple-darwin\.tar\.gz/${MACOS_X64}/g" \
-    -e "s/mcp-sql-rust-aarch64-unknown-linux-gnu\.tar\.gz/${LINUX_ARM}/g" \
-    -e "s/mcp-sql-rust-x86_64-unknown-linux-gnu\.tar\.gz/${LINUX_X64}/g" \
     "$FORMULA"
 
   set_hash_after_url "$FORMULA" "$MACOS_ARM" "$(hash_for "$MACOS_ARM")"

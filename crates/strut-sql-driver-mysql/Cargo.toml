@@ -1,0 +1,28 @@
+[package]
+name = "strut-sql-driver-mysql"
+version.workspace = true
+edition = "2021"
+rust-version = "1.88"
+description = "MySQL driver for Strut Stack SQL"
+license = "MIT"
+repository = "https://github.com/rzlco666/strut-stack-sql"
+
+[dependencies]
+strut-sql-driver-api = { path = "../strut-sql-driver-api" }
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio-rustls",
+    "mysql",
+    "json",
+    "chrono",
+    "bigdecimal",
+] }
+async-trait = "0.1"
+futures-util = "0.3"
+chrono = { version = "0.4", default-features = false, features = ["std", "serde"] }
+bigdecimal = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+tracing = "0.1"
+
+[dev-dependencies]
+strut-sql-driver-conformance = { path = "../strut-sql-driver-conformance" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

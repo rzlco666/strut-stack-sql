@@ -1,0 +1,49 @@
+{
+  "gate": "R1-06 guard fuzz",
+  "binary": "/home/rizal/projects/strut-stack-sql-push/target/release/strut-stack-sql",
+  "binary_sha256": "690563f65e49a6ed1e39929cb6c90c01e45afd304f8524ca06dc71c1f216ccdb",
+  "started_at": "2026-11-03T18:19:47Z",
+  "seconds_requested": 600,
+  "seconds_elapsed": 600.3,
+  "seed": 20261105,
+  "attempts": 2024583,
+  "denied": 2024583,
+  "bypasses": 0,
+  "protocol_errors": 0,
+  "crashes": [],
+  "db_before": {
+    "tables": [
+      "fuzz_target"
+    ],
+    "rows": {
+      "fuzz_target": 1
+    },
+    "fuzz_target": [
+      [
+        1,
+        "original"
+      ]
+    ],
+    "stray_files": [],
+    "sha256": "0236eeb1ad0145dfa04260ae8ea00bad7eb95a97dfdda59e0c7c85e0fff0894a"
+  },
+  "db_after": {
+    "tables": [
+      "fuzz_target"
+    ],
+    "rows": {
+      "fuzz_target": 1
+    },
+    "fuzz_target": [
+      [
+        1,
+        "original"
+      ]
+    ],
+    "stray_files": [],
+    "sha256": "0236eeb1ad0145dfa04260ae8ea00bad7eb95a97dfdda59e0c7c85e0fff0894a"
+  },
+  "db_unchanged": true,
+  "bypass_samples": [],
+  "result": "PASS"
+}

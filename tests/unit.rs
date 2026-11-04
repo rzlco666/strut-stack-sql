@@ -2,7 +2,7 @@
 mod guard_tests {
     use serde_json::json;
     use strut_stack_sql::config::WriteMode;
-    use strut_stack_sql::db::EngineKind;
+    use strut_stack_sql::driver_api::EngineKind;
     use strut_stack_sql::guard::validate_and_prepare;
 
     #[test]
@@ -49,7 +49,7 @@ mod guard_tests {
         validate_and_prepare(
             "SHOW PROCESSLIST",
             &[],
-            EngineKind::Mysql,
+            EngineKind::MySql,
             WriteMode::ReadOnly,
             100,
         )
@@ -61,7 +61,7 @@ mod guard_tests {
         let p = validate_and_prepare(
             "SELECT 1 LIMIT 200",
             &[],
-            EngineKind::Mysql,
+            EngineKind::MySql,
             WriteMode::ReadOnly,
             50,
         )
@@ -76,7 +76,7 @@ mod guard_tests {
         let err = validate_and_prepare(
             "SELECT * FROM t WHERE id = ?",
             &[],
-            EngineKind::Mysql,
+            EngineKind::MySql,
             WriteMode::ReadOnly,
             100,
         )
@@ -89,7 +89,7 @@ mod guard_tests {
         let err = validate_and_prepare(
             "SELECT 1",
             &[json!(1)],
-            EngineKind::Mysql,
+            EngineKind::MySql,
             WriteMode::ReadOnly,
             100,
         )
@@ -153,6 +153,8 @@ mod format_tests {
                 has_more: None,
                 total_fetched: None,
                 redacted_columns: None,
+                next_cursor: None,
+                warnings: None,
             },
         };
         let trimmed = truncate_to_bytes(result, 4096);
@@ -176,14 +178,14 @@ mod config_tests {
     fn detects_postgres_url() {
         assert_eq!(
             detect_engine(None, "postgresql://localhost/db").unwrap(),
-            strut_stack_sql::db::EngineKind::Postgres
+            strut_stack_sql::driver_api::EngineKind::Postgres
         );
     }
 
     #[test]
     fn source_endpoint_hides_credentials() {
         use strut_stack_sql::config::source_endpoint;
-        use strut_stack_sql::db::EngineKind;
+        use strut_stack_sql::driver_api::EngineKind;
         let ep = source_endpoint(
             "postgresql://user:s3cret@db.example:5433/strutstack",
             EngineKind::Postgres,
@@ -201,8 +203,8 @@ mod config_tests {
 #[cfg(test)]
 mod redact_tests {
     use serde_json::json;
-    use strut_stack_sql::db::exec::redact_denied_columns;
     use strut_stack_sql::format::{ColumnarMeta, ColumnarResult};
+    use strut_stack_sql::tools::exec::redact_denied_columns;
 
     #[test]
     fn redacts_matching_columns_case_insensitive() {
@@ -220,6 +222,8 @@ mod redact_tests {
                 has_more: None,
                 total_fetched: None,
                 redacted_columns: None,
+                next_cursor: None,
+                warnings: None,
             },
         };
         let out = redact_denied_columns(result, &["Password_Hash".into()]);

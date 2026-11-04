@@ -1,6 +1,25 @@
+[workspace]
+resolver = "2"
+members = [
+    ".",
+    "crates/strut-sql-driver-api",
+    "crates/strut-sql-driver-postgres",
+    "crates/strut-sql-driver-mysql",
+    "crates/strut-sql-driver-sqlite",
+    "crates/strut-sql-driver-conformance",
+    "crates/strut-sql-guard",
+    "crates/strut-sql-format",
+    "crates/strut-sql-core",
+    "crates/strut-sql-tools",
+    "crates/strut-sql-server",
+]
+
+[workspace.package]
+version = "2.0.0"
+
 [package]
 name = "strut-stack-sql"
-version = "1.1.0"
+version.workspace = true
 edition = "2021"
 rust-version = "1.88"
 description = "Strut Stack SQL — token-efficient MCP server for MySQL, PostgreSQL, and SQLite"
@@ -24,75 +43,48 @@ pkg-fmt = "zip"
 name = "strut-stack-sql"
 path = "src/main.rs"
 
-# Compat alias for one release cycle (mcp-sql-rust configs / wrappers).
-[[bin]]
-name = "mcp-sql-rust"
-path = "src/main.rs"
-
 [lib]
 name = "strut_stack_sql"
 path = "src/lib.rs"
 
 [dependencies]
-anyhow = "1"
-thiserror = "2"
-clap = { version = "4", features = ["derive"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "io-std", "io-util", "sync", "time"] }
-tokio-util = { version = "0.7", features = ["rt"] }
-futures = "0.3"
+strut-sql-driver-api = { path = "crates/strut-sql-driver-api" }
+strut-sql-guard = { path = "crates/strut-sql-guard" }
+strut-sql-format = { path = "crates/strut-sql-format" }
+strut-sql-core = { path = "crates/strut-sql-core" }
+strut-sql-tools = { path = "crates/strut-sql-tools" }
+strut-sql-server = { path = "crates/strut-sql-server" }
 
-tracing = "0.1"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-toml = "0.8"
-dotenvy = "0.15"
-
-sqlx = { version = "0.8", default-features = false, features = [
-    "runtime-tokio-rustls",
-    "postgres",
-    "mysql",
-    "sqlite",
-    "json",
-    "chrono",
-    "uuid",
-    "bigdecimal",
-    "ipnetwork",
-] }
-ipnetwork = "0.20"
-
-sqlparser = "0.62"
-
-rmcp = { version = "2", features = [
-    "server",
-    "macros",
-    "schemars",
-    "transport-io",
-    "transport-streamable-http-server",
-] }
-schemars = "1"
+[dev-dependencies]
+strut-sql-driver-postgres = { path = "crates/strut-sql-driver-postgres" }
+strut-sql-driver-mysql = { path = "crates/strut-sql-driver-mysql" }
+strut-sql-driver-sqlite = { path = "crates/strut-sql-driver-sqlite" }
 
 axum = "0.8"
-chrono = { version = "0.4", default-features = false, features = ["std", "serde"] }
-uuid = { version = "1", features = ["serde"] }
-bigdecimal = { version = "0.4", features = ["serde"] }
-
-[dev-dependencies]
+rmcp = { version = "2", features = ["server", "macros", "schemars", "elicitation"] }
+serde_json = "1"
 tempfile = "3"
+jsonwebtoken = { version = "11", features = ["rust_crypto"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tower = { version = "0.5", features = ["util"] }
-sqlx = { version = "0.8", default-features = false, features = [
-    "runtime-tokio-rustls",
-    "postgres",
-    "mysql",
-    "sqlite",
-    "json",
-] }
+
+# Temporary upstream pin. jsonwebtoken 11.1.0 depends on p256/p384 0.13, which
+# pull elliptic-curve 0.13 -> crypto-bigint 0.5.x, affected by
+# RUSTSEC-2026-0387 (timing variability in constant-time operations). Upstream
+# PR https://github.com/Keats/jsonwebtoken/pull/551 upgrades the curve backend to
+# p256/p384 0.14 and requires crypto-bigint >= 0.7.6, with no public API change.
+# Remove this patch once a jsonwebtoken release on crates.io contains it.
+[patch.crates-io]
+jsonwebtoken = { git = "https://github.com/Keats/jsonwebtoken", rev = "3739623abb1d0fd4d87ca7a517ddcc3310307e2d" }
 
 [profile.release]
-opt-level = 3
-lto = "thin"
+opt-level = "s"
+lto = "fat"
 codegen-units = 1
 strip = "symbols"
 panic = "abort"

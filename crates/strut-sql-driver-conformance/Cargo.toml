@@ -1,0 +1,12 @@
+[package]
+name = "strut-sql-driver-conformance"
+version.workspace = true
+edition = "2021"
+rust-version = "1.88"
+description = "Driver conformance test kit for Strut Stack SQL"
+license = "MIT"
+repository = "https://github.com/rzlco666/strut-stack-sql"
+
+[dependencies]
+strut-sql-driver-api = { path = "../strut-sql-driver-api" }
+async-trait = "0.1"

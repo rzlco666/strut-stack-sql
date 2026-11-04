@@ -8,7 +8,7 @@ Registry name:
 io.github.rzlco666/strut-stack-sql
 ```
 
-## Release artifacts (v0.4.0+)
+## Release artifacts
 
 | Asset | Purpose |
 |-------|---------|
@@ -41,6 +41,16 @@ On GitHub Release (`release: published`) or after Release workflow completes:
 
 Manual fallback: `workflow_dispatch` on `registry-publish.yml`.
 
+## Freeze state
+
+`server.json` ships with `fileSha256: "UPDATE_AFTER_RELEASE"` placeholders,
+because the bundles are built per platform by the release workflow and the
+hash of a local build is not the hash of the published artifact.
+`scripts/update-server-json-sha.sh <version>` replaces them from that
+release's `SHA256SUMS`, and `registry-publish.yml` now refuses to publish an
+empty or placeholder hash (or duplicate hashes across platforms) instead of
+shipping an unverifiable entry.
+
 ## Verify
 
 ```bash
@@ -53,7 +63,7 @@ curl -s "https://registry.modelcontextprotocol.io/v0/servers?search=io.github.rz
 2. After release, patch MCPB hashes:
 
 ```bash
-./scripts/update-server-json-sha.sh 1.0.4
+./scripts/update-server-json-sha.sh 2.0.0
 ```
 
 3. Authenticate (interactive): `mcp-publisher login github`

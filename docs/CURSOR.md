@@ -32,7 +32,7 @@ Copy [packaging/mcp.json.example](../packaging/mcp.json.example) and adjust path
         "${workspaceFolder}"
       ],
       "env": {
-        "MCP_SQL_RUST_BIN": "/home/you/.cargo/bin/strut-stack-sql",
+        "STRUT_STACK_SQL_BIN": "/home/you/.cargo/bin/strut-stack-sql",
         "MCP_SQL_ARGS": "--full-tools --deny-columns password_hash,totp_secret_encrypted,code_hash"
       }
     }
@@ -69,7 +69,7 @@ Open `edoc-pid`, `sample-next`, or `boilerplate-rust` — each project's `.env` 
 | `no DATABASE_URL in .env` | Add `.env` in project root; launcher walks up from workspace |
 | `cannot reach host:port` | Start MySQL/Postgres; launcher preflight failed |
 | Wrong database | Check `DATABASE_URL` in that workspace's `.env` |
-| `Connection closed` after 30s | Update to v0.5+ (lazy connect); remove old custom launcher |
+| `Connection closed` after 30s | Update to the current release (lazy connect); remove old custom launcher |
 
 ## Optional: project-local override
 

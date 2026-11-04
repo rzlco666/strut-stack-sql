@@ -1,5 +1,225 @@
 # Changelog
 
+## [2.0.0] — 2026-11-03
+
+Major, breaking release. There is no v1 compatibility layer: the tool surface,
+configuration schema, and result/error contracts are the v2 ones documented in
+`docs/`. A v1 deployment must be reconfigured from the sections below; the
+step-by-step mapping is in
+[docs/MIGRATION_V1_TO_V2.md](docs/MIGRATION_V1_TO_V2.md).
+
+### Added
+
+- **10-crate workspace plus a thin binary.** `strut-sql-driver-api` defines the
+  public `EngineDriver` contract and engine-neutral value types;
+  `strut-sql-driver-{postgres,mysql,sqlite}` implement it; `strut-sql-core`,
+  `strut-sql-guard`, `strut-sql-format`, `strut-sql-tools`, and
+  `strut-sql-server` hold the engine-independent product; and
+  `strut-sql-driver-conformance` is the shared Driver Conformance Test Kit.
+  Database libraries are confined to driver crates.
+- **Per-caller authorization (Principal + Policy).** Grants are evaluated per
+  principal × source × tier (`read < writes < ddl < admin`) with optional
+  row/byte/timeout ceilings. One `authorize()` function gates every tool
+  invocation and drives `list_tools`, so a hidden tool is also denied when
+  called directly. `GRANT`/`REVOKE` are a separate `Admin` tier behind
+  `--allow-grants`; the process write mode remains a hard ceiling.
+- **HTTP authentication.** API keys are accepted raw or as `sha256:<hex>`
+  digests and compared in constant time; each key carries a maximum tier and
+  optional source allowlist. Non-loopback binds without auth are refused at
+  startup unless `--allow-unauthenticated-http` is explicit. Origin/Host
+  checks defend against DNS rebinding.
+- **OAuth 2.1 resource server.** With `STRUT_STACK_SQL_OAUTH_ISSUER` and
+  `STRUT_STACK_SQL_OAUTH_AUDIENCE`, access tokens are validated as RS256 JWTs
+  against the issuer's discovered JWKS (`iss`/`aud`/`exp`), mapped to a
+  principal via a configurable claim, and advertised through RFC 9728
+  protected-resource metadata. Discovery failure fails closed; token material
+  is never logged.
+- **Schema intelligence (PRD-F3).** Ranked `search_objects`, relation-aware
+  `schema_overview`, and three new tools — `get_relationship_graph`,
+  `suggest_joins`, `get_schema_context` — bring the surface to exactly 20
+  tools. All are read-tier, guarded, audited, and honor source/deny-column
+  policy.
+- **Performance advisor v2.** A uniform plan tree across the three engines,
+  tiered `issues` (`info`/`warning`/`critical`), dominant-cost nodes, row
+  estimate misses, leading-wildcard LIKE, AST anti-patterns, and index advice
+  as `CREATE INDEX …` text with triggering node, estimate, and confidence.
+  Advice is never executed. `EXPLAIN ANALYZE` is opt-in via `analyze: true`
+  plus `--allow-explain-analyze`.
+- **Schema statistics and history.** Driver `table_stats` with honest
+  provenance (planner/catalog/unavailable), table/index sizes where reported,
+  index coverage for advisor rules; opt-in per-principal in-memory query
+  history (normalized hashes, no parameter values) for N+1 and repeated-slow
+  suggestions.
+- **Schema cache** keyed by source/engine/schema with TTL and invalidation
+  after DDL issued through the server; filter and pagination pushed into the
+  driver's catalog SQL; set-based SQLite introspection removes the N+1
+  `PRAGMA` chains.
+- **Governed batch execution**: statement count, total wall-clock deadline,
+  and cross-item byte ceiling, with per-item fail-soft unless `--fail-fast`.
+- **Rich type codecs**: UUID, timestamps, high-precision decimals, JSON,
+  binary/bytea, PostgreSQL arrays; SQLite BLOB as hex; MySQL BOOL as JSON
+  bool; VARBINARY/BLOB remain hex.
+- **MCP conformance gate and six-client matrix.** `scripts/conformance/run.sh`
+  covers stdio and Streamable HTTP (lifecycle, 20-tool listing, calls, error
+  shapes, batching, auth/OAuth metadata, sessions, Origin checks); every
+  config block in `docs/CLIENTS.md` is parsed and the minimal stdio command is
+  smoke-run. The pinned spec is **2025-06-18**.
+- **Reproducible benchmark harness** (`scripts/benchmark/bench.py`) with raw
+  results published at `scripts/benchmark/results/2.0.0.json`.
+
+- **Cursor (keyset) pagination for `execute_sql`.** The first page with
+  `page_size` returns an opaque HMAC-signed `meta.next_cursor`; sending it with
+  the same SQL and parameters continues the walk without OFFSET, so an insert
+  or delete between pages cannot duplicate or skip a row. Cursors are bound to
+  the source, SQL and parameter values, expire after 10 minutes, and fail with
+  `cursor_expired` / `cursor_invalid` / `cursor_*` codes. Cursor mode requires
+  a single-table SELECT ordered by one unique column that is also selected;
+  other first-page requests keep the legacy offset behaviour.
+- **Full data-type matrix and pgvector as a data type.** CAPABILITIES.md now
+  documents how each engine's types reach result cells (including exact decimal
+  strings, binary hex tagging and PG arrays). With the `vector` extension, a
+  `vector(n)` column reads as an array of numbers; there is deliberately no
+  vector-search tool, and similarity queries stay ordinary SQL. A pgvector
+  conformance test runs against a real pgvector-enabled PostgreSQL.
+- **MCP resources and prompts.** `resources` and `prompts` capabilities are
+  advertised: `strut://docs/sql-surface`, `strut://policy/summary` (effective
+  policy without URLs or credentials) and the
+  `strut://schema/{source}/{schema}` template (token budget 4000, schema-cache
+  TTL), plus the `diagnose`, `explore` and `safe-migration` prompts. Resource
+  reads are authorized in the HTTP middleware exactly like `tools/call`, so a
+  principal without a read grant for the source cannot read the schema or
+  policy resources.
+- **Tool profiles.** `--profile lite|standard|full|admin` presets write mode,
+  `--full-tools`, `--allow-grants` and destructive-DDL approvals. Every preset
+  expands to ordinary flags plus grant TOML (tests parse the generated
+  `[[grants]]`), so there is no second authorization system; explicit flags may
+  raise a preset.
+- **Hardening.** File-backed SQLite sources can be constrained to an allowlist
+  (`--sqlite-allowlist`), rejected at startup when outside it. A per-source
+  circuit breaker fast-fails for 30 s after five consecutive connect failures
+  and probes once before closing. A per-principal query ceiling (one principal
+  cannot hold more than `--pool-size` concurrent queries) complements the
+  existing per-token HTTP rate limit.
+- **Doctor and V1 migration CLI.** `strut-stack-sql doctor` validates the real
+  configuration, connects to every source, reports degraded capabilities and
+  exits `0/1/2/3` (ok / config error / connection failure / degraded).
+  `strut-stack-sql migrate --from-v1` translates a V1 TOML with warnings for
+  keys that moved to CLI flags; it is a dry run unless `--write` is given.
+- **OTel-shaped trace fields with cardinality guards.** Query events carry
+  `otel.name`, `db.system`, `db.operation`, `strut.source`, a hashed
+  `strut.principal`, `strut.rows` and `strut.duration_ms`; the prepared SQL only
+  appears with `--trace-sql` and never when the grant narrows tables or filters
+  rows.
+- **Migration plans and universal dry run.** `schema_mutate` gained
+  `plan_migration`, `apply_migration` and `rollback_migration`: plans validate
+  through the guard, derive an inverse only where one is exact, live for one
+  hour, and never execute at plan time. Apply requires `plan_id` plus an
+  accepted approval; rollback requires an applied plan with a defined inverse.
+  `dry_run: true` on any DDL action or on `execute_sql` validates and reports
+  the prepared statement without executing it or requiring an approval.
+- **Destructive-DDL approvals.** With `--require-approval`, drop/truncate/
+  drop-column actions (tool wrappers and raw `execute_sql`) return
+  `approval_required` with a single-use id that expires after 15 minutes.
+  Approvals are accepted through the MCP elicitation flow when the client
+  supports it, or via the HTTP queue (`GET /approvals`,
+  `POST /approvals/{id}/accept|reject`), bound to the requesting principal.
+  `confirm: true` stays a legacy confirmation flag and is never treated as an
+  approval.
+- **Table allow/deny, row filters and column masking.** `[[grants]]` gained
+  `allow_tables`, `deny_tables`, `row_filters` and `mask` (partial | hash |
+  null). Deny wins over allow; row filters are injected into the AST as
+  `AND (predicate)` and a statement where a filter cannot be applied is
+  rejected instead of running unfiltered. Enforcement covers `execute_sql`
+  (single, batch, cursor, summary), `/export`, the advisor and every schema
+  discovery tool.
+- **HTTP export (NDJSON / CSV).** `POST /export` streams rows with the same
+  authentication and Policy authorization as `/mcp`, a forced read-only write
+  mode, `--max-rows`/`--max-bytes` caps, response chunks bounded by
+  `--max-bytes`, and deny-column redaction. CSV writes NULL as an empty field
+  and advertises `x-meta-null-as-empty: true`. stdio stays paginated JSON.
+- **Server-side summary mode.** `execute_sql({summary: …})` builds `count`,
+  `sample` or `aggregate` (count/avg/sum/min/max, optional `group_by`) without
+  accepting SQL from the caller. Identifiers are validated against the catalog
+  and quoted; deny-listed columns are rejected in group keys, metrics and
+  sample projections. Counts and aggregates are marked `exact: true`; a sample
+  is marked `exact: false` and never presented as a total.
+
+### Changed (breaking)
+
+- **Tool surface is exactly 20**: 3 core tools always; 10 introspection tools
+  with `--full-tools`; 7 DDL tools only with `--full-tools --allow-ddl`.
+  v1 tool names and gating no longer apply.
+- **Configuration v2**: multi-source TOML with `[[principals]]` and
+  `[[grants]]`; unknown keys, duplicate source names, and a dangling
+  `default_source` are startup errors; an omitted default is the
+  lexicographically first source; a TOML source without `url`/`url_env` is an
+  error and never inherits another source's credentials; numeric options are
+  range-validated.
+- **Result and error contracts**: every failure is categorized as
+  `invalid_params`, `authorization_denied`, `guard_denied`, or retryable
+  `execution_error` with structured `{code,message,retryable}` data; success
+  payloads never carry `{ok:false}`. Pagination reports
+  `page_offset`/`page_size`/`has_more`/`total_fetched`.
+- **One binary only.** The legacy `mcp-sql-rust` binary target, its install
+  symlink, and the duplicate Homebrew/Scoop/winget manifests were removed;
+  every script, launcher, container, and document now targets
+  `strut-stack-sql`.
+
+### Fixed
+
+- **Guard bypass family (Tahap A)**: CTE bodies containing
+  INSERT/UPDATE/DELETE are classified recursively as DML;
+  `SELECT … INTO`, `INTO OUTFILE`, and `INTO DUMPFILE` are never reads;
+  dangerous functions are denied or tier-gated per engine; parameterized
+  `LIMIT ?` and `FETCH FIRST` are clamped; row-locking clauses and unknown
+  statement classes are denied; GRANT/REVOKE moved to `Admin`.
+- **Credential and identifier safety**: URL redaction handles passwords with
+  `@`/`:` and sensitive query parameters; URL parts are percent-encoded;
+  SQLite attached-schema names are quoted correctly; cross-source credential
+  inheritance was removed.
+- **Data fidelity**: PostgreSQL `uuid`/`timestamptz`/`inet`/`citext` decode as
+  JSON strings; MySQL `DECIMAL`/`BIGINT UNSIGNED`/aggregates stay numeric
+  without float round-trip; MySQL text vs BINARY/VARBINARY decode is correct;
+  SQLite BLOB is hex instead of silent `Null`; `approx_rows` no longer reports
+  fake zeroes for never-analyzed PostgreSQL.
+- **Robustness**: `search_objects` pagination past the end returns an empty
+  page instead of panicking; FK/index grouping is keyed by
+  (schema, table, name); pool-access `.expect()` panics were replaced with
+  structured errors; a single 10 MB cell cannot exceed the result byte cap.
+- **Advisor defects**: the dead `_warnings` parameter, MySQL double-counting
+  walker, and hardcoded SQLite index column were removed.
+
+### Performance
+
+Measured at the 2.0.0 freeze on the documented WSL2 reference machine
+(n=120 after 20 warmups, 20 cold starts; raw JSON in
+`scripts/benchmark/results/2.0.0.json`, including the binary sha256):
+
+- **stdio meets every PRD-F2-12 target**: idle RSS 8.30 MB (≤ 15), cold-start
+  p95 5.20 ms (≤ 25), core `tools/list` 2,920 B (≤ 3,072 B), 100×8 result
+  7,526 B (≤ 70 KB), SELECT-by-PK p50 0.73 ms (≤ 1).
+- **HTTP now meets its own declared targets**: cold-start p95 40.02 ms
+  (≤ 60 ms) and SELECT-by-PK p50 1.25 ms (≤ 5 ms). Setting `TCP_NODELAY` on
+  accepted connections removed a ~40 ms Nagle/delayed-ACK penalty per
+  `tools/call` on reused connections. The HTTP cold start cannot reuse the
+  stdio budget: on this host the kernel `bind()` of a listening socket alone
+  measures ~23 ms p50 (reproducible in plain Python), so the per-transport
+  targets are declared in the artifact instead of rounding the difference
+  away.
+- **Full 20-tool surface**: `tools/list` with `--full-tools --allow-ddl` is
+  11,757 B against a 12,000 B CI cap; the core surface is 2,920 B against
+  3,072 B.
+- **PostgreSQL 16 and MySQL 8.4 are measured**, not `not_run`: SELECT-by-PK
+  p50 1.43 ms / 1.56 ms (p95 2.34 / 2.00 ms), 0 errors, same 7,526 B payload,
+  using fixtures seeded through the compose stack.
+- **Size gate**: the stripped Linux x64 release binary is 10.6 MB, under the
+  16 MB release budget.
+- The competitor comparison stays `not_run`: `npx`/Node is not installed on the
+  reference machine, and the pinned rivals also need a live PostgreSQL server.
+- Run-to-run `execute_sql` p50 varies with host load (0.80–1.47 ms observed for
+  the same binary); the range is stated in [BENCHMARKS.md](docs/BENCHMARKS.md)
+  rather than quoting only the best run.
+
 ## [1.1.0] — 2026-11-02
 
 Hardening release: closes every guard-bypass and correctness finding from the

@@ -15,7 +15,6 @@ install_pair() {
   local dest="$1"
   mkdir -p "$dest"
   install -m 755 "$SRC" "${dest}/${NAME}"
-  ln -sfn "${dest}/${NAME}" "${dest}/mcp-sql-rust"
   echo "OK → ${dest}/${NAME}"
 }
 

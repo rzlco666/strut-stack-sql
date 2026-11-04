@@ -80,6 +80,14 @@ jobs:
             ' server.json > server.json.tmp
           mv server.json.tmp server.json
           jq '{name, version, packages: [.packages[]|{identifier,fileSha256}]}' server.json
+          if jq -e '.packages[] | select((.fileSha256 // "") == "" or .fileSha256 == "UPDATE_AFTER_RELEASE")' server.json >/dev/null; then
+            echo "ERROR: server.json still has an empty/placeholder fileSha256; the v${VERSION} release assets are missing or SHA256SUMS did not contain every .mcpb" >&2
+            exit 1
+          fi
+          if jq -e '[.packages[].fileSha256] | (length != (unique | length))' server.json >/dev/null; then
+            echo "ERROR: server.json fileSha256 values are not unique (artifacts did not build per platform)" >&2
+            exit 1
+          fi
 
       - name: Validate manifest
         run: ./mcp-publisher validate server.json

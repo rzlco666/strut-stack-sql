@@ -1,4 +1,4 @@
--- Demo schema for mcp-sql-rust (MySQL)
+-- Demo schema for strut-stack-sql (MySQL)
 CREATE DATABASE IF NOT EXISTS demo;
 USE demo;
 

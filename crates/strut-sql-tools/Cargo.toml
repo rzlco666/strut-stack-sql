@@ -1,0 +1,32 @@
+[package]
+name = "strut-sql-tools"
+version.workspace = true
+edition = "2021"
+rust-version = "1.88"
+description = "MCP tool implementations for Strut Stack SQL"
+license = "MIT"
+repository = "https://github.com/rzlco666/strut-stack-sql"
+
+[dependencies]
+strut-sql-driver-api = { path = "../strut-sql-driver-api" }
+strut-sql-guard = { path = "../strut-sql-guard" }
+strut-sql-format = { path = "../strut-sql-format" }
+strut-sql-core = { path = "../strut-sql-core" }
+rmcp = { version = "2", features = ["server", "macros", "schemars"] }
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["time"] }
+futures = "0.3"
+tracing = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+uuid = "1"
+base64 = "0.22"
+hmac = "0.12"
+sha2 = "0.10"
+bigdecimal = "0.4"
+
+[dev-dependencies]
+strut-sql-driver-sqlite = { path = "../strut-sql-driver-sqlite" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
