@@ -760,6 +760,7 @@ mod tests {
         let v = sql_value_to_json(SqlValue::Binary(b"edoc".to_vec()), EngineKind::Postgres);
         assert_eq!(v, serde_json::json!({"$blob_hex": "65646f63"}));
         let v = sql_value_to_json(SqlValue::Binary(b"edoc".to_vec()), EngineKind::DuckDb);
+        assert_eq!(v, serde_json::json!({"$blob_hex": "65646f63"}));
         let v = sql_value_to_json(SqlValue::Binary(b"edoc".to_vec()), EngineKind::SqlServer);
         assert_eq!(v, serde_json::json!({"$blob_hex": "65646f63"}));
         let v = sql_value_to_json(SqlValue::Binary(b"edoc".to_vec()), EngineKind::MySql);
