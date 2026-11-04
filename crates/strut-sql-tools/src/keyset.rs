@@ -120,11 +120,18 @@ pub fn issue_cursor(
 }
 
 fn split_qualified(shape: &KeysetShape) -> (Option<String>, String) {
-    match shape.table_qualified.rsplit_once('.') {
-        Some((schema, table)) if !schema.is_empty() => {
-            (Some(schema.to_string()), table.to_string())
-        }
-        _ => (None, shape.table.clone()),
+    // `table` is the exact last AST object-name part, so quoted names that
+    // contain dots (e.g. `[ledger.2026]`) must not be split on the last dot.
+    // The schema is whatever remains of `table_qualified` before the `.` that
+    // precedes the table.
+    let table = shape.table.clone();
+    let prefix = shape
+        .table_qualified
+        .strip_suffix(&table)
+        .unwrap_or_default();
+    match prefix.strip_suffix('.') {
+        Some(schema) if !schema.is_empty() => (Some(schema.to_string()), table),
+        _ => (None, table),
     }
 }
 
@@ -277,6 +284,79 @@ mod tests {
             order_key_index(&cols, "created_at"),
             Err(KeysetError::NotSelected(_))
         ));
+    }
+
+    #[test]
+    fn quoted_dotted_table_names_keep_exact_table_part() {
+        let shape = |qualified: &str, table: &str| KeysetShape {
+            table: table.into(),
+            table_qualified: qualified.into(),
+            order_column: "id".into(),
+            descending: false,
+        };
+        // A single quoted table whose name contains dots stays unqualified.
+        assert_eq!(
+            split_qualified(&shape("ledger.2026", "ledger.2026")),
+            (None, "ledger.2026".to_string())
+        );
+        // A schema qualifier is everything before the dot preceding the table.
+        assert_eq!(
+            split_qualified(&shape("dbo.ledger.2026", "ledger.2026")),
+            (Some("dbo".to_string()), "ledger.2026".to_string())
+        );
+        // Quoted dotted schema + quoted dotted table.
+        assert_eq!(
+            split_qualified(&shape("x.y.a.b", "a.b")),
+            (Some("x.y".to_string()), "a.b".to_string())
+        );
+        assert_eq!(
+            split_qualified(&shape("dbo.t", "t")),
+            (Some("dbo".to_string()), "t".to_string())
+        );
+        assert_eq!(split_qualified(&shape("t", "t")), (None, "t".to_string()));
+    }
+
+    #[tokio::test]
+    async fn quoted_dotted_table_uniqueness_uses_exact_table_name() {
+        use strut_sql_driver_api::{BoundQuery, ConnectOptions};
+        use strut_sql_driver_sqlite::SqliteDriver;
+
+        let driver: Arc<dyn EngineDriver> = Arc::new(
+            *SqliteDriver::from_connection_string_with_options(
+                "sqlite::memory:",
+                &ConnectOptions {
+                    pool_size: 2,
+                    ..ConnectOptions::default()
+                },
+            )
+            .await
+            .expect("sqlite driver"),
+        );
+        driver
+            .execute(&BoundQuery {
+                sql: "CREATE TABLE \"ledger.2026\" (id TEXT PRIMARY KEY, v INTEGER)".into(),
+                params: Vec::new(),
+                row_cap: None,
+                fetch_rows: false,
+            })
+            .await
+            .expect("create dotted table");
+        let shape = KeysetShape {
+            table: "ledger.2026".into(),
+            table_qualified: "ledger.2026".into(),
+            order_column: "id".into(),
+            descending: false,
+        };
+        ensure_unique_order_column(&driver, &shape)
+            .await
+            .expect("primary key must be resolved for the exact dotted table name");
+        let qualified = KeysetShape {
+            table_qualified: "main.ledger.2026".into(),
+            ..shape
+        };
+        ensure_unique_order_column(&driver, &qualified)
+            .await
+            .expect("schema prefix must resolve to main without splitting the table name");
     }
 
     #[test]

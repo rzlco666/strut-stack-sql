@@ -17,6 +17,8 @@ pub enum EngineKind {
     Sqlite,
     DuckDb,
     ClickHouse,
+    #[serde(rename = "sqlserver")]
+    SqlServer,
 }
 
 /// Connection-pool options shared by every driver.
@@ -379,6 +381,21 @@ pub trait EngineDriver: Send + Sync {
 
     /// Execute a bound query.
     async fn execute(&self, query: &BoundQuery) -> Result<QueryResult, DriverError>;
+
+    /// Obtain a session-scoped execution plan for an already-prepared query.
+    ///
+    /// Drivers override this only when they can manage the required session
+    /// state safely. The default reports a real lack of this driver capability;
+    /// it does not imply generic execution-plan support across engines.
+    async fn explain(
+        &self,
+        _query: &BoundQuery,
+        _analyze: bool,
+    ) -> Result<QueryResult, DriverError> {
+        Err(DriverError::Unsupported(
+            "execution plans are not supported by this driver".into(),
+        ))
+    }
 
     /// List all schemas/databases.
     async fn list_schemas(&self) -> Result<Vec<SchemaObject>, DriverError>;

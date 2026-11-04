@@ -8,6 +8,7 @@ members = [
     "crates/strut-sql-driver-sqlite",
     "crates/strut-sql-driver-duckdb",
     "crates/strut-sql-driver-clickhouse",
+    "crates/strut-sql-driver-sqlserver",
     "crates/strut-sql-driver-conformance",
     "crates/strut-sql-guard",
     "crates/strut-sql-format",
@@ -24,7 +25,7 @@ name = "strut-stack-sql"
 version.workspace = true
 edition = "2021"
 rust-version = "1.88"
-description = "Strut Stack SQL — token-efficient MCP server for MySQL, PostgreSQL, SQLite, and DuckDB"
+description = "Strut Stack SQL — token-efficient MCP server for MySQL, PostgreSQL, SQLite, DuckDB, ClickHouse, and SQL Server"
 license = "MIT"
 repository = "https://github.com/rzlco666/strut-stack-sql"
 homepage = "https://github.com/rzlco666/strut-stack-sql"
@@ -67,6 +68,7 @@ strut-sql-driver-postgres = { path = "crates/strut-sql-driver-postgres" }
 strut-sql-driver-mysql = { path = "crates/strut-sql-driver-mysql" }
 strut-sql-driver-sqlite = { path = "crates/strut-sql-driver-sqlite" }
 strut-sql-driver-duckdb = { path = "crates/strut-sql-driver-duckdb" }
+strut-sql-driver-sqlserver = { path = "crates/strut-sql-driver-sqlserver" }
 
 axum = "0.8"
 rmcp = { version = "2", features = ["server", "macros", "schemars", "elicitation"] }

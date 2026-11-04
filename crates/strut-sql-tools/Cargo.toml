@@ -26,7 +26,9 @@ base64 = "0.22"
 hmac = "0.12"
 sha2 = "0.10"
 bigdecimal = "0.4"
+roxmltree = "0.20"
 
 [dev-dependencies]
+async-trait = "0.1"
 strut-sql-driver-sqlite = { path = "../strut-sql-driver-sqlite" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

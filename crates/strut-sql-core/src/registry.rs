@@ -8,6 +8,7 @@ use strut_sql_driver_duckdb::DuckDbDriver;
 use strut_sql_driver_mysql::MySqlDriver;
 use strut_sql_driver_postgres::PostgresDriver;
 use strut_sql_driver_sqlite::SqliteDriver;
+use strut_sql_driver_sqlserver::SqlServerDriver;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 
@@ -15,7 +16,7 @@ use crate::redact::redact_url;
 
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 pub const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 2;
-/// Fail fast when the DB host/port is unreachable (before sqlx handshake).
+/// Fail fast when the DB host/port is unreachable (before the driver handshake).
 pub const TCP_PREFLIGHT_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Lazily-constructed, shared driver for one configured source.
@@ -166,6 +167,9 @@ pub async fn connect_driver(
         EngineKind::ClickHouse => {
             Arc::new(*ClickHouseDriver::from_connection_string_with_options(url, options).await?)
         }
+        EngineKind::SqlServer => {
+            Arc::new(*SqlServerDriver::from_connection_string_with_options(url, options).await?)
+        }
     };
     Ok(driver)
 }
@@ -175,7 +179,8 @@ async fn tcp_preflight(url: &str, engine: EngineKind) -> Result<()> {
         return Ok(());
     };
     let addr = format!("{host}:{port}");
-    match tokio::time::timeout(TCP_PREFLIGHT_TIMEOUT, TcpStream::connect(&addr)).await {
+    let connect = TcpStream::connect((host.as_str(), port));
+    match tokio::time::timeout(TCP_PREFLIGHT_TIMEOUT, connect).await {
         Ok(Ok(_stream)) => Ok(()),
         Ok(Err(e)) => bail!(
             "TCP preflight failed in <{}ms ({addr}): {e}",
@@ -188,8 +193,22 @@ async fn tcp_preflight(url: &str, engine: EngineKind) -> Result<()> {
     }
 }
 
-/// Extract host/port from mysql:// or postgres(ql):// URLs. Returns None for unparsable forms.
+/// Extract a network URL's host/port. Returns None for unparsable forms.
 pub fn parse_host_port(url: &str, engine: EngineKind) -> Option<(String, u16)> {
+    if engine == EngineKind::SqlServer {
+        let parsed = url::Url::parse(url).ok()?;
+        if !matches!(parsed.scheme(), "sqlserver" | "mssql") {
+            return None;
+        }
+        let host = parsed
+            .host_str()?
+            .trim_start_matches('[')
+            .trim_end_matches(']');
+        if host.is_empty() {
+            return None;
+        }
+        return Some((host.to_string(), parsed.port().unwrap_or(1433)));
+    }
     let lower = url.to_ascii_lowercase();
     let (rest, default_port) = match engine {
         EngineKind::MySql if lower.starts_with("mysql://") => {
@@ -247,6 +266,7 @@ pub fn detect_engine_from_url(hint: Option<&str>, url: &str) -> Result<EngineKin
             "sqlite" => Ok(EngineKind::Sqlite),
             "duckdb" => Ok(EngineKind::DuckDb),
             "clickhouse" | "ch" => Ok(EngineKind::ClickHouse),
+            "sqlserver" | "mssql" => Ok(EngineKind::SqlServer),
             other => bail!("unknown engine hint '{other}'"),
         };
     }
@@ -261,10 +281,12 @@ pub fn detect_engine_from_url(hint: Option<&str>, url: &str) -> Result<EngineKin
         Ok(EngineKind::DuckDb)
     } else if lower.starts_with("clickhouse://") || lower.starts_with("clickhouses://") {
         Ok(EngineKind::ClickHouse)
+    } else if lower.starts_with("sqlserver://") || lower.starts_with("mssql://") {
+        Ok(EngineKind::SqlServer)
     } else {
         bail!(
             "cannot detect engine from URL scheme; use postgresql://, mysql://, sqlite:, duckdb:, \
-             clickhouse://, or clickhouses:// (http(s):// needs an explicit engine hint)"
+             clickhouse://, clickhouses://, sqlserver://, or mssql:// (http(s):// needs an explicit engine hint)"
         )
     }
 }
@@ -339,6 +361,81 @@ mod tests {
         );
         // http:// without a hint stays ambiguous.
         assert!(detect_engine_from_url(None, "http://localhost:8123/db").is_err());
+    }
+
+    #[test]
+    fn parse_sqlserver_host_port_boundaries() {
+        for url in [
+            "sqlserver://reader:pass%40word@db.example.com/warehouse",
+            "mssql://reader:pass%40word@db.example.com/warehouse?encrypt=true",
+            "SQLSERVER://reader:pass%40word@db.example.com/warehouse#fragment",
+        ] {
+            assert_eq!(
+                parse_host_port(url, EngineKind::SqlServer),
+                Some(("db.example.com".into(), 1433))
+            );
+        }
+        assert_eq!(
+            parse_host_port(
+                "mssql://reader:password@[::1]:14333/warehouse",
+                EngineKind::SqlServer
+            ),
+            Some(("::1".into(), 14333))
+        );
+        for url in [
+            "sqlserver:///warehouse",
+            "sqlserver://localhost:invalid/warehouse",
+            "sqlserver://localhost:65536/warehouse",
+            "mysql://localhost/warehouse",
+        ] {
+            assert_eq!(parse_host_port(url, EngineKind::SqlServer), None);
+        }
+    }
+
+    #[test]
+    fn detect_sqlserver_schemes_and_hints() {
+        for url in [
+            "sqlserver://localhost/warehouse",
+            "mssql://localhost/warehouse",
+            "SQLSERVER://localhost/warehouse",
+        ] {
+            assert_eq!(
+                detect_engine_from_url(None, url).unwrap(),
+                EngineKind::SqlServer
+            );
+        }
+        for hint in ["sqlserver", "mssql", "SqlServer", "MSSQL"] {
+            assert_eq!(
+                detect_engine_from_url(Some(hint), "mssql://localhost/warehouse").unwrap(),
+                EngineKind::SqlServer
+            );
+        }
+        let error = detect_engine_from_url(None, "unknown://reader:private@localhost/db")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("sqlserver://"));
+        assert!(!error.contains("private"));
+    }
+
+    #[tokio::test]
+    async fn sqlserver_tcp_preflight_redacts_credentials() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let error = match connect_driver(
+            &format!("sqlserver://reader:private@127.0.0.1:{port}/warehouse"),
+            EngineKind::SqlServer,
+            &ConnectOptions::default(),
+        )
+        .await
+        {
+            Ok(_) => panic!("connection to a closed port should fail"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("TCP preflight failed"), "{error}");
+        assert!(!error.contains("reader"));
+        assert!(!error.contains("private"));
+        assert!(!error.contains("warehouse"));
     }
 
     #[tokio::test]

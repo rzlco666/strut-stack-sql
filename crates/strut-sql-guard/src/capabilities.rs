@@ -27,6 +27,7 @@ pub struct CapabilityRow {
     pub sqlite: bool,
     pub duckdb: bool,
     pub clickhouse: bool,
+    pub sqlserver: bool,
     /// Why the statement is unsupported / special.
     pub note: &'static str,
 }
@@ -39,6 +40,7 @@ impl CapabilityRow {
             EngineKind::Sqlite => self.sqlite,
             EngineKind::DuckDb => self.duckdb,
             EngineKind::ClickHouse => self.clickhouse,
+            EngineKind::SqlServer => self.sqlserver,
         }
     }
 }
@@ -54,7 +56,8 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         sqlite: true,
         duckdb: true,
         clickhouse: true,
-        note: "LIMIT is injected/clamped by the guard.",
+        sqlserver: true,
+        note: "LIMIT is injected/clamped by the guard.", note: "Row bounds use LIMIT/FETCH, or TOP/OFFSET FETCH on SQL Server.",
     },
     CapabilityRow {
         statement: "INSERT",
@@ -66,6 +69,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         sqlite: true,
         duckdb: true,
         clickhouse: true,
+        sqlserver: true,
         note: "Requires --allow-writes.",
     },
     CapabilityRow {
@@ -78,6 +82,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         sqlite: true,
         duckdb: true,
         clickhouse: false,
+        sqlserver: true,
         note: "Requires --allow-writes.",
     },
     CapabilityRow {
@@ -90,6 +95,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         sqlite: true,
         duckdb: true,
         clickhouse: true,
+        sqlserver: true,
         note: "Requires --allow-writes.",
     },
     CapabilityRow {
@@ -102,7 +108,8 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         sqlite: false,
         duckdb: true,
         clickhouse: false,
-        note: "PostgreSQL 15+ and DuckDB; MySQL/SQLite rejected as unsupported.",
+        sqlserver: true,
+        note: "PostgreSQL 15+ and DuckDB and SQL Server; MySQL/SQLite rejected as unsupported.",
     },
     CapabilityRow {
         statement: "CREATE TABLE",
@@ -114,6 +121,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         sqlite: true,
         duckdb: true,
         clickhouse: true,
+        sqlserver: true,
         note: "Structured create_table also verifies the parsed class.",
     },
     CapabilityRow {
@@ -126,6 +134,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         sqlite: true,
         duckdb: true,
         clickhouse: true,
+        sqlserver: true,
         note: "SQLite supports a limited ALTER TABLE subset.",
     },
     CapabilityRow {
@@ -138,6 +147,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         sqlite: true,
         duckdb: true,
         clickhouse: true,
+        sqlserver: true,
         note: "Destructive tools require confirm:true.",
     },
     CapabilityRow {
@@ -150,6 +160,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         sqlite: false,
         duckdb: true,
         clickhouse: true,
+        sqlserver: true,
         note: "SQLite has no TRUNCATE; use DELETE (write tier).",
     },
     CapabilityRow {
@@ -162,6 +173,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         sqlite: true,
         duckdb: true,
         clickhouse: false,
+        sqlserver: true,
         note: "",
     },
     CapabilityRow {
@@ -174,6 +186,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         sqlite: true,
         duckdb: true,
         clickhouse: true,
+        sqlserver: true,
         note: "",
     },
     CapabilityRow {
@@ -186,6 +199,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         sqlite: false,
         duckdb: true,
         clickhouse: false,
+        sqlserver: true,
         note: "SQLite has no schema DDL.",
     },
     CapabilityRow {
@@ -198,6 +212,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         sqlite: false,
         duckdb: false,
         clickhouse: true,
+        sqlserver: true,
         note: "SQLite/DuckDB have no CREATE DATABASE; attaching databases is not exposed.",
     },
     CapabilityRow {
@@ -210,7 +225,8 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         sqlite: false,
         duckdb: false,
         clickhouse: false,
-        note: "PostgreSQL only; sqlparser 0.62 cannot parse MySQL CREATE FUNCTION, so the server rejects it there.",
+        sqlserver: false,
+        note: "PostgreSQL only; sqlparser 0.62 cannot parse MySQL CREATE FUNCTION, so the server rejects it there.", note: "PostgreSQL only; routine bodies are not safely representable for other engines by sqlparser 0.62.",
     },
     CapabilityRow {
         statement: "CREATE SEQUENCE",
@@ -222,7 +238,8 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         sqlite: false,
         duckdb: true,
         clickhouse: false,
-        note: "PostgreSQL and DuckDB; MySQL AUTO_INCREMENT and SQLite rowid replace it.",
+        sqlserver: true,
+        note: "PostgreSQL, DuckDB and SQL Server; MySQL AUTO_INCREMENT and SQLite rowid replace it.",
     },
     CapabilityRow {
         statement: "COMMENT ON",
@@ -234,6 +251,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         sqlite: false,
         duckdb: false,
         clickhouse: false,
+        sqlserver: false,
         note: "DuckDB COMMENT ON is not parsed by sqlparser 0.62's DuckDbDialect; PostgreSQL syntax only on this surface; MySQL/SQLite carry comments in DDL.",
     },
     CapabilityRow {
@@ -246,6 +264,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         sqlite: false,
         duckdb: false,
         clickhouse: false,
+        sqlserver: false,
         note: "Not representable by sqlparser 0.62; rejected at parse time.",
     },
     CapabilityRow {
@@ -258,6 +277,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         sqlite: true,
         duckdb: true,
         clickhouse: false,
+        sqlserver: false,
         note: "Admin tier; requires an Admin grant plus --allow-grants.",
     },
     CapabilityRow {
@@ -270,6 +290,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         sqlite: true,
         duckdb: true,
         clickhouse: false,
+        sqlserver: false,
         note: "Admin tier; requires an Admin grant plus --allow-grants.",
     },
     CapabilityRow {
@@ -282,6 +303,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         sqlite: true,
         duckdb: false,
         clickhouse: false,
+        sqlserver: false,
         note: "SQLite allowlisted read pragmas only; DuckDB pragmas are not exposed; write pragmas are denied.",
     },
     CapabilityRow {
@@ -294,6 +316,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         sqlite: false,
         duckdb: false,
         clickhouse: false,
+        sqlserver: false,
         note: "State-changing pragmas are never exposed.",
     },
     CapabilityRow {
@@ -306,6 +329,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         sqlite: false,
         duckdb: true,
         clickhouse: true,
+        sqlserver: false,
         note: "MySQL introspection statements; DuckDB supports SHOW TABLES only here.",
     },
     CapabilityRow {
@@ -318,6 +342,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         sqlite: true,
         duckdb: true,
         clickhouse: true,
+        sqlserver: false,
         note: "Plain EXPLAIN does not execute the inner statement.",
     },
     CapabilityRow {
@@ -330,6 +355,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         sqlite: false,
         duckdb: true,
         clickhouse: false,
+        sqlserver: false,
         note: "Executes the statement: requires write mode and --allow-explain-analyze in the advisor.",
     },
     CapabilityRow {
@@ -342,6 +368,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         sqlite: false,
         duckdb: false,
         clickhouse: true,
+        sqlserver: true,
         note: "Admin gate: requires an Admin grant and --allow-grants.",
     },
     CapabilityRow {
@@ -354,6 +381,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         sqlite: false,
         duckdb: false,
         clickhouse: true,
+        sqlserver: true,
         note: "Admin gate: requires an Admin grant and --allow-grants.",
     },
     CapabilityRow {
@@ -366,6 +394,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         sqlite: false,
         duckdb: false,
         clickhouse: false,
+        sqlserver: false,
         note: "Never exposed: sessions are managed by the server.",
     },
     CapabilityRow {
@@ -378,6 +407,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         sqlite: false,
         duckdb: false,
         clickhouse: false,
+        sqlserver: false,
         note: "Session state is managed by the server; not exposed.",
     },
     CapabilityRow {
@@ -390,6 +420,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         sqlite: false,
         duckdb: false,
         clickhouse: false,
+        sqlserver: false,
         note: "Administrative DDL outside the supported surface; use a database client.",
     },
     CapabilityRow {
@@ -402,6 +433,7 @@ pub const CAPABILITY_MATRIX: &[CapabilityRow] = &[
         sqlite: false,
         duckdb: false,
         clickhouse: false,
+        sqlserver: false,
         note: "Permanently denied.",
     },
 ];
@@ -416,15 +448,20 @@ pub fn unsupported_statement(engine: EngineKind, stmt: &Statement) -> Option<Str
         ))
     };
     match stmt {
-        Statement::CreateSequence { .. } => {
-            (!matches!(engine, EngineKind::Postgres | EngineKind::DuckDb))
-                .then(|| unsupported_row("CREATE SEQUENCE"))
-        }
+        Statement::CreateSequence { .. } => (!matches!(
+            engine,
+            EngineKind::Postgres | EngineKind::DuckDb | EngineKind::SqlServer
+        ))
+        .then(|| unsupported_row("CREATE SEQUENCE")),
         Statement::Comment { .. } => {
             (engine != EngineKind::Postgres).then(|| unsupported_row("COMMENT ON"))
         }
-        Statement::Vacuum(_) => matches!(engine, EngineKind::MySql | EngineKind::ClickHouse)
-            .then(|| unsupported_row("VACUUM")),
+        Statement::Vacuum(_) => matches!(
+            engine,
+            EngineKind::MySql | EngineKind::ClickHouse | EngineKind::SqlServer
+        )
+        .then(|| unsupported_row("VACUUM")),
+        Statement::Analyze(_) if engine == EngineKind::SqlServer => unsupported("ANALYZE"),
         Statement::Pragma { .. } => {
             if engine != EngineKind::Sqlite {
                 return unsupported("PRAGMA");
@@ -445,7 +482,10 @@ pub fn unsupported_statement(engine: EngineKind, stmt: &Statement) -> Option<Str
         }
         Statement::CreateFunction(_) => matches!(
             engine,
-            EngineKind::Sqlite | EngineKind::DuckDb | EngineKind::ClickHouse
+            EngineKind::Sqlite
+                | EngineKind::DuckDb
+                | EngineKind::ClickHouse
+                | EngineKind::SqlServer
         )
         .then(|| unsupported_row("CREATE FUNCTION")),
         Statement::Truncate { .. } => {
@@ -465,8 +505,12 @@ pub fn unsupported_statement(engine: EngineKind, stmt: &Statement) -> Option<Str
         Statement::Analyze(_) => {
             (engine == EngineKind::ClickHouse).then(|| unsupported_row("ANALYZE"))
         }
-        Statement::Merge { .. } => (!matches!(engine, EngineKind::Postgres | EngineKind::DuckDb))
-            .then(|| unsupported_row("MERGE")),
+        Statement::Merge { .. } => (!matches!(
+            engine,
+            EngineKind::Postgres | EngineKind::DuckDb | EngineKind::SqlServer
+        ))
+        .then(|| unsupported_row("MERGE")),
+        Statement::Explain { .. } if engine == EngineKind::SqlServer => unsupported("EXPLAIN"),
         Statement::Explain {
             analyze: true,
             statement,
@@ -521,6 +565,7 @@ pub fn engine_label(engine: EngineKind) -> &'static str {
         EngineKind::Sqlite => "sqlite",
         EngineKind::DuckDb => "duckdb",
         EngineKind::ClickHouse => "clickhouse",
+        EngineKind::SqlServer => "sqlserver",
     }
 }
 
@@ -528,6 +573,14 @@ pub fn engine_label(engine: EngineKind) -> &'static str {
 mod tests {
     use super::*;
     use crate::{classify_sql, validate_and_prepare, WriteMode};
+
+    fn matrix_sample(row: &CapabilityRow, engine: EngineKind) -> &str {
+        if engine == EngineKind::SqlServer && row.statement == "ALTER TABLE" {
+            "ALTER TABLE t ADD name TEXT"
+        } else {
+            row.sample
+        }
+    }
 
     fn mode_for(tier: &str) -> WriteMode {
         match tier {
@@ -547,11 +600,13 @@ mod tests {
                 EngineKind::Sqlite,
                 EngineKind::DuckDb,
                 EngineKind::ClickHouse,
+                EngineKind::SqlServer,
             ] {
                 if !row.supported(engine) {
                     continue;
                 }
-                let class = classify_sql(row.sample, engine).unwrap_or_else(|e| {
+                let sample = matrix_sample(row, engine);
+                let class = classify_sql(sample, engine).unwrap_or_else(|e| {
                     panic!(
                         "supported row '{}' failed to classify on {}: {e}",
                         row.statement,
@@ -565,15 +620,16 @@ mod tests {
                     row.statement,
                     engine_label(engine)
                 );
-                validate_and_prepare(row.sample, &[], engine, mode_for(row.tier), 100)
-                    .unwrap_or_else(|e| {
+                validate_and_prepare(sample, &[], engine, mode_for(row.tier), 100).unwrap_or_else(
+                    |e| {
                         panic!(
                             "supported row '{}' rejected on {} at tier {}: {e}",
                             row.statement,
                             engine_label(engine),
                             row.tier
                         )
-                    });
+                    },
+                );
             }
         }
     }
@@ -587,6 +643,7 @@ mod tests {
                 EngineKind::Sqlite,
                 EngineKind::DuckDb,
                 EngineKind::ClickHouse,
+                EngineKind::SqlServer,
             ] {
                 if row.supported(engine) {
                     continue;

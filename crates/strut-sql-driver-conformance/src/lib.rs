@@ -3,7 +3,10 @@ use strut_sql_driver_api::TableInfo;
 use strut_sql_driver_api::{BoundQuery, EngineDriver, ObjectType, SchemaObject, SqlValue};
 
 /// Generic driver factory for conformance testing.
-// Match EngineDriver's workaround for async_trait's generated bare must_use.
+// Same `async_trait` (0.1.89) synthesis as `EngineDriver`: the generated
+// `#[must_use]` on the boxed-future method cannot carry a reason, and clippy
+// 1.99's `double_must_use` flags it as an error. Suppress locally; behaviour
+// is unchanged.
 #[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait DriverFactory: Send + Sync {

@@ -141,11 +141,30 @@ pub async fn execute_query(
     // cap the rows actually taken from the DB at max_rows (+1 probe row) and
     // mark the result truncated.
     let fetch_rows = class_fetches_rows(&prepared.class);
-    let row_cap = if prepared.limit_unverified && !prepared.server_pagination {
-        Some(opts.max_rows as usize)
+    let client_page_size = opts.page_size.unwrap_or(opts.max_rows as usize);
+    let client_page_size = if engine == EngineKind::SqlServer {
+        client_page_size.min(opts.max_rows as usize)
     } else {
-        None
+        client_page_size
     };
+    // Preserve a caller's TOP/FETCH semantics, but fetch only the prefix needed
+    // for client slicing even when that bound is a verified, very large literal.
+    let sqlserver_client_page = engine == EngineKind::SqlServer
+        && prepared.class.is_select_like()
+        && (opts.page_offset > 0 || opts.page_size.is_some());
+    let row_cap =
+        if !prepared.server_pagination && (prepared.limit_unverified || sqlserver_client_page) {
+            let cap = if sqlserver_client_page {
+                opts.page_offset
+                    .saturating_add(client_page_size)
+                    .saturating_add(1)
+            } else {
+                opts.max_rows as usize
+            };
+            Some(cap)
+        } else {
+            None
+        };
 
     let result = match tokio::time::timeout(
         opts.timeout,
@@ -180,9 +199,8 @@ pub async fn execute_query(
                 columnar.meta.total_fetched = Some(fetched);
                 columnar.meta.has_more = Some(has_more);
             } else {
-                let page_size = opts.page_size.unwrap_or(opts.max_rows as usize);
                 if opts.page_offset > 0 || opts.page_size.is_some() {
-                    columnar.apply_pagination(opts.page_offset, page_size);
+                    columnar.apply_pagination(opts.page_offset, client_page_size);
                 }
             }
             let columnar = truncate_to_bytes(columnar, opts.max_bytes);
@@ -557,7 +575,10 @@ pub(crate) fn sql_value_to_json(value: SqlValue, engine: EngineKind) -> Value {
         SqlValue::Date(d) => Value::String(d.to_string()),
         SqlValue::DateTime(dt) => Value::String(dt.to_string()),
         SqlValue::Binary(b) => match engine {
-            EngineKind::Postgres | EngineKind::Sqlite | EngineKind::DuckDb => {
+            EngineKind::Postgres
+            | EngineKind::Sqlite
+            | EngineKind::DuckDb
+            | EngineKind::SqlServer => {
                 let mut map = serde_json::Map::new();
                 map.insert("$blob_hex".into(), Value::String(bytes_to_hex(&b)));
                 Value::Object(map)
@@ -733,12 +754,13 @@ mod tests {
     }
 
     #[test]
-    fn binary_cells_are_tagged_hex_for_postgres_sqlite_and_duckdb() {
+    fn binary_cells_are_tagged_hex_for_postgres_sqlite_duckdb_and_sqlserver() {
         let v = sql_value_to_json(SqlValue::Binary(b"edoc".to_vec()), EngineKind::Sqlite);
         assert_eq!(v, serde_json::json!({"$blob_hex": "65646f63"}));
         let v = sql_value_to_json(SqlValue::Binary(b"edoc".to_vec()), EngineKind::Postgres);
         assert_eq!(v, serde_json::json!({"$blob_hex": "65646f63"}));
         let v = sql_value_to_json(SqlValue::Binary(b"edoc".to_vec()), EngineKind::DuckDb);
+        let v = sql_value_to_json(SqlValue::Binary(b"edoc".to_vec()), EngineKind::SqlServer);
         assert_eq!(v, serde_json::json!({"$blob_hex": "65646f63"}));
         let v = sql_value_to_json(SqlValue::Binary(b"edoc".to_vec()), EngineKind::MySql);
         assert_eq!(v, Value::String("65646f63".into()));

@@ -14,6 +14,7 @@ strut-sql-driver-mysql = { path = "../strut-sql-driver-mysql" }
 strut-sql-driver-sqlite = { path = "../strut-sql-driver-sqlite" }
 strut-sql-driver-duckdb = { path = "../strut-sql-driver-duckdb" }
 strut-sql-driver-clickhouse = { path = "../strut-sql-driver-clickhouse" }
+strut-sql-driver-sqlserver = { path = "../strut-sql-driver-sqlserver" }
 strut-sql-guard = { path = "../strut-sql-guard" }
 anyhow = "1"
 thiserror = "2"
@@ -25,6 +26,8 @@ tracing = "0.1"
 tokio = { version = "1", features = ["net", "sync", "time"] }
 sha2 = "0.10"
 subtle = "2"
+url = "2"
+percent-encoding = "2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

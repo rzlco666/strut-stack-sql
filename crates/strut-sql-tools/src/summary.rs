@@ -83,6 +83,7 @@ pub struct SummaryParams {
 fn quote_ident(name: &str, engine: EngineKind) -> String {
     match engine {
         EngineKind::MySql | EngineKind::ClickHouse => format!("`{}`", name.replace('`', "``")),
+        EngineKind::SqlServer => format!("[{}]", name.replace(']', "]]")),
         EngineKind::Postgres | EngineKind::Sqlite | EngineKind::DuckDb => {
             format!("\"{}\"", name.replace('"', "\"\""))
         }
@@ -180,6 +181,21 @@ pub async fn handle_summary(
         .filter_map(|c| catalog_name(&info.columns, c))
         .map(|c| quote_ident(c, engine))
         .collect();
+    let (select, limit_sql) = if engine == EngineKind::SqlServer {
+        (format!("SELECT TOP ({limit})"), String::new())
+    } else {
+        ("SELECT".to_string(), format!(" LIMIT {limit}"))
+    };
+    let count_alias = if engine == EngineKind::SqlServer {
+        "[count]"
+    } else {
+        "\"count\""
+    };
+    let value_alias = if engine == EngineKind::SqlServer {
+        "[value]"
+    } else {
+        "\"value\""
+    };
 
     let (sql, meta_kind, exact) = match params.kind {
         SummaryKind::Count => {
@@ -195,7 +211,7 @@ pub async fn handle_summary(
             };
             (
                 format!(
-                    "SELECT {groups}COUNT(*) AS \"count\" FROM {from}{group_clause} ORDER BY \"count\" DESC LIMIT {limit}"
+                    "{select} {groups}COUNT(*) AS {count_alias} FROM {from}{group_clause} ORDER BY {count_alias} DESC{limit_sql}"
                 ),
                 "count",
                 true,
@@ -219,7 +235,7 @@ pub async fn handle_summary(
             }
             (
                 format!(
-                    "SELECT {} FROM {from} ORDER BY {} LIMIT {limit}",
+                    "{select} {} FROM {from} ORDER BY {}{limit_sql}",
                     cols.join(", "),
                     cols[0]
                 ),
@@ -262,7 +278,7 @@ pub async fn handle_summary(
             };
             (
                 format!(
-                    "SELECT {group_select}{}({target}) AS \"value\" FROM {from}{group_clause} LIMIT {limit}",
+                    "{select} {group_select}{}({target}) AS {value_alias} FROM {from}{group_clause}{limit_sql}",
                     aggregate.sql()
                 ),
                 "aggregate",
@@ -311,6 +327,7 @@ mod tests {
         assert_eq!(quote_ident("a\"b", EngineKind::Sqlite), "\"a\"\"b\"");
         assert_eq!(quote_ident("plain", EngineKind::Postgres), "\"plain\"");
         assert_eq!(quote_ident("a\"b", EngineKind::DuckDb), "\"a\"\"b\"");
+        assert_eq!(quote_ident("a]b", EngineKind::SqlServer), "[a]]b]");
     }
 
     #[test]

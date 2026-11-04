@@ -25,6 +25,8 @@ struct ScanOutcome {
     qmark_positions: Vec<usize>,
     /// Largest `$N` index seen in code position (0 = none).
     pg_max_index: usize,
+    /// Bracket identifiers needing lossless rendering (`]]` inside a name).
+    escaped_brackets: Vec<(usize, usize)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -34,6 +36,7 @@ enum ScanState {
     SingleQuote,
     DoubleQuote,
     Backtick,
+    Bracket,
     LineComment,
     /// Nesting depth of /* */ (PostgreSQL allows nested block comments).
     BlockComment(u32),
@@ -41,11 +44,17 @@ enum ScanState {
 }
 
 fn scan_sql(sql: &str) -> ScanOutcome {
+    scan_sql_for_engine(sql, false)
+}
+
+fn scan_sql_for_engine(sql: &str, sqlserver: bool) -> ScanOutcome {
     let bytes = sql.as_bytes();
     let mut out = ScanOutcome::default();
     let mut i = 0usize;
     let mut state = ScanState::Normal;
     let mut dollar_tag: Vec<u8> = Vec::new();
+    let mut bracket_start = 0;
+    let mut bracket_escaped = false;
 
     while i < bytes.len() {
         let b = bytes[i];
@@ -54,17 +63,22 @@ fn scan_sql(sql: &str) -> ScanOutcome {
                 b'\'' => state = ScanState::SingleQuote,
                 b'"' => state = ScanState::DoubleQuote,
                 b'`' => state = ScanState::Backtick,
+                b'[' if sqlserver => {
+                    state = ScanState::Bracket;
+                    bracket_start = i;
+                    bracket_escaped = false;
+                }
                 b'?' => out.qmark_positions.push(i),
                 b'-' if bytes.get(i + 1) == Some(&b'-') => {
                     state = ScanState::LineComment;
                     i += 1;
                 }
-                b'#' => state = ScanState::LineComment,
+                b'#' if !sqlserver => state = ScanState::LineComment,
                 b'/' if bytes.get(i + 1) == Some(&b'*') => {
                     state = ScanState::BlockComment(1);
                     i += 1;
                 }
-                b'$' => {
+                b'$' if !sqlserver => {
                     if let Some(n) = parse_pg_number(bytes, i) {
                         out.pg_max_index = out.pg_max_index.max(n);
                         i += 1 + digits_len(n);
@@ -82,7 +96,9 @@ fn scan_sql(sql: &str) -> ScanOutcome {
                 // an identifier (e.g. `name'x'` is not a literal start in
                 // practice, but `x` glued to a name is a column reference).
                 b'E' | b'e' | b'B' | b'b' | b'X' | b'x' | b'U' | b'u'
-                    if bytes.get(i + 1) == Some(&b'\'') && !prev_is_ident(bytes, i) =>
+                    if !sqlserver
+                        && bytes.get(i + 1) == Some(&b'\'')
+                        && !prev_is_ident(bytes, i) =>
                 {
                     state = ScanState::SingleQuote;
                     i += 1;
@@ -93,7 +109,7 @@ fn scan_sql(sql: &str) -> ScanOutcome {
                 // Backslash escapes the following byte: \' \\ \n ... This is
                 // MySQL behaviour for all '...' strings and PostgreSQL
                 // behaviour for E'...' strings.
-                b'\\' => {
+                b'\\' if !sqlserver => {
                     i += 1; // also consume the escaped byte (loop adds 1 more)
                 }
                 b'\'' => {
@@ -119,6 +135,19 @@ fn scan_sql(sql: &str) -> ScanOutcome {
                     if bytes.get(i + 1) == Some(&b'`') {
                         i += 1;
                     } else {
+                        state = ScanState::Normal;
+                    }
+                }
+            }
+            ScanState::Bracket => {
+                if b == b']' {
+                    if bytes.get(i + 1) == Some(&b']') {
+                        bracket_escaped = true;
+                        i += 1;
+                    } else {
+                        if bracket_escaped {
+                            out.escaped_brackets.push((bracket_start, i + 1));
+                        }
                         state = ScanState::Normal;
                     }
                 }
@@ -227,7 +256,7 @@ pub fn count_pg_numbered_placeholders(sql: &str) -> usize {
 }
 
 pub fn placeholder_count(sql: &str, engine: EngineKind) -> usize {
-    let scan = scan_sql(sql);
+    let scan = scan_sql_for_engine(sql, engine == EngineKind::SqlServer);
     if !scan.qmark_positions.is_empty() {
         return scan.qmark_positions.len();
     }
@@ -242,7 +271,7 @@ pub fn validate_param_count(
     params: &[Value],
     engine: EngineKind,
 ) -> Result<(), GuardError> {
-    let scan = scan_sql(sql);
+    let scan = scan_sql_for_engine(sql, engine == EngineKind::SqlServer);
     let qm = scan.qmark_positions.len();
     let pg_num = scan.pg_max_index;
 
@@ -299,8 +328,52 @@ pub fn rewrite_placeholders_for_postgres(sql: &str) -> String {
     out
 }
 
+/// sqlparser 0.62 unescapes `]]` but its Ident Display does not escape `]`
+/// again. Normalize only affected identifiers to standard double quoting
+/// before parsing, so TOP/policy/paging serialization remains lossless.
+pub(super) fn normalize_sqlserver_identifiers(sql: &str) -> String {
+    let scan = scan_sql_for_engine(sql, true);
+    if scan.escaped_brackets.is_empty() {
+        return sql.to_string();
+    }
+    let mut output = String::with_capacity(sql.len());
+    let mut last = 0;
+    for (start, end) in scan.escaped_brackets {
+        output.push_str(&sql[last..start]);
+        output.push('"');
+        let mut chars = sql[start + 1..end - 1].chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == ']' && chars.peek() == Some(&']') {
+                chars.next();
+            }
+            if ch == '"' {
+                output.push('"');
+            }
+            output.push(ch);
+        }
+        output.push('"');
+        last = end;
+    }
+    output.push_str(&sql[last..]);
+    output
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn sqlserver_counts_binds_with_tsql_lexical_rules() {
+        let sql =
+            "SELECT [odd?]]name], N'?', 'C:\\', ? FROM #temp WHERE id = ? /* ? /* ? */ */ -- ?\n";
+        assert_eq!(placeholder_count(sql, EngineKind::SqlServer), 2);
+        validate_param_count(
+            sql,
+            &[Value::from(1), Value::from(2)],
+            EngineKind::SqlServer,
+        )
+        .unwrap();
+        assert!(validate_param_count(sql, &[Value::from(1)], EngineKind::SqlServer).is_err());
+    }
     use super::*;
 
     #[test]
@@ -475,5 +548,24 @@ mod tests {
                 "sql={sql} rewritten={rewritten}"
             );
         }
+    }
+
+    #[test]
+    fn sqlserver_money_and_dollar_identifiers_are_not_binds() {
+        // T-SQL has no $N binds: `$12.34` is a money constant and `$` is a
+        // valid identifier character. Neither may be counted as a parameter.
+        for sql in [
+            "SELECT $12.34 AS amount",
+            "SELECT $12 AS amount",
+            "SELECT amount$1 FROM dbo.t",
+            "SELECT [a$1] FROM dbo.t",
+        ] {
+            assert_eq!(placeholder_count(sql, EngineKind::SqlServer), 0, "{sql}");
+            validate_param_count(sql, &[], EngineKind::SqlServer).unwrap();
+        }
+        // PostgreSQL keeps its numbered placeholders.
+        assert_eq!(placeholder_count("SELECT $1", EngineKind::Postgres), 1);
+        assert!(validate_param_count("SELECT $1", &[], EngineKind::Postgres).is_err());
+        validate_param_count("SELECT $1", &[Value::from(1)], EngineKind::Postgres).unwrap();
     }
 }
