@@ -1122,6 +1122,7 @@ fn engine_label(engine: EngineKind) -> &'static str {
         EngineKind::MySql => "mysql",
         EngineKind::Sqlite => "sqlite",
         EngineKind::DuckDb => "duckdb",
+        EngineKind::ClickHouse => "clickhouse",
     }
 }
 

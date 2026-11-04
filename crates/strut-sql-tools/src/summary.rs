@@ -82,7 +82,7 @@ pub struct SummaryParams {
 
 fn quote_ident(name: &str, engine: EngineKind) -> String {
     match engine {
-        EngineKind::MySql => format!("`{}`", name.replace('`', "``")),
+        EngineKind::MySql | EngineKind::ClickHouse => format!("`{}`", name.replace('`', "``")),
         EngineKind::Postgres | EngineKind::Sqlite | EngineKind::DuckDb => {
             format!("\"{}\"", name.replace('"', "\"\""))
         }

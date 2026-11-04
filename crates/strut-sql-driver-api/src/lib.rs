@@ -6,6 +6,8 @@ use chrono::{NaiveDate, NaiveDateTime};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub mod placeholders;
+
 /// Engine identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -14,6 +16,7 @@ pub enum EngineKind {
     MySql,
     Sqlite,
     DuckDb,
+    ClickHouse,
 }
 
 /// Connection-pool options shared by every driver.

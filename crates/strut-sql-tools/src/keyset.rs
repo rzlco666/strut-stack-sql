@@ -6,7 +6,7 @@
 use std::sync::{Arc, LazyLock};
 
 use serde_json::Value;
-use strut_sql_driver_api::EngineDriver;
+use strut_sql_driver_api::{EngineDriver, EngineKind, IndexInfo};
 use strut_sql_guard::KeysetShape;
 
 use crate::cursor::{now_unix, CursorCodec, CursorError, CursorPayload};
@@ -137,35 +137,47 @@ pub async fn ensure_unique_order_column(
 ) -> Result<(), KeysetError> {
     let (schema, table) = split_qualified(shape);
     let column = shape.order_column.to_ascii_lowercase();
+    // ClickHouse primary keys are sorting keys, not uniqueness constraints:
+    // a keyset page over them can repeat or skip rows, so only an explicit
+    // unique index qualifies there.
+    let primary_implies_unique = driver.kind() != EngineKind::ClickHouse;
     let indexes = driver
         .list_indexes(schema.as_deref(), Some(&table))
         .await
         .map_err(|e| {
             KeysetError::Unsupported(format!("could not read indexes for table '{table}': {e}"))
         })?;
-    let unique_single = indexes.iter().any(|index| {
-        (index.primary || index.unique)
-            && index.columns.len() == 1
-            && index.columns[0].eq_ignore_ascii_case(&column)
-    });
+    let unique_single = indexes
+        .iter()
+        .any(|index| unique_single_column(index, &column, primary_implies_unique));
     if unique_single {
         return Ok(());
     }
     // Fallback: primary keys are not always reported as indexes by every
     // engine/driver combination; the column catalog knows them too.
-    if let Ok(info) = driver.describe_table(schema.as_deref(), &table).await {
-        if info
-            .columns
-            .iter()
-            .any(|c| c.is_primary_key && c.name.eq_ignore_ascii_case(&column))
-        {
-            return Ok(());
+    if primary_implies_unique {
+        if let Ok(info) = driver.describe_table(schema.as_deref(), &table).await {
+            if info
+                .columns
+                .iter()
+                .any(|c| c.is_primary_key && c.name.eq_ignore_ascii_case(&column))
+            {
+                return Ok(());
+            }
         }
     }
     Err(KeysetError::NotUnique(format!(
         "ORDER BY column '{column}' on table '{table}' is not a primary key or single-column unique index; \
          add one, or use page_offset pagination"
     )))
+}
+
+/// Whether `index` proves a single-column unique ordering. ClickHouse sorting
+/// keys pass `primary_implies_unique = false` because they are not unique.
+fn unique_single_column(index: &IndexInfo, column: &str, primary_implies_unique: bool) -> bool {
+    (index.unique || (index.primary && primary_implies_unique))
+        && index.columns.len() == 1
+        && index.columns[0].eq_ignore_ascii_case(column)
 }
 
 /// Index of the ordering column in the projected result.
@@ -183,6 +195,28 @@ pub fn order_key_index(cols: &[String], column: &str) -> Result<usize, KeysetErr
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn index(name: &str, columns: &[&str], unique: bool, primary: bool) -> IndexInfo {
+        IndexInfo {
+            schema: None,
+            table: "t".into(),
+            name: name.into(),
+            columns: columns.iter().map(|c| c.to_string()).collect(),
+            unique,
+            primary,
+        }
+    }
+
+    #[test]
+    fn clickhouse_primary_key_does_not_imply_unique_ordering() {
+        let primary = index("PRIMARY", &["id"], false, true);
+        assert!(!unique_single_column(&primary, "id", false));
+        assert!(unique_single_column(&primary, "id", true));
+        let unique = index("idx_id", &["id"], true, false);
+        assert!(unique_single_column(&unique, "id", false));
+        let composite = index("uniq_ab", &["a", "b"], true, false);
+        assert!(!unique_single_column(&composite, "a", false));
+    }
 
     #[test]
     fn cursor_is_bound_to_sql_params_and_source() {

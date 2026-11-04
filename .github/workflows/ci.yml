@@ -143,6 +143,34 @@ jobs:
             cargo test --test mysql_integration -- --ignored
           fi
 
+  integration-clickhouse:
+    name: ClickHouse Integration
+    runs-on: ubuntu-latest
+    services:
+      clickhouse:
+        image: clickhouse/clickhouse-server:24.8-alpine
+        env:
+          CLICKHOUSE_SKIP_USER_SETUP: "1"
+        ports:
+          - 8124:8123
+        options: >-
+          --health-cmd "clickhouse-client --query 'SELECT 1'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+          --health-start-period 10s
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: ClickHouse driver integration tests
+        env:
+          CLICKHOUSE_URL: clickhouse://default:@127.0.0.1:8124/default
+        run: cargo test -p strut-sql-driver-clickhouse -- --ignored
+
   lint:
     name: Lint (fmt, clippy, audit)
     runs-on: ubuntu-latest

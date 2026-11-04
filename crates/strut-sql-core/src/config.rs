@@ -245,7 +245,7 @@ pub enum Command {
 #[command(
     name = "strut-stack-sql",
     version,
-    about = "Strut Stack SQL — token-efficient MCP for MySQL, PostgreSQL, SQLite, and DuckDB"
+    about = "Strut Stack SQL — token-efficient MCP for MySQL, PostgreSQL, SQLite, DuckDB, and ClickHouse"
 )]
 pub struct Cli {
     /// Maintenance subcommands. Without one the server starts normally.
@@ -1437,6 +1437,12 @@ fn resolve_url_from_env() -> Result<String> {
         }
     }
 
+    if let Ok(url) = std::env::var("CLICKHOUSE_URL") {
+        if !url.is_empty() {
+            return Ok(url);
+        }
+    }
+
     if let Some(url) = build_mysql_url_from_parts() {
         return Ok(url);
     }
@@ -1592,6 +1598,7 @@ pub fn source_endpoint(url: &str, engine: EngineKind) -> SourceEndpoint {
             EngineKind::MySql => "mysql".into(),
             EngineKind::Sqlite => "sqlite".into(),
             EngineKind::DuckDb => "duckdb".into(),
+            EngineKind::ClickHouse => "clickhouse".into(),
         },
         host,
         port,
@@ -1628,6 +1635,24 @@ fn database_from_url(url: &str, engine: EngineKind) -> Option<String> {
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|| ":memory:".into()),
         ),
+        EngineKind::ClickHouse => {
+            let lower = url.to_ascii_lowercase();
+            let rest = if lower.starts_with("clickhouses://") {
+                url.get("clickhouses://".len()..)?
+            } else if lower.starts_with("clickhouse://") {
+                url.get("clickhouse://".len()..)?
+            } else if lower.starts_with("https://") {
+                url.get("https://".len()..)?
+            } else if lower.starts_with("http://") {
+                url.get("http://".len()..)?
+            } else {
+                return None;
+            };
+            let after_at = rest.rsplit('@').next().unwrap_or(rest);
+            let path = after_at.split('?').next().unwrap_or(after_at);
+            let db = path.split('/').nth(1)?.trim();
+            (!db.is_empty()).then(|| db.to_string())
+        }
         EngineKind::Postgres | EngineKind::MySql => {
             let lower = url.to_ascii_lowercase();
             let rest = if lower.starts_with("postgresql://") {

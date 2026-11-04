@@ -15,6 +15,40 @@
   with `DuckDbDialect`, denies DuckDB external readers, dynamic SQL, `ATTACH`,
   and extension primitives, and walks table policy over the wider DuckDB AST.
   External access is disabled on the connection itself.
+- **ClickHouse driver (R3-03).** New `strut-sql-driver-clickhouse` crate and
+  `EngineKind::ClickHouse`, pluggable through the same `EngineDriver` contract
+  as the other engines (`clickhouse://` and `clickhouses://` URLs, HTTP
+  interface, 8123/8443 defaults). Every driver operation is implemented:
+  bound execution, schema/table/column/index/routine introspection, row-count
+  statistics, and ping. Honest ClickHouse semantics:
+  - `readonly=1` and `max_execution_time` are enforced **by the server**, so a
+    read-only source rejects writes and a slow statement aborts (HTTP 408 /
+    code 159 maps to `DriverError::Timeout`);
+  - row caps are applied while streaming (`JSONCompactEachRowWithNamesAndTypes`),
+    so a cap bounds transfer and memory but not server work;
+  - primary keys are sorting keys, not uniqueness constraints (`unique` is
+    always false); there are no foreign keys, no standalone `CREATE INDEX`, no
+    stored procedures, and `list_routines` returns SQL UDFs only;
+  - `UInt64` above `i64::MAX` and 128/256-bit integers arrive as exact decimal
+    strings; `Map`/named `Tuple`/unknown types arrive as JSON; decimal values
+    stay exact;
+  - `?` placeholders are rewritten to typed `{pN:Type}` parameters; `NULL` and
+    arrays are inlined as escaped literals (no generic array parameter type
+    exists).
+- Guard support for the ClickHouse dialect (`sqlparser::dialect::ClickHouseDialect`),
+  ClickHouse capability-matrix cells, and a ClickHouse function denylist
+  (`file`, `url`, `s3`, `remote`, `mysql`, `postgresql`, `jdbc`, `odbc`,
+  `hdfs`, `executable`, `sleep`, …).
+- Shared `strut-sql-driver-api::placeholders` scanner (string/comment aware
+  `?` positions and rewriting) used by the ClickHouse driver.
+- `docker-compose` ClickHouse service (host port 8124) with seed data, and a
+  CI job running the driver's integration tests against a real ClickHouse.
+
+### Changed
+
+- `describe_table` surfaces catalog comments and default expressions for
+  ClickHouse in addition to MySQL; PostgreSQL/SQLite output is unchanged.
+
 
 ## [2.0.0] — 2026-11-03
 
