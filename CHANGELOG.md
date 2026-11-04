@@ -49,6 +49,24 @@
 - `describe_table` surfaces catalog comments and default expressions for
   ClickHouse in addition to MySQL; PostgreSQL/SQLite output is unchanged.
 
+- SQL Server as the fourth engine via `strut-sql-driver-sqlserver` (Tiberius
+  0.13/Rustls), registered as `sqlserver` with `sqlserver://` and `mssql://`
+  URLs. TLS/certificate validation are on by default; use existing CLI/env/TOML
+  source selection. The workspace now has 11 library crates plus the root binary.
+- SQL Server support through the existing 20 tools: guarded TOP/OFFSET FETCH
+  and keyset pagination with semantic-preserving client fallbacks, bound values,
+  schema/catalog introspection, structured DDL and estimated/actual XML plans.
+  Shared authorization, row filters and masks remain in force; actual plans
+  require explicit analyze opt-in and write permission.
+- SQL Server capability/type matrices and ignored live conformance/integration
+  gates. Documented boundaries include read-only routing intent (not DB write
+  enforcement), client-only timeout/cancellation limits, conservative result
+  nullability and money/temporal/JSON/array/statistics limitations.
+
+### Fixed
+
+- README driver-contract excerpt now matches the actual constructor, execution,
+  catalog, capability-note and optional session-scoped explain APIs.
 
 ## [2.0.0] — 2026-11-03
 

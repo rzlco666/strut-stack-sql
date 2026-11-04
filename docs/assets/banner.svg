@@ -20,5 +20,5 @@
   <!-- wordmark -->
   <text x="290" y="148" font-family="'Segoe UI', Helvetica, Arial, sans-serif" font-size="64" font-weight="700" fill="#F8FAFC">Strut Stack SQL</text>
   <text x="292" y="204" font-family="'Segoe UI', Helvetica, Arial, sans-serif" font-size="31" font-weight="600" fill="#F59E0B">Light strut. Extreme load.</text>
-  <text x="292" y="252" font-family="'Segoe UI', Helvetica, Arial, sans-serif" font-size="22" fill="#94A3B8">Token-efficient MCP server for PostgreSQL, MySQL &amp; SQLite — written in Rust</text>
+  <text x="292" y="252" font-family="'Segoe UI', Helvetica, Arial, sans-serif" font-size="22" fill="#94A3B8">Rust MCP for PostgreSQL, MySQL, SQLite &amp; SQL Server</text>
 </svg>

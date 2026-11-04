@@ -12,21 +12,21 @@ flowchart LR
   AST -->|deny| X[Reject no DB]
   AST -->|allow| Mode[WriteMode check]
   Mode -->|deny| X
-  Mode -->|allow| Sess[Session RO hooks]
+  Mode -->|allow| Sess[Engine session hardening where available]
   Sess --> DB[(Least-privilege DB user)]
 ```
 
 ### 1. AST guard (`crates/strut-sql-guard/`)
 
-- Dialects: `PostgreSqlDialect` / `MySqlDialect` / `SQLiteDialect` / `DuckDbDialect`
+- Dialects: `PostgreSqlDialect` / `MySqlDialect` / `SQLiteDialect` / `DuckDbDialect` / `ClickHouseDialect` / `MsSqlDialect`
 - Reject empty / multi-statement strings
 - Classify: Read / Dml / Ddl / Admin / Txn / Other (unknown → deny)
-- Per-engine capability matrix (PRD-F3-09): unsupported statements are rejected before execution; see [CAPABILITIES.md](CAPABILITIES.md). `VACUUM`/`ANALYZE` are Admin; PG `CREATE SEQUENCE`/`COMMENT ON` are Ddl; SQLite read PRAGMAs are Read; DuckDB exposes no PRAGMA, ATTACH, or extension statements.
-- Explicit deny labels: `COPY`, `CALL`, `ATTACH DATABASE`, `LOAD DATA`, `PREPARE`, `EXECUTE`
+- Per-engine capability matrix (PRD-F3-09): unsupported statements are rejected before execution; see [CAPABILITIES.md](CAPABILITIES.md). `VACUUM`/`ANALYZE` are Admin where supported; PG `CREATE SEQUENCE`/`COMMENT ON` and SQL Server `CREATE SEQUENCE` are Ddl; SQLite read PRAGMAs are Read; DuckDB exposes no PRAGMA, ATTACH, or extension statements. A database supporting a statement does not imply the guard exposes it (for example SQL Server routine creation/execution).
+- Explicit deny labels: `COPY`, `CALL`, `ATTACH DATABASE`, `LOAD DATA`, `PREPARE`, `EXECUTE` / SQL Server `EXEC`, `SET` and `USE`.
 - Complexity limits: max 8 joins, max subquery depth 5 (checked across the whole statement tree, including subqueries and CTE bodies)
 - Enforce against `WriteMode`
-- Inject `LIMIT` on SELECT when missing; clamp explicit `LIMIT` above `--max-rows`
-- `EXPLAIN ANALYZE` requires writes
+- Inject/clamp SELECT row bounds: LIMIT/FETCH on existing engines, TOP or ordered OFFSET/FETCH on SQL Server; retain hard driver fetch caps when a bound cannot safely be rewritten.
+- `EXPLAIN ANALYZE` requires writes; SQL Server actual XML plans additionally require `--allow-explain-analyze` through the advisor.
 - Batch `queries[]` items are each parsed as a single statement
 
 **Bypass closure (v2):**
@@ -34,7 +34,9 @@ flowchart LR
 - **CTE bodies are classified recursively.** A `WITH x AS (DELETE … RETURNING …) SELECT …` is DML, not a read; the class of a query is the most dangerous class found anywhere in its tree (CTEs, subqueries, set operations).
 - **`SELECT … INTO` / `INTO OUTFILE` / `INTO DUMPFILE` are not reads.** They create tables or files and are denied in read-only mode.
 - **Dangerous functions are denied or tier-gated per engine** — file access (`pg_read_file`, `pg_ls_dir`, `lo_export`, MySQL `LOAD_FILE`, SQLite `readfile`/`writefile`, DuckDB `read_*`/`*_scan`/`query`/`query_table`), sequence mutation (`nextval`/`setval`), session/DoS functions (`pg_sleep`, `pg_terminate_backend`, MySQL `SLEEP`/`BENCHMARK`), and extension/plugin loaders (`dblink`, …). A function on the denylist can never ride along inside an otherwise innocent `SELECT`.
-- **Parameterized row limits are clamped too.** `LIMIT ?` and `FETCH FIRST ? ROWS ONLY` are rewritten against `--max-rows` after parameter binding is accounted for — a parameter value can no longer widen a result past the cap.
+- **Parameterized row limits are clamped too.** `LIMIT ?` and `FETCH FIRST ? ROWS ONLY` are rewritten against `--max-rows` after parameter binding is accounted for — a parameter value can no longer widen a result past the cap. SQL Server preserves TOP expressions, PERCENT/WITH TIES and parameterized TOP/FETCH semantics, marks them `limit_unverified`, and enforces a hard client fetch cap instead of pretending they were server-clamped.
+- **SQL Server full-AST safety checks** cover ORDER BY, TOP, window expressions, OUTPUT, MERGE clauses and nested/table-valued functions as well as SELECT expressions. External access (`OPENROWSET`, `OPENQUERY`, `OPENDATASOURCE`), `xp_*`, `sp_oa*`, filesystem DMFs (`sys.dm_os_enumerate_filesystem`, `sys.dm_os_file_exists`) and dangerous audit/trace/log/file readers are rejected in every tier. Four-part linked-server relations are also rejected. `SELECT … INTO` is Ddl, never a read.
+  Table policies use AST identifier components, preserving dots and escaped brackets inside quoted names. SQL Server database-qualified references are rejected when a table policy is active: the schema/table policy model cannot safely distinguish the connected database from another database. Shared row-filter/masking controls remain in force.
 
 ### 1c. Timeouts
 
@@ -43,10 +45,11 @@ flowchart LR
 - MySQL: `SET SESSION max_execution_time` (SELECT) on connect
 - SQLite: client timeout only (no server kill API via sqlx pool)
 - DuckDB: client timeout plus native `InterruptHandle` interruption from a watchdog thread
+- SQL Server: client timeout only; pending/cancelled requests discard their connection. Closing a socket is **not** a guarantee of server-side cancellation or completed rollback. Do not treat a timeout as proof that a write did not execute.
 
 ### 1b. Parameterized queries (`params`)
 
-`execute_sql` and `analyze_query_performance` accept optional `params` for `?` placeholders (or native `$N` on PostgreSQL). Values bind via `db/bind.rs` — **never** concatenated into SQL.
+`execute_sql` and `analyze_query_performance` accept optional `params` for `?` placeholders (or native `$N` on PostgreSQL). The SQL Server public tool syntax is `?`; its driver rewrites these to bound TDS `@PN` parameters while respecting literals, identifiers and comments. Native `@PN` validation at the concrete driver/catalog boundary does not expose arbitrary SQL Server variables to tools. Values bind through driver codecs — **never** concatenated into SQL.
 
 **What params help with:** safe value binding when agents separate structure from user input.
 
@@ -56,7 +59,7 @@ flowchart LR
 
 | Mode | Flag | Allowed |
 |------|------|---------|
-| ReadOnly | (default) | SELECT, SHOW, DESCRIBE, EXPLAIN |
+| ReadOnly | (default) | Engine-supported reads (see capability matrix), plus the advisor's estimated plans |
 | AllowWrites | `--allow-writes` | + INSERT/UPDATE/DELETE/MERGE |
 | AllowDdl | `--allow-ddl` | + DROP/ALTER/TRUNCATE/CREATE … |
 
@@ -75,6 +78,26 @@ Transaction control (`BEGIN`/`COMMIT`/`ROLLBACK`/`SAVEPOINT`) is always blocked 
 - SQLite (read-only): `?mode=ro` on connect URL
 - DuckDB (read-only): `AccessMode::ReadOnly` on the connection (file databases; in-memory relies on the guard)
 - DuckDB (all modes): `enable_external_access=false`, extension autoload/autoinstall off, `--duckdb-allowlist` for file paths
+- SQL Server: `ApplicationIntent=ReadOnly` is a routing hint only, **not**
+  session write prevention. Least-privilege database credentials and the shared
+  guard are required; read-only intent must not be presented as DB enforcement.
+
+### SQL Server TLS and plans
+
+SQL Server connections require TLS and validate the server certificate by
+default (`encrypt=true`, `trust_server_certificate=false`). Configure a trusted
+certificate for production. `trust_server_certificate=true` bypasses validation
+and is only an explicit disposable-development opt-in; `encrypt=false` explicitly
+disables encryption. Prefer `url_env` to keep DSNs out of arguments/config files.
+See [CONFIGURATION.md](CONFIGURATION.md#sql-server).
+
+Estimated plans use driver-managed `SHOWPLAN_XML`; actual plans use
+`STATISTICS XML` on the same connection and execute the SELECT-like query.
+Actual plans require both `--allow-explain-analyze` and a Write grant/process
+write mode. The login needs `SHOWPLAN` and query permissions. Session toggles
+are internal, not an exception allowing arbitrary user `SET`/`USE` or procedure
+execution. Plans and advice still pass through shared source/table policy.
+
 
 ### 4. Operational recommendation
 
@@ -102,6 +125,12 @@ GRANT SELECT ON ALL TABLES IN SCHEMA public TO mcp_ro;
 ### 5. Schema isolation
 
 MySQL `search_objects` / `list_tables` / `list_columns` / `list_indexes` default to the **connected database** (`DATABASE()` or database name in URL). Cross-database search requires explicit `schema: "*"`.
+
+SQL Server metadata stays in the connected database. `schema` is a SQL Server
+schema such as `dbo`; omitted scope uses `SCHEMA_NAME()` for the login's default
+schema, while explicit `"*"` widens supported catalog searches across schemas,
+not databases. Metadata visibility also depends on the database login's
+permissions; grant only those needed.
 
 ### 6. DDL confirmation
 
@@ -211,7 +240,7 @@ Three checks run before a release:
    and an unchanged database digest. Raw artifacts are attached to the release
    evidence, not regenerated for the docs.
 
-   Freeze results (both artifacts committed):
+   Historical 2.0.0 freeze results (both artifacts committed; not SQL Server evidence):
 
    | Run | Seed | Duration | Attempts | Bypasses | Crashes | Database |
    |---|---:|---:|---:|---:|---:|---|

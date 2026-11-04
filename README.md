@@ -8,14 +8,14 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
   <a href="https://registry.modelcontextprotocol.io/v0/servers?search=io.github.rzlco666/strut-stack-sql"><img src="https://img.shields.io/badge/MCP%20Registry-io.github.rzlco666%2Fstrut--stack--sql-purple" alt="MCP Registry"></a>
   <img src="https://img.shields.io/badge/Rust-1.88%2B-orange" alt="Rust 1.88+">
-  <img src="https://img.shields.io/badge/engines-PostgreSQL%20%C2%B7%20MySQL%20%C2%B7%20SQLite%20%C2%B7%20DuckDB%20%C2%B7%20ClickHouse-informational" alt="PostgreSQL · MySQL · SQLite · DuckDB · ClickHouse">
+  <img src="https://img.shields.io/badge/engines-PostgreSQL%20%C2%B7%20MySQL%20%C2%B7%20SQLite%20%C2%B7%20DuckDB%20%C2%B7%20ClickHouse%20%C2%B7%20SQL%20Server-informational" alt="PostgreSQL · MySQL · SQLite · DuckDB · ClickHouse · SQL Server">
   <img src="https://img.shields.io/badge/version-2.0.0-success" alt="Version 2.0.0">
 </p>
 
 <p align="center">
   <strong>Light strut. Extreme load.</strong><br>
   A token-efficient <a href="https://modelcontextprotocol.io">MCP</a> server that lets AI agents query
-  <strong>PostgreSQL</strong>, <strong>MySQL</strong>, <strong>SQLite</strong>, <strong>DuckDB</strong>, and <strong>ClickHouse</strong> — safely, in one small Rust binary.
+  <strong>PostgreSQL</strong>, <strong>MySQL</strong>, <strong>SQLite</strong>, <strong>DuckDB</strong>, <strong>ClickHouse</strong>, and <strong>SQL Server</strong> — safely, in one small Rust binary.
 </p>
 
 ---
@@ -38,7 +38,7 @@ Strut Stack SQL does not charge them:
 - **3 tools by default.** The other 17 are opt-in: 10 introspection tools with `--full-tools`, and 7 DDL tools only when `--full-tools --allow-ddl` is set.
 - **Columnar results** — `{cols, rows, meta}` sends column names once, not once per row.
 - **Every statement passes one AST guard** — parsed with `sqlparser`, classified recursively (including CTE bodies), checked against a tier, LIMIT-clamped, and rejected *before* a pool connection is checked out.
-- **One static binary, four engines**, behind a stable driver contract.
+- **One static binary, six engines**, behind a stable driver contract.
 
 ## Install
 
@@ -82,6 +82,18 @@ Project `.env`:
 ```env
 DATABASE_URL=postgresql://user:password@localhost:5432/app
 ```
+
+SQL Server is also available in the current workspace:
+
+```bash
+# Set SQLSERVER_DATABASE_URL securely in your environment first.
+strut-stack-sql --url-env SQLSERVER_DATABASE_URL --full-tools
+```
+
+Use `sqlserver://user:password@host[:1433]/database` (`mssql://` alias).
+TLS and certificate validation default to on; configure a trusted server
+certificate for production. Connection options, tool behavior and limitations:
+[SQL Server configuration](docs/CONFIGURATION.md#sql-server).
 
 **Cursor** (`.cursor/mcp.json`):
 
@@ -145,30 +157,33 @@ flowchart LR
   DriverAPI --> SQ[strut-sql-driver-sqlite]
   DriverAPI --> DK[strut-sql-driver-duckdb]
   DriverAPI --> CH[strut-sql-driver-clickhouse]
+  DriverAPI --> MS[strut-sql-driver-sqlserver]
   PG --> DB[(PostgreSQL)]
   MY --> DB2[(MySQL)]
   SQ --> DB3[(SQLite)]
   DK --> DB4[(DuckDB file / memory)]
   CH --> DB5[(ClickHouse HTTP)]
+  MS --> DB6[(SQL Server)]
   Tools --> Format[strut-sql-format]
   Server --> Core[strut-sql-core]
 ```
 
-Eleven crates plus a thin binary. The core, guard, format, tools, and server crates never import a
+Thirteen crates plus a thin binary. The core, guard, format, tools, and server crates never import a
 database library; only a driver crate does.
 
 | Crate | Responsibility |
 |---|---|
 | `strut-stack-sql` (binary) | CLI parse, tracing, transport selection |
-| `strut-sql-driver-api` | Public `EngineDriver` contract, neutral `SqlValue`/`ColumnMeta`/`PlanTree` types, capabilities, dialect, dangerous-function data |
+| `strut-sql-driver-api` | Public `EngineDriver` contract, neutral values, query/catalog types and capability notes |
 | `strut-sql-driver-postgres` | PostgreSQL driver |
 | `strut-sql-driver-mysql` | MySQL driver (`mysql://`; engine hint `mariadb` maps to it) |
 | `strut-sql-driver-sqlite` | SQLite driver |
 | `strut-sql-driver-duckdb` | DuckDB driver (embedded; `duckdb::memory:` or a file) |
 | `strut-sql-driver-clickhouse` | ClickHouse driver (`clickhouse://`, `clickhouses://` for TLS; HTTP interface) |
+| `strut-sql-driver-sqlserver` | SQL Server TDS driver (Tiberius 0.13, Rustls, TDS 7.3, chrono/bigdecimal) |
 | `strut-sql-driver-conformance` | Shared Driver Conformance Test Kit |
-| `strut-sql-core` | Config v2, source/driver registries, `Principal` + `Policy`, audit, pool ownership |
-| `strut-sql-guard` | Recursive AST classification, function denylist, LIMIT management, complexity, placeholder scanner |
+| `strut-sql-core` | Config v2, source/driver registries, `Principal` + `Policy`, audit, driver ownership |
+| `strut-sql-guard` | Recursive AST classification, capability matrix, dangerous-function checks, row bounds, complexity, placeholder scanner |
 | `strut-sql-format` | Columnar/rows results, pagination, per-cell and whole-result truncation |
 | `strut-sql-tools` | The 20 MCP tool handlers |
 | `strut-sql-server` | `rmcp` stdio + Streamable HTTP, auth middleware, invocation authorization, `/livez` + `/readyz` |
@@ -179,22 +194,35 @@ The driver boundary:
 #[async_trait]
 pub trait EngineDriver: Send + Sync {
     fn kind(&self) -> EngineKind;
-    fn capabilities(&self) -> DriverCapabilities;
-    fn dialect(&self) -> DialectSpec;
+    fn capability_notes(&self) -> Vec<CapabilityNote> { Vec::new() }
 
-    async fn open_pool(&self, url: &RedactedUrl, opts: PoolOptions) -> Result<DriverPool, DriverError>;
-    async fn execute(&self, pool: &DriverPool, prepared: &PreparedStatement) -> Result<RawResult, DriverError>;
-    async fn list_schemas(&self, pool: &DriverPool, filter: &SchemaFilter) -> Result<Vec<SchemaObject>, DriverError>;
-    async fn explain(&self, pool: &DriverPool, prepared: &PreparedStatement) -> Result<PlanTree, DriverError>;
+    async fn from_connection_string_with_options(
+        connection_string: &str,
+        options: &ConnectOptions,
+    ) -> Result<Box<Self>, DriverError>
+    where
+        Self: Sized;
 
-    fn dangerous_functions(&self) -> &'static [DangerousFn];
-    fn quote_ident(&self, ident: &str) -> String;
+    async fn execute(&self, query: &BoundQuery) -> Result<QueryResult, DriverError>;
+    async fn list_schemas(&self) -> Result<Vec<SchemaObject>, DriverError>;
+    async fn list_tables(&self, schema: Option<&str>) -> Result<Vec<SchemaObject>, DriverError>;
+    async fn describe_table(
+        &self, schema: Option<&str>, table: &str,
+    ) -> Result<TableInfo, DriverError>;
+    async fn explain(&self, _query: &BoundQuery, _analyze: bool) -> Result<QueryResult, DriverError> {
+        Err(DriverError::Unsupported(
+            "execution plans are not supported by this driver".into(),
+        ))
+    }
 }
 ```
 
-(Abbreviated; the full contract is in `crates/strut-sql-driver-api`.) A new engine is a crate that
-implements this trait plus one registry entry; the core, guard, format, tools, and server crates
-stay free of database-library types.
+(Abbreviated; the full contract, including other catalog and page methods, is in
+`crates/strut-sql-driver-api`.) Drivers own connections, execution and catalogs;
+registration is in `strut-sql-core`, while dialect selection, capability checks,
+authorization and tool SQL generation remain shared integration points.
+SQL Server overrides the session-scoped `explain` hook; existing engines retain
+their tool-owned EXPLAIN paths.
 
 ## Security and auth
 
@@ -268,7 +296,7 @@ are recorded as `not_run`, together with the competitor comparison. Methodology 
 
 - **Pinned MCP specification: 2025-06-18.** Version negotiation, `tools/list`, `tools/call`, error shapes, Streamable HTTP sessions, auth metadata, and DNS-rebinding `Origin` checks are exercised by a runnable gate. Older requested versions are answered with 2025-06-18; JSON-RPC batches are rejected.
 - **Six-client matrix:** Cursor, Claude Code, VS Code, Codex, Windsurf, OpenCode — every config block is parsed and the minimal stdio command is smoke-run in CI.
-- **Conformance results:** [docs/CONFORMANCE.md](docs/CONFORMANCE.md); client configs: [docs/CLIENTS.md](docs/CLIENTS.md).
+- **Historical 2.0.0 conformance results:** [docs/CONFORMANCE.md](docs/CONFORMANCE.md); these are not SQL Server validation results. Client configs: [docs/CLIENTS.md](docs/CLIENTS.md).
 
 ## Documentation
 
@@ -285,7 +313,7 @@ are recorded as `not_run`, together with the competitor comparison. Methodology 
 | [docs/CONFORMANCE.md](docs/CONFORMANCE.md) | MCP conformance gate and results |
 | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Measurements with their limits stated |
 | [docs/TEST_REPORT.md](docs/TEST_REPORT.md) | What the test suites cover |
-| [docs/POSTGRES.md](docs/POSTGRES.md) · [docs/MYSQL.md](docs/MYSQL.md) · [docs/SQLITE.md](docs/SQLITE.md) · [docs/DUCKDB.md](docs/DUCKDB.md) | Per-engine notes |
+| [docs/POSTGRES.md](docs/POSTGRES.md) · [docs/MYSQL.md](docs/MYSQL.md) · [docs/SQLITE.md](docs/SQLITE.md) · [docs/DUCKDB.md](docs/DUCKDB.md) · [SQL Server](docs/CONFIGURATION.md#sql-server) | Per-engine notes |
 | [docs/MCP_REGISTRY.md](docs/MCP_REGISTRY.md) | MCP Registry / MCPB publishing |
 
 ## Contributing

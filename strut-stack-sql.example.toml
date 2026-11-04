@@ -15,3 +15,10 @@ url_env = "DATABASE_URL"
 name = "analytics"
 url_env = "ANALYTICS_DATABASE_URL"
 engine = "postgres"
+
+# Optional SQL Server source. Uncomment only after securely setting its URL.
+# SQLSERVER_DATABASE_URL is not automatically discovered in single-source mode.
+# [[sources]]
+# name = "reporting"
+# url_env = "SQLSERVER_DATABASE_URL"
+# engine = "sqlserver"
