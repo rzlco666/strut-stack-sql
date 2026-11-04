@@ -7,6 +7,7 @@ members = [
     "crates/strut-sql-driver-mysql",
     "crates/strut-sql-driver-sqlite",
     "crates/strut-sql-driver-duckdb",
+    "crates/strut-sql-driver-clickhouse",
     "crates/strut-sql-driver-conformance",
     "crates/strut-sql-guard",
     "crates/strut-sql-format",

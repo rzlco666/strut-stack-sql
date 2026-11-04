@@ -11,7 +11,9 @@ use sqlparser::ast::{
     JoinConstraint, JoinOperator, LimitClause, ObjectName, Offset, OffsetRows, Query, Select,
     SelectItem, SetExpr, Statement, TableFactor, Value as SqlValue, Values,
 };
-use sqlparser::dialect::{Dialect, DuckDbDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect};
+use sqlparser::dialect::{
+    ClickHouseDialect, Dialect, DuckDbDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect,
+};
 use sqlparser::parser::Parser;
 
 use strut_sql_driver_api::EngineKind;
@@ -162,6 +164,7 @@ fn dialect_for(engine: EngineKind) -> Box<dyn Dialect> {
         EngineKind::MySql => Box::new(MySqlDialect {}),
         EngineKind::Sqlite => Box::new(SQLiteDialect {}),
         EngineKind::DuckDb => Box::new(DuckDbDialect),
+        EngineKind::ClickHouse => Box::new(ClickHouseDialect {}),
     }
 }
 
@@ -470,12 +473,103 @@ const DENIED_FUNCTIONS_SQLITE: &[DeniedFunction] = &[
     },
 ];
 
+/// ClickHouse table functions reach outside the configured database (files,
+/// object storage, other servers) and would let a query read or exfiltrate
+/// data the source grant never covered. Names are lower-cased by the scanner.
+const DENIED_FUNCTIONS_CLICKHOUSE: &[DeniedFunction] = &[
+    DeniedFunction {
+        name: "file",
+        reason: "reads server-side files from the host filesystem",
+    },
+    DeniedFunction {
+        name: "url",
+        reason: "fetches arbitrary URLs from the server",
+    },
+    DeniedFunction {
+        name: "s3",
+        reason: "reads object storage outside the configured database",
+    },
+    DeniedFunction {
+        name: "s3cluster",
+        reason: "reads object storage outside the configured database",
+    },
+    DeniedFunction {
+        name: "remote",
+        reason: "queries other ClickHouse servers outside the configured database",
+    },
+    DeniedFunction {
+        name: "remotesecure",
+        reason: "queries other ClickHouse servers outside the configured database",
+    },
+    DeniedFunction {
+        name: "mysql",
+        reason: "queries a MySQL server outside the configured database",
+    },
+    DeniedFunction {
+        name: "postgresql",
+        reason: "queries a PostgreSQL server outside the configured database",
+    },
+    DeniedFunction {
+        name: "sqlite",
+        reason: "reads a SQLite file from the server filesystem",
+    },
+    DeniedFunction {
+        name: "jdbc",
+        reason: "queries an external database over JDBC",
+    },
+    DeniedFunction {
+        name: "odbc",
+        reason: "queries an external database over ODBC",
+    },
+    DeniedFunction {
+        name: "hdfs",
+        reason: "reads HDFS storage outside the configured database",
+    },
+    DeniedFunction {
+        name: "executable",
+        reason: "runs a server-side executable",
+    },
+    DeniedFunction {
+        name: "input",
+        reason: "reads the server's standard input stream",
+    },
+    DeniedFunction {
+        name: "mongodb",
+        reason: "queries a MongoDB server outside the configured database",
+    },
+    DeniedFunction {
+        name: "redis",
+        reason: "queries a Redis server outside the configured database",
+    },
+    DeniedFunction {
+        name: "azureblobstorage",
+        reason: "reads object storage outside the configured database",
+    },
+    DeniedFunction {
+        name: "deltalake",
+        reason: "reads lakehouse storage outside the configured database",
+    },
+    DeniedFunction {
+        name: "iceberg",
+        reason: "reads lakehouse storage outside the configured database",
+    },
+    DeniedFunction {
+        name: "sleep",
+        reason: "sleeps the query thread (denial of service)",
+    },
+    DeniedFunction {
+        name: "sleepeachrow",
+        reason: "sleeps per row, burning a query thread (denial of service)",
+    },
+];
+
 fn denied_functions_for(engine: EngineKind) -> &'static [DeniedFunction] {
     match engine {
         EngineKind::Postgres => DENIED_FUNCTIONS_PG,
         EngineKind::MySql => DENIED_FUNCTIONS_MYSQL,
         EngineKind::Sqlite => DENIED_FUNCTIONS_SQLITE,
         EngineKind::DuckDb => &[],
+        EngineKind::ClickHouse => DENIED_FUNCTIONS_CLICKHOUSE,
     }
 }
 
@@ -2237,5 +2331,88 @@ mod tests {
             100,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn clickhouse_select_keeps_positional_placeholders() {
+        let prepared = validate_and_prepare(
+            "SELECT id, name FROM events WHERE id = ? ORDER BY id",
+            &[serde_json::json!(7)],
+            EngineKind::ClickHouse,
+            WriteMode::ReadOnly,
+            100,
+        )
+        .unwrap();
+        assert_eq!(prepared.class.sql_class(), SqlClass::Read);
+        assert!(
+            prepared.sql.contains('?'),
+            "ClickHouse keeps ? placeholders: {}",
+            prepared.sql
+        );
+        assert!(!prepared.sql.contains('$'), "{}", prepared.sql);
+    }
+
+    #[test]
+    fn clickhouse_supports_merge_tree_and_limit_by_syntax() {
+        for sql in [
+            "SELECT number FROM numbers(10) LIMIT 1 BY number",
+            "SELECT arrayJoin([1, 2, 3]) AS x",
+            "SELECT count() FROM events PREWHERE id > 0",
+            "SELECT * FROM events ORDER BY id LIMIT 5",
+        ] {
+            validate_and_prepare(sql, &[], EngineKind::ClickHouse, WriteMode::ReadOnly, 100)
+                .unwrap_or_else(|e| panic!("{sql} should parse for ClickHouse: {e}"));
+        }
+    }
+
+    #[test]
+    fn clickhouse_denies_external_table_functions() {
+        for sql in [
+            "SELECT * FROM file('secret.csv')",
+            "SELECT * FROM url('http://169.254.169.254/latest/meta-data')",
+            "SELECT * FROM s3('https://bucket/key')",
+            "SELECT * FROM remote('other:9000', default, t)",
+            "SELECT * FROM mysql('host:3306', db, t, 'u', 'p')",
+            "SELECT * FROM executable('script.sh', TSV)",
+            "SELECT sleep(3)",
+        ] {
+            let err =
+                validate_and_prepare(sql, &[], EngineKind::ClickHouse, WriteMode::ReadOnly, 100)
+                    .unwrap_err();
+            assert!(
+                err.to_string().contains("not allowed"),
+                "{sql} should be denied, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn clickhouse_rejects_statements_it_does_not_have() {
+        for sql in [
+            "UPDATE events SET name = 'x'",
+            "CREATE INDEX idx ON events (id)",
+            "ANALYZE TABLE events",
+            "VACUUM events",
+            "CREATE SCHEMA s",
+            "EXPLAIN ANALYZE SELECT 1",
+        ] {
+            let err =
+                validate_and_prepare(sql, &[], EngineKind::ClickHouse, WriteMode::AllowDdl, 100)
+                    .unwrap_err();
+            assert!(
+                err.to_string().contains("not supported"),
+                "{sql} should be rejected for ClickHouse, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn clickhouse_accepts_show_and_grant() {
+        for sql in ["SHOW TABLES", "GRANT SELECT ON events TO bob"] {
+            let prepared =
+                validate_and_prepare(sql, &[], EngineKind::ClickHouse, WriteMode::AllowDdl, 100)
+                    .unwrap_or_else(|e| panic!("{sql} should be allowed: {e}"));
+            assert!(!prepared.sql.is_empty());
+        }
     }
 }

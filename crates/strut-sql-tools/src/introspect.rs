@@ -338,16 +338,21 @@ fn map_schema_object(o: DriverSchemaObject) -> SchemaObject {
 
 fn map_column(engine: EngineKind, c: DriverColumnInfo) -> ColumnInfo {
     // Legacy MySQL describe_table exposed Key/Extra/Comment/Default; PG and
-    // SQLite exposed only name/type/nullability.
-    let mysql_extras = engine == EngineKind::MySql;
+    // SQLite exposed only name/type/nullability. ClickHouse reports catalog
+    // comments and default expressions, so they are surfaced for it too.
+    let catalog_extras = matches!(engine, EngineKind::MySql | EngineKind::ClickHouse);
     ColumnInfo {
         name: c.name,
         data_type: c.data_type,
         nullable: c.nullable,
-        key: if mysql_extras { c.key } else { None },
-        extra: if mysql_extras { c.extra } else { None },
-        comment: if mysql_extras { c.comment } else { None },
-        default: if mysql_extras { c.default_value } else { None },
+        key: if catalog_extras { c.key } else { None },
+        extra: if catalog_extras { c.extra } else { None },
+        comment: if catalog_extras { c.comment } else { None },
+        default: if catalog_extras {
+            c.default_value
+        } else {
+            None
+        },
     }
 }
 

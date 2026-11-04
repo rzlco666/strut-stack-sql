@@ -138,10 +138,14 @@ pub async fn analyze_query_with_options(
     options: AnalyzeOptions,
 ) -> Result<ExplainSummary, ExplainError> {
     let engine = driver.kind();
-    if options.analyze && engine == EngineKind::Sqlite {
-        return Err(ExplainError::Other(
-            "EXPLAIN ANALYZE is not supported on SQLite".into(),
-        ));
+    if options.analyze && matches!(engine, EngineKind::Sqlite | EngineKind::ClickHouse) {
+        return Err(ExplainError::Other(format!(
+            "EXPLAIN ANALYZE is not supported on {}",
+            match engine {
+                EngineKind::Sqlite => "SQLite",
+                _ => "ClickHouse",
+            }
+        )));
     }
     let prepared = strut_sql_guard::validate_and_prepare_with_options(
         sql,
@@ -179,6 +183,8 @@ pub async fn analyze_query_with_options(
         (EngineKind::DuckDb, false) => format!("EXPLAIN (FORMAT JSON) {}", prepared.sql),
         (EngineKind::Sqlite, false) => format!("EXPLAIN QUERY PLAN {}", prepared.sql),
         (EngineKind::Sqlite, true) => unreachable!("checked above"),
+        (EngineKind::ClickHouse, false) => format!("EXPLAIN PLAN {}", prepared.sql),
+        (EngineKind::ClickHouse, true) => unreachable!("checked above"),
     };
 
     let bound = BoundQuery {
@@ -230,6 +236,10 @@ pub async fn analyze_query_with_options(
             normalize_mysql(&prepared.sql, json)
         }
         EngineKind::DuckDb => duckdb::normalize(&prepared.sql, &result, options.analyze)?,
+        EngineKind::ClickHouse => {
+            let lines = text_rows(&result.rows);
+            normalize_clickhouse(&prepared.sql, lines)
+        }
     };
     summary.analyze = options.analyze;
 
@@ -324,6 +334,63 @@ fn sqlite_details(cols: Vec<&str>, rows: Vec<Vec<SqlValue>>) -> Vec<String> {
             _ => String::new(),
         })
         .collect()
+}
+
+fn normalize_clickhouse(query: &str, lines: Vec<String>) -> ExplainSummary {
+    // `EXPLAIN PLAN` prints one line per node, indented two spaces per level:
+    //   Expression ((Project names + Projection))
+    //     Aggregating
+    //       ReadFromMergeTree (default.events)
+    let mut nodes = Vec::new();
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let depth = (line.len().saturating_sub(line.trim_start().len()) / 2) as u32;
+        let (label, detail) = match trimmed.split_once(" (") {
+            // The split consumed the opening `(`; drop exactly one closing one.
+            Some((label, rest)) => (label.trim(), Some(rest.strip_suffix(')').unwrap_or(rest))),
+            None => (trimmed, None),
+        };
+        let node_type = label
+            .split_whitespace()
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let relation = label.starts_with("ReadFrom").then(|| {
+            detail
+                .unwrap_or_default()
+                .split('.')
+                .next_back()
+                .unwrap_or_default()
+                .trim_matches(|c| c == ')' || c == ' ')
+                .to_string()
+        });
+        nodes.push(PlanNode {
+            node_type,
+            depth,
+            relation: relation.filter(|r| !r.is_empty()),
+            cost: None,
+            rows: None,
+            actual_rows: None,
+            actual_time_ms: None,
+            filter: detail.map(str::to_string),
+            join_type: None,
+            spill: None,
+        });
+    }
+    ExplainSummary {
+        engine: "clickhouse".into(),
+        query: query.into(),
+        analyze: false,
+        total_cost: None,
+        plan_rows: None,
+        nodes,
+        issues: Vec::new(),
+        index_suggestions: Vec::new(),
+        warnings: Vec::new(),
+    }
 }
 
 fn normalize_sqlite(query: &str, details: Vec<String>) -> ExplainSummary {
@@ -925,7 +992,9 @@ fn candidate_columns(filter: &str) -> Option<Vec<String>> {
 
 fn quote_ident(engine: EngineKind, ident: &str) -> String {
     match engine {
-        EngineKind::MySql => format!("`{}`", ident.replace('`', "``")),
+        EngineKind::MySql | EngineKind::ClickHouse => {
+            format!("`{}`", ident.replace('`', "``"))
+        }
         _ => format!("\"{}\"", ident.replace('"', "\"\"")),
     }
 }
@@ -939,6 +1008,16 @@ fn create_index_sql(engine: EngineKind, table: &str, columns: &[String]) -> Stri
         .map(|c| quote_ident(engine, c))
         .collect::<Vec<_>>()
         .join(", ");
+    if engine == EngineKind::ClickHouse {
+        // ClickHouse has no CREATE INDEX; skipping indexes are added to the
+        // table and become effective for new parts.
+        return format!(
+            "ALTER TABLE {} ADD INDEX {} ({}) TYPE minmax GRANULARITY 1;",
+            quote_ident(engine, table),
+            quote_ident(engine, &name),
+            cols
+        );
+    }
     format!(
         "CREATE INDEX {} ON {} ({});",
         quote_ident(engine, &name),

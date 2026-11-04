@@ -562,7 +562,7 @@ pub(crate) fn sql_value_to_json(value: SqlValue, engine: EngineKind) -> Value {
                 map.insert("$blob_hex".into(), Value::String(bytes_to_hex(&b)));
                 Value::Object(map)
             }
-            EngineKind::MySql => Value::String(bytes_to_hex(&b)),
+            EngineKind::MySql | EngineKind::ClickHouse => Value::String(bytes_to_hex(&b)),
         },
         SqlValue::Array(items) => Value::Array(
             items

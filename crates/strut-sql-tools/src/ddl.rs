@@ -621,7 +621,7 @@ fn build_ddl_sql_unchecked(
                 .as_ref()
                 .ok_or_else(|| tool_error("add_column requires column"))?;
             let qualified = qualify_table(params.schema.as_deref(), table, engine);
-            let data_type = validate_column_type(&column.data_type)?;
+            let data_type = validate_column_type(&column.data_type, engine)?;
             let null_sql = match column.nullable {
                 Some(true) | None => "",
                 Some(false) => " NOT NULL",
@@ -641,7 +641,7 @@ fn build_ddl_sql_unchecked(
                 .ok_or_else(|| tool_error("alter_column requires column"))?;
             let qualified = qualify_table(params.schema.as_deref(), table, engine);
             let col = quote_ident(&column.name, engine);
-            let data_type = validate_column_type(&column.data_type)?;
+            let data_type = validate_column_type(&column.data_type, engine)?;
             match engine {
                 EngineKind::MySql => Ok(format!(
                     "ALTER TABLE {qualified} MODIFY COLUMN {col} {data_type}"
@@ -668,6 +668,9 @@ fn build_ddl_sql_unchecked(
                 }
                 EngineKind::Sqlite => Err(tool_error(
                     "alter_column unsupported on SQLite; recreate the table",
+                )),
+                EngineKind::ClickHouse => Ok(format!(
+                    "ALTER TABLE {qualified} MODIFY COLUMN {col} {data_type}"
                 )),
             }
         }
@@ -764,7 +767,10 @@ const TYPE_WORDS: &[&str] = &[
 /// a path that skipped the guard. Rules: only letters/digits/spaces and
 /// `( ) , . _ [ ]` characters; every word token must be a known type word
 /// or a pure number (precision/scale). Returns the trimmed type unchanged.
-fn validate_column_type(raw: &str) -> Result<String, rmcp::ErrorData> {
+fn validate_column_type(raw: &str, engine: EngineKind) -> Result<String, rmcp::ErrorData> {
+    if engine == EngineKind::ClickHouse {
+        return validate_clickhouse_column_type(raw);
+    }
     let ty = raw.trim();
     if ty.is_empty() {
         return Err(tool_error("column type must not be empty"));
@@ -788,6 +794,150 @@ fn validate_column_type(raw: &str) -> Result<String, rmcp::ErrorData> {
         saw_word = true;
         let upper = token.to_ascii_uppercase();
         if !TYPE_WORDS.contains(&upper.as_str()) {
+            return Err(tool_error(format!(
+                "column type token not in allowlist: {token}"
+            )));
+        }
+    }
+    if !saw_word {
+        return Err(tool_error(format!("column type has no type name: {raw:?}")));
+    }
+    Ok(ty.to_string())
+}
+
+/// ClickHouse types are parameterised and nested (`Nullable(String)`,
+/// `Decimal(18, 2)`, `DateTime64(3, 'UTC')`, `Array(LowCardinality(String))`),
+/// so the allowlist admits quotes and `=` for enum values, but still refuses
+/// statement separators, comments and every unknown word.
+fn validate_clickhouse_column_type(raw: &str) -> Result<String, rmcp::ErrorData> {
+    const CH_TYPE_WORDS: &[&str] = &[
+        "INT",
+        "INTEGER",
+        "BIGINT",
+        "SMALLINT",
+        "TINYINT",
+        "INT8",
+        "INT16",
+        "INT32",
+        "INT64",
+        "INT128",
+        "INT256",
+        "UINT8",
+        "UINT16",
+        "UINT32",
+        "UINT64",
+        "UINT128",
+        "UINT256",
+        "FLOAT",
+        "FLOAT32",
+        "FLOAT64",
+        "DOUBLE",
+        "REAL",
+        "DECIMAL",
+        "DECIMAL32",
+        "DECIMAL64",
+        "DECIMAL128",
+        "DECIMAL256",
+        "NUMERIC",
+        "STRING",
+        "FIXEDSTRING",
+        "TEXT",
+        "VARCHAR",
+        "CHAR",
+        "DATE",
+        "DATE32",
+        "DATETIME",
+        "DATETIME64",
+        "TIMESTAMP",
+        "ENUM",
+        "ENUM8",
+        "ENUM16",
+        "UUID",
+        "IPV4",
+        "IPV6",
+        "BOOL",
+        "BOOLEAN",
+        "ARRAY",
+        "NULLABLE",
+        "LOWCARDINALITY",
+        "MAP",
+        "TUPLE",
+        "NESTED",
+        "JSON",
+        "OBJECT",
+        "VARIANT",
+        "DYNAMIC",
+        "NOTHING",
+        "AGGREGATEFUNCTION",
+        "SIMPLEAGGREGATEFUNCTION",
+        "INTERVAL",
+    ];
+    let ty = raw.trim();
+    if ty.is_empty() {
+        return Err(tool_error("column type must not be empty"));
+    }
+    if !ty.chars().all(|c| {
+        c.is_ascii_alphanumeric()
+            || matches!(
+                c,
+                ' ' | '\t' | '(' | ')' | ',' | '.' | '_' | '[' | ']' | '\'' | '='
+            )
+    }) {
+        return Err(tool_error(format!(
+            "column type contains forbidden characters: {raw:?}"
+        )));
+    }
+    let mut depth = 0i32;
+    let mut in_quote = false;
+    let mut unquoted = String::with_capacity(ty.len());
+    for c in ty.chars() {
+        match c {
+            '\'' => {
+                in_quote = !in_quote;
+                unquoted.push(' ');
+            }
+            _ if in_quote => unquoted.push(' '),
+            '(' => {
+                depth += 1;
+                unquoted.push(c);
+            }
+            ')' => {
+                depth -= 1;
+                if depth < 0 {
+                    return Err(tool_error("column type has unbalanced parentheses"));
+                }
+                unquoted.push(c);
+            }
+            _ => unquoted.push(c),
+        }
+    }
+    if in_quote {
+        return Err(tool_error("column type has an unterminated quoted literal"));
+    }
+    if depth != 0 {
+        return Err(tool_error("column type has unbalanced parentheses"));
+    }
+    let tokens: Vec<&str> = unquoted
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .filter(|token| !token.is_empty())
+        .collect();
+    let mut saw_word = false;
+    for (index, token) in tokens.iter().enumerate() {
+        if token.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        // Named tuple elements (`Tuple(a Int64, b String)`) are identifiers,
+        // not types: skip a token that directly precedes a known type word.
+        let followed_by_type = index > 0
+            && tokens
+                .get(index + 1)
+                .is_some_and(|next| CH_TYPE_WORDS.contains(&next.to_ascii_uppercase().as_str()));
+        if followed_by_type {
+            continue;
+        }
+        saw_word = true;
+        let upper = token.to_ascii_uppercase();
+        if !CH_TYPE_WORDS.contains(&upper.as_str()) {
             return Err(tool_error(format!(
                 "column type token not in allowlist: {token}"
             )));
@@ -828,7 +978,7 @@ fn qualify_table(schema: Option<&str>, table: &str, engine: EngineKind) -> Strin
 
 fn quote_ident(name: &str, engine: EngineKind) -> String {
     match engine {
-        EngineKind::MySql => {
+        EngineKind::MySql | EngineKind::ClickHouse => {
             let trimmed = name.trim().trim_matches('`');
             format!("`{}`", trimmed.replace('`', "``"))
         }
@@ -968,7 +1118,52 @@ mod tests {
             "CHARACTER VARYING(64)",
             "INT[]",
         ] {
-            assert_eq!(validate_column_type(ty).unwrap(), ty, "type={ty}");
+            assert_eq!(
+                validate_column_type(ty, EngineKind::Postgres).unwrap(),
+                ty,
+                "type={ty}"
+            );
+        }
+    }
+
+    #[test]
+    fn clickhouse_column_types_accepted() {
+        for ty in [
+            "UInt64",
+            "Nullable(String)",
+            "LowCardinality(String)",
+            "DateTime64(3, 'UTC')",
+            "Decimal(18, 2)",
+            "Array(Nullable(Int64))",
+            "Map(String, UInt8)",
+            "Tuple(a Int64, b String)",
+            "Enum8('ok' = 1, 'bad' = 2)",
+            "FixedString(16)",
+        ] {
+            assert_eq!(
+                validate_column_type(ty, EngineKind::ClickHouse).unwrap(),
+                ty,
+                "type={ty}"
+            );
+        }
+    }
+
+    #[test]
+    fn clickhouse_injected_column_types_rejected() {
+        for ty in [
+            "Int64); DROP TABLE x; --",
+            "Int64) ENGINE = Log",
+            "Nullable(String) NOT NULL",
+            "Array(Int64",
+            "Enum8('a' = 1",
+            "SOME_RANDOM_TYPE",
+            "",
+            "123",
+        ] {
+            assert!(
+                validate_column_type(ty, EngineKind::ClickHouse).is_err(),
+                "type should be rejected: {ty:?}"
+            );
         }
     }
 
@@ -986,7 +1181,7 @@ mod tests {
             "123",
         ] {
             assert!(
-                validate_column_type(ty).is_err(),
+                validate_column_type(ty, EngineKind::Postgres).is_err(),
                 "type should be rejected: {ty:?}"
             );
         }

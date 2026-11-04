@@ -4,6 +4,7 @@ use std::time::Duration;
 use anyhow::{bail, Result};
 use strut_sql_driver_api::{ConnectOptions, DriverError, EngineDriver, EngineKind};
 use strut_sql_driver_duckdb::DuckDbDriver;
+use strut_sql_driver_clickhouse::ClickHouseDriver;
 use strut_sql_driver_mysql::MySqlDriver;
 use strut_sql_driver_postgres::PostgresDriver;
 use strut_sql_driver_sqlite::SqliteDriver;
@@ -161,6 +162,8 @@ pub async fn connect_driver(
         }
         EngineKind::DuckDb => {
             Arc::new(*DuckDbDriver::from_connection_string_with_options(url, options).await?)
+        EngineKind::ClickHouse => {
+            Arc::new(*ClickHouseDriver::from_connection_string_with_options(url, options).await?)
         }
     };
     Ok(driver)
@@ -197,6 +200,18 @@ pub fn parse_host_port(url: &str, engine: EngineKind) -> Option<(String, u16)> {
         EngineKind::Postgres if lower.starts_with("postgres://") => {
             (url.get("postgres://".len()..)?, 5432u16)
         }
+        EngineKind::ClickHouse if lower.starts_with("clickhouses://") => {
+            (url.get("clickhouses://".len()..)?, 8443u16)
+        }
+        EngineKind::ClickHouse if lower.starts_with("clickhouse://") => {
+            (url.get("clickhouse://".len()..)?, 8123u16)
+        }
+        EngineKind::ClickHouse if lower.starts_with("https://") => {
+            (url.get("https://".len()..)?, 8443u16)
+        }
+        EngineKind::ClickHouse if lower.starts_with("http://") => {
+            (url.get("http://".len()..)?, 8123u16)
+        }
         _ => return None,
     };
 
@@ -230,6 +245,7 @@ pub fn detect_engine_from_url(hint: Option<&str>, url: &str) -> Result<EngineKin
             "mysql" | "mariadb" => Ok(EngineKind::MySql),
             "sqlite" => Ok(EngineKind::Sqlite),
             "duckdb" => Ok(EngineKind::DuckDb),
+            "clickhouse" | "ch" => Ok(EngineKind::ClickHouse),
             other => bail!("unknown engine hint '{other}'"),
         };
     }
@@ -242,8 +258,13 @@ pub fn detect_engine_from_url(hint: Option<&str>, url: &str) -> Result<EngineKin
         Ok(EngineKind::Sqlite)
     } else if lower.starts_with("duckdb:") {
         Ok(EngineKind::DuckDb)
+    } else if lower.starts_with("clickhouse://") || lower.starts_with("clickhouses://") {
+        Ok(EngineKind::ClickHouse)
     } else {
-        bail!("cannot detect engine from URL scheme; use postgresql://, mysql://, sqlite:, or duckdb:")
+        bail!(
+            "cannot detect engine from URL scheme; use postgresql://, mysql://, sqlite:, duckdb:, \
+             clickhouse://, or clickhouses:// (http(s):// needs an explicit engine hint)"
+        )
     }
 }
 
@@ -272,6 +293,51 @@ mod tests {
             ),
             Some(("db.example.com".into(), 5433))
         );
+    }
+
+    #[test]
+    fn parse_clickhouse_host_port() {
+        assert_eq!(
+            parse_host_port(
+                "clickhouse://u:p@ch.example.com:8123/db",
+                EngineKind::ClickHouse
+            ),
+            Some(("ch.example.com".into(), 8123))
+        );
+        assert_eq!(
+            parse_host_port("clickhouse://localhost/db", EngineKind::ClickHouse),
+            Some(("localhost".into(), 8123))
+        );
+        assert_eq!(
+            parse_host_port("clickhouses://localhost/db", EngineKind::ClickHouse),
+            Some(("localhost".into(), 8443))
+        );
+        assert_eq!(
+            parse_host_port("https://localhost/db", EngineKind::ClickHouse),
+            Some(("localhost".into(), 8443))
+        );
+    }
+
+    #[test]
+    fn detects_clickhouse_engine() {
+        assert_eq!(
+            detect_engine_from_url(None, "clickhouse://localhost/db").unwrap(),
+            EngineKind::ClickHouse
+        );
+        assert_eq!(
+            detect_engine_from_url(None, "clickhouses://localhost/db").unwrap(),
+            EngineKind::ClickHouse
+        );
+        assert_eq!(
+            detect_engine_from_url(Some("clickhouse"), "http://localhost:8123/db").unwrap(),
+            EngineKind::ClickHouse
+        );
+        assert_eq!(
+            detect_engine_from_url(Some("ch"), "http://localhost:8123/db").unwrap(),
+            EngineKind::ClickHouse
+        );
+        // http:// without a hint stays ambiguous.
+        assert!(detect_engine_from_url(None, "http://localhost:8123/db").is_err());
     }
 
     #[tokio::test]
