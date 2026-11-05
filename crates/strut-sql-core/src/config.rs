@@ -280,7 +280,9 @@ pub struct Cli {
     #[arg(long)]
     pub allow_ddl: bool,
 
-    /// Expose additional schema tools (list_schemas, describe_table, etc.).
+    /// Expose the 10 introspection tools (standard profile: 13 tools total).
+    /// Without this flag and without --profile the server runs the lite
+    /// profile with 3 core tools — that is the default, not a bug.
     #[arg(long)]
     pub full_tools: bool,
 
@@ -299,8 +301,10 @@ pub struct Cli {
     #[arg(long)]
     pub allow_unauthenticated_http: bool,
 
-    /// Tool profile preset: lite, standard, full, or admin (R4-02). Explicit
-    /// flags may raise, never lower, what the profile sets.
+    /// Tool profile preset: lite (3 core tools, read-only; the default),
+    /// standard (adds introspection), full (adds writes), or admin (adds DDL,
+    /// grants, and approvals). Explicit flags may raise, never lower, what the
+    /// profile sets. See docs/PROFILES.md.
     #[arg(long, global = true)]
     pub profile: Option<String>,
 
