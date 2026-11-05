@@ -5,12 +5,9 @@
 <p align="center">
   <a href="https://github.com/rzlco666/strut-stack-sql/releases/latest"><img src="https://img.shields.io/github/v/release/rzlco666/strut-stack-sql" alt="Latest release"></a>
   <a href="https://github.com/rzlco666/strut-stack-sql/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/rzlco666/strut-stack-sql/ci.yml?branch=main" alt="CI"></a>
-  <a href="https://github.com/rzlco666/strut-stack-sql/stargazers"><img src="https://img.shields.io/github/stars/rzlco666/strut-stack-sql?style=social" alt="GitHub stars"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
   <a href="https://registry.modelcontextprotocol.io/v0/servers?search=io.github.rzlco666/strut-stack-sql"><img src="https://img.shields.io/badge/MCP%20Registry-io.github.rzlco666%2Fstrut--stack--sql-purple" alt="MCP Registry"></a>
-  <img src="https://img.shields.io/badge/Rust-1.88%2B-orange" alt="Rust 1.88+">
   <img src="https://img.shields.io/badge/engines-PostgreSQL%20%C2%B7%20MySQL%20%C2%B7%20SQLite%20%C2%B7%20DuckDB%20%C2%B7%20ClickHouse%20%C2%B7%20SQL%20Server-informational" alt="PostgreSQL · MySQL · SQLite · DuckDB · ClickHouse · SQL Server">
-  <img src="https://img.shields.io/badge/version-2.0.1-success" alt="Version 2.0.1">
 </p>
 
 <p align="center">
@@ -62,6 +59,8 @@ curl -fsSL https://raw.githubusercontent.com/rzlco666/strut-stack-sql/main/insta
 Then **restart your AI tool** and ask it:
 
 > "List the tables in my database, then show me the 5 most recent orders."
+
+You should see the tables listed, then the 5 most recent orders.
 
 If you run the installer without a URL, configs reference `${env:DATABASE_URL}` (or
 forward it, for Codex) — export `DATABASE_URL` in the environment that launches your
