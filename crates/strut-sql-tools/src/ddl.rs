@@ -23,11 +23,11 @@ pub enum SchemaMutateAction {
     AlterColumn,
     DropColumn,
     TruncateTable,
-    /// Migration planning: validate statements and store a plan (never executes).
+    /// Plan migration: validate + store; never executes.
     PlanMigration,
-    /// Execute a stored plan; requires plan_id and an accepted approval.
+    /// Apply stored plan; needs plan_id + approval.
     ApplyMigration,
-    /// Execute a plan's inverse; requires an applied plan with a defined inverse.
+    /// Roll back an applied plan's inverse.
     RollbackMigration,
 }
 
@@ -48,20 +48,15 @@ impl SchemaMutateAction {
     }
 }
 
-/// Column definition for the schema actions. `type` is required by
-/// `add_column`/`alter_column` and ignored by `drop_column`, which needs only
-/// the column name.
+/// Column definition for DDL actions (see TOOLS.md).
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ColumnDef {
     /// Column name.
     pub name: String,
-    /// Column type, e.g. `VARCHAR(100)`. Required for add_column and
-    /// alter_column; optional and ignored for drop_column. A trailing
-    /// `NULL`/`NOT NULL` qualifier is accepted and stripped (use `nullable`).
-    #[serde(rename = "type", default)]
+    /// Column type, e.g. `VARCHAR(100)`; required by add/alter.
+    #[serde(rename = "type")]
     pub data_type: Option<String>,
-    #[serde(default)]
     pub nullable: Option<bool>,
 }
 
@@ -106,26 +101,16 @@ fn strip_nullability_suffix(raw: &str) -> &str {
 #[serde(deny_unknown_fields)]
 pub struct SchemaMutateParams {
     pub action: SchemaMutateAction,
-    #[serde(default)]
     pub schema: Option<String>,
-    #[serde(default)]
     pub table: Option<String>,
-    #[serde(default)]
     pub ddl: Option<String>,
-    #[serde(default)]
     pub column: Option<ColumnDef>,
-    #[serde(default)]
     pub confirm: Option<bool>,
-    #[serde(default)]
     pub approval_id: Option<String>,
-    #[serde(default)]
     pub statements: Option<Vec<String>>,
-    #[serde(default)]
     pub plan_id: Option<String>,
-    /// Validate and report without executing anything (R2-06).
-    #[serde(default)]
+    /// Validate only; executes nothing.
     pub dry_run: Option<bool>,
-    #[serde(default)]
     pub source: Option<String>,
 }
 
@@ -134,11 +119,8 @@ pub struct SchemaMutateParams {
 #[serde(deny_unknown_fields)]
 pub struct CreateTableParams {
     pub ddl: String,
-    #[serde(default)]
     pub approval_id: Option<String>,
-    #[serde(default)]
     pub source: Option<String>,
-    #[serde(default)]
     pub dry_run: Option<bool>,
 }
 
@@ -146,16 +128,11 @@ pub struct CreateTableParams {
 #[serde(deny_unknown_fields)]
 pub struct DropTableParams {
     pub table: String,
-    #[serde(default)]
     pub schema: Option<String>,
-    #[serde(default)]
     pub confirm: Option<bool>,
-    #[serde(default)]
     pub approval_id: Option<String>,
-    /// Validate and report without executing anything (R2-06).
-    #[serde(default)]
+    /// Validate only; executes nothing.
     pub dry_run: Option<bool>,
-    #[serde(default)]
     pub source: Option<String>,
 }
 
@@ -163,16 +140,11 @@ pub struct DropTableParams {
 #[serde(deny_unknown_fields)]
 pub struct TruncateTableParams {
     pub table: String,
-    #[serde(default)]
     pub schema: Option<String>,
-    #[serde(default)]
     pub confirm: Option<bool>,
-    #[serde(default)]
     pub approval_id: Option<String>,
-    /// Validate and report without executing anything (R2-06).
-    #[serde(default)]
+    /// Validate only; executes nothing.
     pub dry_run: Option<bool>,
-    #[serde(default)]
     pub source: Option<String>,
 }
 
@@ -181,13 +153,9 @@ pub struct TruncateTableParams {
 pub struct AddColumnParams {
     pub table: String,
     pub column: ColumnDef,
-    #[serde(default)]
     pub schema: Option<String>,
-    #[serde(default)]
     pub approval_id: Option<String>,
-    #[serde(default)]
     pub source: Option<String>,
-    #[serde(default)]
     pub dry_run: Option<bool>,
 }
 
@@ -196,13 +164,9 @@ pub struct AddColumnParams {
 pub struct AlterColumnParams {
     pub table: String,
     pub column: ColumnDef,
-    #[serde(default)]
     pub schema: Option<String>,
-    #[serde(default)]
     pub approval_id: Option<String>,
-    #[serde(default)]
     pub source: Option<String>,
-    #[serde(default)]
     pub dry_run: Option<bool>,
 }
 
@@ -211,16 +175,11 @@ pub struct AlterColumnParams {
 pub struct DropColumnParams {
     pub table: String,
     pub column: ColumnDef,
-    #[serde(default)]
     pub schema: Option<String>,
-    #[serde(default)]
     pub confirm: Option<bool>,
-    #[serde(default)]
     pub approval_id: Option<String>,
-    /// Validate and report without executing anything (R2-06).
-    #[serde(default)]
+    /// Validate only; executes nothing.
     pub dry_run: Option<bool>,
-    #[serde(default)]
     pub source: Option<String>,
 }
 

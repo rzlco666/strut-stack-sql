@@ -19,17 +19,14 @@ use crate::introspect;
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RelationshipGraphParams {
-    /// Schema/database to inspect; omit for the source's default schema.
-    #[serde(default)]
+    /// Schema/database; default when omitted.
     pub schema: Option<String>,
-    /// Named connection source; omit for the configured default.
-    #[serde(default)]
+    /// Named source; default when omitted.
     pub source: Option<String>,
-    /// Table to focus the graph on. `focus` is accepted as an alias.
-    #[serde(default, alias = "focus")]
+    /// Focus table (`focus` is an alias).
+    #[serde(alias = "focus")]
     pub table: Option<String>,
-    /// How many foreign-key hops to expand around the focus table.
-    #[serde(default)]
+    /// FK hops to expand around focus.
     pub depth: Option<usize>,
 }
 
@@ -38,24 +35,17 @@ pub struct RelationshipGraphParams {
 pub struct SuggestJoinsParams {
     /// Two to eight table names to connect.
     pub tables: Vec<String>,
-    #[serde(default)]
     pub schema: Option<String>,
-    #[serde(default)]
     pub source: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SchemaContextParams {
-    #[serde(default)]
     pub schema: Option<String>,
-    #[serde(default)]
     pub source: Option<String>,
-    #[serde(default)]
     pub token_budget: Option<usize>,
-    #[serde(default)]
     pub tables: Option<Vec<String>>,
-    #[serde(default)]
     pub keyword: Option<String>,
 }
 

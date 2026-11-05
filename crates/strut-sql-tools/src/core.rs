@@ -28,30 +28,22 @@ pub struct SearchObjectsParams {
     /// Object kind to search.
     pub object_type: ObjectType,
     /// Optional keyword filter.
-    #[serde(default)]
     pub keyword: Option<String>,
     /// Schema/database name scope.
-    #[serde(default)]
     pub schema: Option<String>,
     /// Named connection source.
-    #[serde(default)]
     pub source: Option<String>,
-    #[serde(default)]
     pub offset: Option<usize>,
-    #[serde(default)]
     pub limit: Option<usize>,
-    /// Include per-object relevance score.
-    #[serde(default)]
+    /// Include relevance score.
     pub include_score: Option<bool>,
 }
 
-/// Parameterized batch entry. `sql` is required; `params` are the bound
-/// values for its placeholders.
+/// Batch entry with bound params.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BatchQuery {
     pub sql: String,
-    #[serde(default)]
     pub params: Option<Vec<Value>>,
 }
 
@@ -77,29 +69,18 @@ impl BatchQueryItem {
 #[serde(deny_unknown_fields)]
 pub struct ExecuteSqlParams {
     /// Single SQL statement.
-    #[serde(default)]
     pub sql: Option<String>,
-    #[serde(default)]
     pub params: Option<Vec<Value>>,
-    #[serde(default)]
     pub queries: Option<Vec<BatchQueryItem>>,
-    #[serde(default)]
     pub page_offset: Option<usize>,
-    #[serde(default)]
     pub page_size: Option<usize>,
-    /// Cursor for the next page; expires in 10 min.
-    #[serde(default)]
+    /// Page cursor; expires in 10 min.
     pub cursor: Option<String>,
-    #[serde(default)]
     pub source: Option<String>,
-    #[serde(default)]
     pub format: Option<ResultFormat>,
-    #[serde(default)]
     #[schemars(schema_with = "summary_schema")]
     pub summary: Option<crate::summary::SummaryParams>,
-    #[serde(default)]
     pub approval_id: Option<String>,
-    #[serde(default)]
     pub dry_run: Option<bool>,
 }
 
@@ -119,12 +100,9 @@ fn summary_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
 pub struct AnalyzeQueryParams {
     pub sql: String,
     /// Bound values for `?` placeholders.
-    #[serde(default)]
     pub params: Option<Vec<Value>>,
-    #[serde(default)]
     pub source: Option<String>,
-    /// Run EXPLAIN ANALYZE (executes SQL); requires --allow-explain-analyze.
-    #[serde(default)]
+    /// Run EXPLAIN ANALYZE (executes; needs flag).
     pub analyze: Option<bool>,
 }
 

@@ -1026,6 +1026,10 @@ impl ServerHandler for McpSqlServer {
                 }),
                 None => false,
             })
+            .map(|mut tool| {
+                compact_input_schema(&mut tool);
+                tool
+            })
             .collect();
 
         Ok(ListToolsResult {
@@ -1033,6 +1037,13 @@ impl ServerHandler for McpSqlServer {
             ..Default::default()
         })
     }
+}
+
+/// Drop the per-tool `$schema` dialect URL: MCP pins JSON Schema 2020-12 for
+/// tool schemas, so repeating it on every tool is pure wire weight charged to
+/// the PRD-F2-12 `tools/list` byte budget. Nothing else in the schema changes.
+fn compact_input_schema(tool: &mut Tool) {
+    Arc::make_mut(&mut tool.input_schema).remove("$schema");
 }
 
 /// Transport wrapper that pins the initialize handshake to the supported
