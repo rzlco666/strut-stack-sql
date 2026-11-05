@@ -14,12 +14,14 @@ fn catalog_error(message: String) -> rmcp::ErrorData {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SourceParams {
     #[serde(default)]
     pub source: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DescribeTableParams {
     pub table: String,
     #[serde(default)]
@@ -29,6 +31,7 @@ pub struct DescribeTableParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ListTablesParams {
     #[serde(default)]
     pub schema: Option<String>,
@@ -43,6 +46,7 @@ pub struct ListTablesParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ListIndexesParams {
     #[serde(default)]
     pub schema: Option<String>,
@@ -218,6 +222,7 @@ pub async fn handle_list_indexes(
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ListForeignKeysParams {
     #[serde(default)]
     pub schema: Option<String>,
@@ -228,6 +233,7 @@ pub struct ListForeignKeysParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SchemaOverviewParams {
     #[serde(default)]
     pub schema: Option<String>,

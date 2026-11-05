@@ -23,6 +23,7 @@ use crate::intel;
 use crate::introspect::{search_objects_ranked, ObjectType};
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SearchObjectsParams {
     /// Object kind to search.
     pub object_type: ObjectType,
@@ -44,29 +45,36 @@ pub struct SearchObjectsParams {
     pub include_score: Option<bool>,
 }
 
+/// Parameterized batch entry. `sql` is required; `params` are the bound
+/// values for its placeholders.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BatchQuery {
+    pub sql: String,
+    #[serde(default)]
+    pub params: Option<Vec<Value>>,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum BatchQueryItem {
     /// Legacy batch entry: raw SQL string.
     Legacy(String),
     /// Parameterized batch entry.
-    Parameterized {
-        sql: String,
-        #[serde(default)]
-        params: Option<Vec<Value>>,
-    },
+    Parameterized(BatchQuery),
 }
 
 impl BatchQueryItem {
     fn into_sql_params(self) -> (String, Vec<Value>) {
         match self {
             Self::Legacy(sql) => (sql, Vec::new()),
-            Self::Parameterized { sql, params } => (sql, params.unwrap_or_default()),
+            Self::Parameterized(BatchQuery { sql, params }) => (sql, params.unwrap_or_default()),
         }
     }
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ExecuteSqlParams {
     /// Single SQL statement.
     #[serde(default)]
@@ -107,6 +115,7 @@ fn summary_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AnalyzeQueryParams {
     pub sql: String,
     /// Bound values for `?` placeholders.

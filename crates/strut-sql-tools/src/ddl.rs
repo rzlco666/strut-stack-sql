@@ -103,6 +103,7 @@ fn strip_nullability_suffix(raw: &str) -> &str {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SchemaMutateParams {
     pub action: SchemaMutateAction,
     #[serde(default)]
@@ -130,6 +131,7 @@ pub struct SchemaMutateParams {
 
 /// Alias-tool params (action implied by tool name).
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateTableParams {
     pub ddl: String,
     #[serde(default)]
@@ -141,6 +143,7 @@ pub struct CreateTableParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DropTableParams {
     pub table: String,
     #[serde(default)]
@@ -157,6 +160,7 @@ pub struct DropTableParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TruncateTableParams {
     pub table: String,
     #[serde(default)]
@@ -173,6 +177,7 @@ pub struct TruncateTableParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AddColumnParams {
     pub table: String,
     pub column: ColumnDef,
@@ -187,6 +192,7 @@ pub struct AddColumnParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AlterColumnParams {
     pub table: String,
     pub column: ColumnDef,

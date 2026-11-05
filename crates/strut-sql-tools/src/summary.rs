@@ -58,6 +58,7 @@ impl AggregateFn {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SummaryParams {
     /// What to compute.
     pub kind: SummaryKind,
