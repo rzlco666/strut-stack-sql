@@ -421,6 +421,24 @@ preset. Full mapping: [PROFILES.md](PROFILES.md).
 - **DuckDB allowlist.** `--duckdb-allowlist DIR[,DIR…]` (repeatable) does the
   same for file-backed DuckDB sources; `duckdb::memory:` is always allowed.
   The two allowlists are independent: widening one never widens the other.
+- **Database allowlist.** `--allow-databases app,analytics` (also
+  `STRUT_STACK_SQL_ALLOW_DATABASES=app,analytics`) restricts which databases a
+  qualified table name may reference. Empty means no restriction. It is
+  process-wide: a grant narrows tables but can never widen the databases.
+  - Enforced by the guard for MySQL/ClickHouse database prefixes
+    (`otherdb.t` is denied), SQLite attached databases, and SQL Server
+    three-part names. `SHOW` statements are denied while it is active (their
+    output cannot be filtered; use the catalog tools).
+  - Catalog tools are scoped: `list_schemas` lists only allowed databases, and
+    `search_objects`, `list_tables`, `describe_table`, `list_indexes`,
+    `list_foreign_keys`, `schema_overview`, `get_relationship_graph`,
+    `suggest_joins` and `get_schema_context` reject `schema: "*"` and any
+    unlisted schema name.
+  - Limits, stated plainly: an **unqualified** name always resolves on the
+    connected database, which therefore stays reachable — scope the database
+    credential if that database must not be readable. PostgreSQL and DuckDB
+    qualifiers are schema/catalog names, not databases, and are not restricted
+    by this flag.
 - **Per-source circuit breaker.** A source that fails to connect five times in
   a row is fast-failed for 30 seconds; during that window tool calls return
   `source … is failing repeatedly (circuit breaker)` without touching the
@@ -538,6 +556,7 @@ strut-stack-sql --max-rows 50 --max-bytes 32768
 strut-stack-sql --pool-size 16 --query-timeout 15 --connect-timeout 2
 strut-stack-sql --batch-concurrency 4 --fail-fast
 strut-stack-sql --deny-columns password_hash,totp_secret
+strut-stack-sql --allow-databases app,analytics   # deny cross-database names
 strut-stack-sql --allow-explain-analyze     # advisor may run EXPLAIN ANALYZE (executes SQL)
 strut-stack-sql --workspace /path/to/project   # chdir + .env walk + SQLite relative paths
 strut-stack-sql --eager-connect                # connect at startup (default: lazy)

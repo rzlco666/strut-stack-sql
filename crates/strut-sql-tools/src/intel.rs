@@ -116,6 +116,7 @@ pub async fn handle_get_relationship_graph(
         .source(params.source.as_deref())
         .map_err(|e| tool_error(e.to_string()))?;
     let driver = source_driver(config, params.source.as_deref()).await?;
+    crate::core::ensure_schema_allowed(config, driver.kind(), params.schema.as_deref())?;
     let graph = graph::relationship_graph(
         &driver,
         Some(&source.name),
@@ -146,6 +147,7 @@ pub async fn handle_suggest_joins(
         .source(params.source.as_deref())
         .map_err(|e| tool_error(e.to_string()))?;
     let driver = source_driver(config, params.source.as_deref()).await?;
+    crate::core::ensure_schema_allowed(config, driver.kind(), params.schema.as_deref())?;
     let result = graph::suggest_joins(
         &driver,
         Some(&source.name),
@@ -174,6 +176,7 @@ pub async fn handle_get_schema_context(
         .source(params.source.as_deref())
         .map_err(|e| tool_error(e.to_string()))?;
     let driver = source_driver(config, params.source.as_deref()).await?;
+    crate::core::ensure_schema_allowed(config, driver.kind(), params.schema.as_deref())?;
     let context = build_schema_context(
         &driver,
         Some(&source.name),

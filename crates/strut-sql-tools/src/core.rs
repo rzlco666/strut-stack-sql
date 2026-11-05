@@ -272,6 +272,29 @@ fn format_batch_result(batch: &BatchResult, format: ResultFormat) -> serde_json:
     })
 }
 
+/// V1: an active database allowlist also scopes catalog arguments. Engines
+/// where a table qualifier is a schema rather than a database (PostgreSQL,
+/// DuckDB) stay unrestricted.
+pub(crate) fn ensure_schema_allowed(
+    config: &AppConfig,
+    engine: EngineKind,
+    schema: Option<&str>,
+) -> Result<(), McpError> {
+    if config.tables.databases.is_empty() || !strut_sql_guard::TablePolicy::scopes_databases(engine)
+    {
+        return Ok(());
+    }
+    match schema {
+        Some("*") => Err(tool_error(
+            "schema \"*\" is disabled while a database allowlist is active; name an allowed database",
+        )),
+        Some(name) if !config.tables.allows_database(engine, name) => Err(tool_error(format!(
+            "database '{name}' is not accessible to this principal"
+        ))),
+        _ => Ok(()),
+    }
+}
+
 pub async fn handle_search_objects(
     config: &Arc<AppConfig>,
     params: SearchObjectsParams,
@@ -283,6 +306,7 @@ pub async fn handle_search_objects(
         .driver()
         .await
         .map_err(|e| tool_error_code(e.to_string(), ToolErrorKind::Execution))?;
+    ensure_schema_allowed(config, driver.kind(), params.schema.as_deref())?;
     let offset = params.offset.unwrap_or(0);
     let limit = params.limit.unwrap_or(50).min(200);
 

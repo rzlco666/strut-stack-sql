@@ -225,6 +225,35 @@ pub fn validate_and_prepare_with_options(
 
     if let Some(policy) = &prepare_opts.table_policy {
         if !policy.is_empty() {
+            // V1: with a database allowlist, SHOW statements can enumerate
+            // or qualify databases the allowlist is hiding, and their output
+            // is not filtered. Fail closed and send the agent to the catalog
+            // tools, which are scoped.
+            if !policy.databases.is_empty()
+                && TablePolicy::scopes_databases(engine)
+                && matches!(
+                    &stmt,
+                    Statement::ShowTables { .. }
+                        | Statement::ShowColumns { .. }
+                        | Statement::ShowVariable { .. }
+                        | Statement::ShowVariables { .. }
+                        | Statement::ShowSchemas { .. }
+                        | Statement::ShowDatabases { .. }
+                        | Statement::ShowCatalogs { .. }
+                        | Statement::ShowCreate { .. }
+                        | Statement::ShowViews { .. }
+                        | Statement::ShowFunctions { .. }
+                        | Statement::ShowStatus { .. }
+                        | Statement::ShowCollation { .. }
+                        | Statement::ShowProcessList { .. }
+                )
+            {
+                return Err(GuardError::Denied(
+                    "SHOW statements are disabled while a database allowlist is active; \
+                     use the catalog tools (list_tables, describe_table, list_schemas)"
+                        .into(),
+                ));
+            }
             enforce_table_policy(&mut stmt, &class, policy, engine)?;
         }
     }
@@ -2680,5 +2709,106 @@ mod tests {
         .unwrap();
         assert_eq!(shape.table, "t");
         assert_eq!(shape.table_qualified, "db.schema.t");
+    }
+
+    #[test]
+    fn database_allowlist_is_part_of_is_empty() {
+        let policy = TablePolicy {
+            databases: vec!["app".into()],
+            ..Default::default()
+        };
+        assert!(!policy.is_empty());
+        assert!(policy.allows_database(EngineKind::MySql, "APP"));
+        assert!(!policy.allows_database(EngineKind::MySql, "other"));
+        // Schema qualifiers on PostgreSQL are not databases.
+        assert!(policy.allows_database(EngineKind::Postgres, "public"));
+    }
+
+    fn allow_databases_policy() -> TablePolicy {
+        TablePolicy {
+            databases: vec!["app".into()],
+            ..Default::default()
+        }
+    }
+
+    fn prepare_with_policy(
+        sql: &str,
+        engine: EngineKind,
+        policy: TablePolicy,
+    ) -> Result<PreparedSql, GuardError> {
+        validate_and_prepare_with_options(
+            sql,
+            &[],
+            engine,
+            WriteMode::ReadOnly,
+            100,
+            PrepareOptions {
+                table_policy: Some(policy),
+                ..Default::default()
+            },
+        )
+    }
+
+    #[test]
+    fn database_allowlist_scopes_mysql_qualifiers() {
+        let policy = allow_databases_policy();
+        assert!(
+            prepare_with_policy("SELECT * FROM users", EngineKind::MySql, policy.clone()).is_ok()
+        );
+        assert!(
+            prepare_with_policy("SELECT * FROM app.users", EngineKind::MySql, policy.clone())
+                .is_ok()
+        );
+        let err = prepare_with_policy("SELECT * FROM other.users", EngineKind::MySql, policy)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("database 'other'"), "{err}");
+    }
+
+    #[test]
+    fn database_allowlist_leaves_postgres_schemas_alone() {
+        let policy = allow_databases_policy();
+        assert!(
+            prepare_with_policy("SELECT * FROM public.users", EngineKind::Postgres, policy).is_ok()
+        );
+    }
+
+    #[test]
+    fn database_allowlist_denies_show_databases_but_not_without_it() {
+        let err = prepare_with_policy(
+            "SHOW DATABASES",
+            EngineKind::MySql,
+            allow_databases_policy(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("SHOW statements"), "{err}");
+        assert!(
+            prepare_with_policy("SHOW DATABASES", EngineKind::MySql, TablePolicy::default())
+                .is_ok()
+        );
+        let err = prepare_with_policy("SHOW TABLES", EngineKind::MySql, allow_databases_policy())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("SHOW statements"), "{err}");
+    }
+
+    #[test]
+    fn database_allowlist_scopes_sqlserver_three_part_names() {
+        let policy = allow_databases_policy();
+        assert!(prepare_with_policy(
+            "SELECT * FROM app.dbo.users",
+            EngineKind::SqlServer,
+            policy.clone()
+        )
+        .is_ok());
+        let err = prepare_with_policy(
+            "SELECT * FROM other.dbo.users",
+            EngineKind::SqlServer,
+            policy,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("database 'other'"), "{err}");
     }
 }

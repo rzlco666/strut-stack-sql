@@ -126,6 +126,16 @@ GRANT SELECT ON ALL TABLES IN SCHEMA public TO mcp_ro;
 
 MySQL `search_objects` / `list_tables` / `list_columns` / `list_indexes` default to the **connected database** (`DATABASE()` or database name in URL). Cross-database search requires explicit `schema: "*"`.
 
+**Per-database allowlist (opt-in).** `--allow-databases db1,db2` (or
+`STRUT_STACK_SQL_ALLOW_DATABASES`) makes the guard deny statements whose table
+qualifier names another database (MySQL/ClickHouse prefixes, SQLite attached
+databases, SQL Server three-part names), denies `SHOW` statements (their output cannot be filtered),
+filters `list_schemas`, and rejects `schema: "*"` or unlisted schema names in
+the catalog tools. It is process-wide and grants cannot widen it. Known limits:
+unqualified names always resolve on the connected database (use a
+database-scoped credential for real isolation), and PostgreSQL/DuckDB
+qualifiers are schemas/catalogs, which the allowlist does not restrict.
+
 SQL Server metadata stays in the connected database. `schema` is a SQL Server
 schema such as `dbo`; omitted scope uses `SCHEMA_NAME()` for the login's default
 schema, while explicit `"*"` widens supported catalog searches across schemas,

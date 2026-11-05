@@ -64,6 +64,15 @@ pub struct TablePolicy {
     pub allow: Vec<TableRule>,
     /// Always unreachable; deny wins over allow.
     pub deny: Vec<TableRule>,
+    /// When non-empty, qualified table names may only reference these
+    /// databases. The engine decides what a qualifier means: MySQL and
+    /// ClickHouse treat the first part as a database, SQLite as an attached
+    /// database, SQL Server as a three-part database component; PostgreSQL
+    /// and DuckDB qualifiers are schema (or catalog.schema) names and are
+    /// not restricted here. Unqualified names always resolve on the
+    /// connected database.
+    #[serde(default)]
+    pub databases: Vec<String>,
     pub row_filters: Vec<RowFilter>,
     pub masks: Vec<ColumnMask>,
 }
@@ -72,8 +81,37 @@ impl TablePolicy {
     pub fn is_empty(&self) -> bool {
         self.allow.is_empty()
             && self.deny.is_empty()
+            && self.databases.is_empty()
             && self.row_filters.is_empty()
             && self.masks.is_empty()
+    }
+
+    /// True when the engine's table qualifier denotes a database, so the
+    /// database allowlist applies. PostgreSQL and DuckDB schemas are not
+    /// databases and stay unrestricted.
+    pub fn scopes_databases(engine: strut_sql_driver_api::EngineKind) -> bool {
+        matches!(
+            engine,
+            strut_sql_driver_api::EngineKind::MySql
+                | strut_sql_driver_api::EngineKind::ClickHouse
+                | strut_sql_driver_api::EngineKind::Sqlite
+                | strut_sql_driver_api::EngineKind::SqlServer
+        )
+    }
+
+    /// Empty list means "no database restriction". Only meaningful for
+    /// engines where [`Self::scopes_databases`] is true.
+    pub fn allows_database(
+        &self,
+        engine: strut_sql_driver_api::EngineKind,
+        database: &str,
+    ) -> bool {
+        if self.databases.is_empty() || !Self::scopes_databases(engine) {
+            return true;
+        }
+        self.databases
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(database))
     }
 
     /// Deny wins over allow. An empty allow list means "every table not denied".
@@ -114,6 +152,15 @@ impl TablePolicy {
     pub fn merge(&mut self, other: &TablePolicy) {
         self.allow.extend(other.allow.iter().cloned());
         self.deny.extend(other.deny.iter().cloned());
+        for database in &other.databases {
+            if !self
+                .databases
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(database))
+            {
+                self.databases.push(database.clone());
+            }
+        }
         for filter in &other.row_filters {
             if !self.row_filters.iter().any(|f| {
                 f.table.eq_ignore_ascii_case(&filter.table) && f.predicate == filter.predicate
@@ -350,6 +397,19 @@ fn dedup_tables(tables: Vec<TableRef>) -> Result<Vec<TableRef>, GuardError> {
     Ok(out)
 }
 
+/// The database (or attached-database) a name qualification points at, for
+/// engines where a qualifier means a database rather than a schema.
+fn database_qualifier<'a>(
+    engine: strut_sql_driver_api::EngineKind,
+    table: &'a TableRef,
+) -> Option<&'a str> {
+    use strut_sql_driver_api::EngineKind;
+    if !TablePolicy::scopes_databases(engine) || engine == EngineKind::SqlServer {
+        return None;
+    }
+    table.schema.as_deref()
+}
+
 /// Check the allow/deny rules for every referenced table and wrap filtered
 /// tables as `FROM (SELECT * FROM t WHERE (predicate)) AS t`.
 ///
@@ -374,16 +434,28 @@ pub fn enforce_table_policy(
         if engine == strut_sql_driver_api::EngineKind::SqlServer {
             if let Some(database) = &table.database {
                 // SQL Server's three- and four-part names can resolve to
-                // another database (or linked server). The policy model names
-                // only schema and table, so guessing the connected database
-                // would let a database qualifier bypass deny rules and row
-                // filters. Other engines keep their existing schema/table
-                // split (see `table_ref_from_name`).
+                // another database (or linked server). Without an explicit
+                // database allowlist the name is rejected outright: guessing
+                // the connected database would let a qualifier bypass deny
+                // rules and row filters.
+                if policy.databases.is_empty() {
+                    return Err(GuardError::Denied(format!(
+                        "table '{database}.{}.{}' is database-qualified; table policy can only \
+                         authorize schema.table names on the connected database",
+                        table.schema.as_deref().unwrap_or_default(),
+                        table.table
+                    )));
+                }
+                if !policy.allows_database(engine, database) {
+                    return Err(GuardError::Denied(format!(
+                        "database '{database}' is not accessible to this principal"
+                    )));
+                }
+            }
+        } else if let Some(database) = database_qualifier(engine, table) {
+            if !policy.allows_database(engine, database) {
                 return Err(GuardError::Denied(format!(
-                    "table '{database}.{}.{}' is database-qualified; table policy can only \
-                     authorize schema.table names on the connected database",
-                    table.schema.as_deref().unwrap_or_default(),
-                    table.table
+                    "database '{database}' is not accessible to this principal"
                 )));
             }
         }

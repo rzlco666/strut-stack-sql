@@ -371,3 +371,38 @@ async fn advisor_refuses_a_denied_table() {
         .expect_err("advisor denial");
     assert!(err.message.contains("not accessible"), "{err}");
 }
+
+#[tokio::test]
+async fn database_allowlist_filters_list_schemas() {
+    use strut_stack_sql::tools::full::{handle_list_schemas, SourceParams};
+
+    let (allowed, _) = config_with(TablePolicy {
+        databases: vec!["main".into()],
+        ..Default::default()
+    })
+    .await;
+    let listed = body(
+        handle_list_schemas(&allowed, SourceParams { source: None })
+            .await
+            .expect("list schemas"),
+    );
+    let names: Vec<&str> = listed
+        .as_array()
+        .expect("schema array")
+        .iter()
+        .filter_map(|object| object.get("name").and_then(Value::as_str))
+        .collect();
+    assert!(names.contains(&"main"), "{names:?}");
+
+    let (denied, _) = config_with(TablePolicy {
+        databases: vec!["elsewhere".into()],
+        ..Default::default()
+    })
+    .await;
+    let listed = body(
+        handle_list_schemas(&denied, SourceParams { source: None })
+            .await
+            .expect("list schemas"),
+    );
+    assert_eq!(listed.as_array().map(Vec::len), Some(0), "{listed}");
+}

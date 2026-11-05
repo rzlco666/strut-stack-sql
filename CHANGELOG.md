@@ -56,13 +56,22 @@ the intended strictness fixes below.
 - `schema_overview` row counts are documented as engine statistics (InnoDB
   `information_schema` estimates on MySQL), never exact counts.
 
-### Known gaps
+### Added
 
-- A true per-database allowlist (hiding disallowed databases from
-  `list_schemas` and denying cross-database SQL) is **not** part of 2.0.1.
-  Mitigate with one source per database and a database-scoped credential; do
-  not rely on the `schema` argument for isolation. A first implementation was
-  scoped but not completed in this patch.
+- **Per-database allowlist (V1).** `--allow-databases db1,db2` /
+  `STRUT_STACK_SQL_ALLOW_DATABASES` denies statements whose table qualifier
+  names another database (MySQL/ClickHouse prefixes, SQLite attached databases,
+  SQL Server three-part names), denies `SHOW` statements (unfiltered metadata), filters
+  `list_schemas`, and makes the catalog tools reject `schema: "*"` and unlisted
+  schema names. The list is process-wide; grants cannot widen it.
+
+### Known limits
+
+- The allowlist cannot distinguish the database of an **unqualified** table
+  name: that name always resolves on the connected database, which therefore
+  stays reachable (use a database-scoped credential for hard isolation).
+  PostgreSQL and DuckDB qualifiers are schema/catalog names and are not
+  restricted by the flag.
 
 ## [Unreleased]
 
