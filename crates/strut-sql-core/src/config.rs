@@ -1240,7 +1240,7 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
         let source_names: Vec<String> = sources.keys().cloned().collect();
         let policy = build_policy(
             write_mode,
-            cli.full_tools,
+            full_tools,
             allow_grants,
             &http_tokens,
             &toml_cfg.principals,
@@ -1363,7 +1363,7 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
 
     let policy = build_policy(
         write_mode,
-        cli.full_tools,
+        full_tools,
         allow_grants,
         &http_tokens,
         &[],
