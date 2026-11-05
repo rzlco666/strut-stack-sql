@@ -425,6 +425,19 @@ STRUT_STACK_SQL_HTTP_TOKENS="alice:s3cr3t:readonly" \
 Full model: [docs/SECURITY.md](docs/SECURITY.md). Safe probes: `/livez` never touches a
 database; `/readyz` uses cached pool status and never returns raw database errors.
 
+## Security boundary and limitations
+
+Defense in depth, not a sandbox. The controls in the Safety section above are real, but none of them replaces least-privilege database accounts, network restrictions, and review of SQL privileges.
+
+- **The guard parses SQL; it does not understand intent.** Statements are parsed with `sqlparser` into an AST and classified recursively (including CTE bodies); anything the parser cannot represent is rejected, not guessed. That is a policy check on the statement's shape — not a proof that the query is safe to run against your data.
+- **Database privileges remain decisive.** Run the server with a dedicated, least-privilege database account — never an administrative one — and isolate demonstration environments. A read-only database user and views that never select the secret are the real boundary; `--deny-columns` is a seat-belt, not a wall (an alias evades the name match).
+- **Treat credentials as secrets.** Never commit `.env` files, real token hashes, raw tokens, or logs containing sensitive SQL.
+- **Transport needs deployment security.** Bind locally for development. The HTTP transport must not be exposed publicly without a properly secured TLS / reverse-proxy and network policy — a non-loopback bind without auth fails startup unless `--allow-unauthenticated-http` is passed explicitly.
+- **There is no persistent audit log yet.** Tool calls and SQL text can appear in logs — control log access, rotation, retention, and redaction according to your environment. A JSONL audit log with agent identity is on the roadmap, not in this release.
+- **This is not a security certification.** Review and test it before any production deployment. Data returned through tools must be treated as untrusted content, not as instructions to the agent.
+
+What exists today, what is still on the roadmap, and how to report a vulnerability (privately): [SECURITY.md](SECURITY.md). The full threat model lives in [docs/SECURITY.md](docs/SECURITY.md).
+
 ## More ways to install
 
 The installer above is recommended. Everything below installs the same binary;
