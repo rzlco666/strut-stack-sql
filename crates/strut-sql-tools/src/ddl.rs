@@ -48,13 +48,58 @@ impl SchemaMutateAction {
     }
 }
 
+/// Column definition for the schema actions. `type` is required by
+/// `add_column`/`alter_column` and ignored by `drop_column`, which needs only
+/// the column name.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ColumnDef {
+    /// Column name.
     pub name: String,
-    #[serde(rename = "type")]
-    pub data_type: String,
+    /// Column type, e.g. `VARCHAR(100)`. Required for add_column and
+    /// alter_column; optional and ignored for drop_column. A trailing
+    /// `NULL`/`NOT NULL` qualifier is accepted and stripped (use `nullable`).
+    #[serde(rename = "type", default)]
+    pub data_type: Option<String>,
     #[serde(default)]
     pub nullable: Option<bool>,
+}
+
+fn require_column_type<'a>(column: &'a ColumnDef, action: &str) -> Result<&'a str, McpError> {
+    column
+        .data_type
+        .as_deref()
+        .filter(|ty| !ty.trim().is_empty())
+        .ok_or_else(|| {
+            tool_error(format!(
+                "{action} requires column.type (for example \"VARCHAR(100)\")"
+            ))
+        })
+}
+
+/// Drop a trailing `NULL` / `NOT NULL` qualifier copied from raw DDL.
+///
+/// Nullability is a structured field here, so `VARCHAR(100) NULL` must mean
+/// the same thing as `VARCHAR(100)` with `nullable: true`. Only whole trailing
+/// words are removed; a type that merely contains "null" is untouched.
+fn strip_nullability_suffix(raw: &str) -> &str {
+    fn strip_suffix_ci<'a>(value: &'a str, suffix: &str) -> Option<&'a str> {
+        if value.len() < suffix.len() {
+            return None;
+        }
+        let (head, tail) = value.split_at(value.len() - suffix.len());
+        tail.eq_ignore_ascii_case(suffix).then_some(head)
+    }
+    let mut ty = raw.trim();
+    loop {
+        if let Some(head) = strip_suffix_ci(ty, " NOT NULL") {
+            ty = head.trim_end();
+        } else if let Some(head) = strip_suffix_ci(ty, " NULL") {
+            ty = head.trim_end();
+        } else {
+            return ty;
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -156,6 +201,7 @@ pub struct AlterColumnParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DropColumnParams {
     pub table: String,
     pub column: ColumnDef,
@@ -621,7 +667,8 @@ fn build_ddl_sql_unchecked(
                 .as_ref()
                 .ok_or_else(|| tool_error("add_column requires column"))?;
             let qualified = qualify_table(params.schema.as_deref(), table, engine);
-            let data_type = validate_column_type(&column.data_type, engine)?;
+            let data_type =
+                validate_column_type(require_column_type(column, "add_column")?, engine)?;
             let null_sql = match column.nullable {
                 Some(true) if engine == EngineKind::SqlServer => " NULL",
                 Some(true) | None => "",
@@ -647,7 +694,8 @@ fn build_ddl_sql_unchecked(
                 .ok_or_else(|| tool_error("alter_column requires column"))?;
             let qualified = qualify_table(params.schema.as_deref(), table, engine);
             let col = quote_ident(&column.name, engine);
-            let data_type = validate_column_type(&column.data_type, engine)?;
+            let data_type =
+                validate_column_type(require_column_type(column, "alter_column")?, engine)?;
             match engine {
                 EngineKind::MySql => Ok(format!(
                     "ALTER TABLE {qualified} MODIFY COLUMN {col} {data_type}"
@@ -796,6 +844,7 @@ const TYPE_WORDS: &[&str] = &[
 /// `( ) , . _ [ ]` characters; every word token must be a known type word
 /// or a pure number (precision/scale). Returns the trimmed type unchanged.
 fn validate_column_type(raw: &str, engine: EngineKind) -> Result<String, rmcp::ErrorData> {
+    let raw = strip_nullability_suffix(raw);
     if engine == EngineKind::ClickHouse {
         return validate_clickhouse_column_type(raw);
     }
@@ -1031,7 +1080,7 @@ mod tests {
             ddl: None,
             column: Some(ColumnDef {
                 name: "c".into(),
-                data_type: "VARCHAR(64)".into(),
+                data_type: Some("VARCHAR(64)".into()),
                 nullable: None,
             }),
             confirm: None,
@@ -1054,7 +1103,7 @@ mod tests {
             ddl: None,
             column: Some(ColumnDef {
                 name: "c".into(),
-                data_type: "text".into(),
+                data_type: Some("text".into()),
                 nullable: None,
             }),
             confirm: None,
@@ -1080,7 +1129,7 @@ mod tests {
             ddl: None,
             column: Some(ColumnDef {
                 name: "c".into(),
-                data_type: "TEXT".into(),
+                data_type: Some("TEXT".into()),
                 nullable: None,
             }),
             confirm: None,
@@ -1117,7 +1166,7 @@ mod tests {
             ddl: ddl.map(str::to_string),
             column: data_type.map(|ty| ColumnDef {
                 name: "c".into(),
-                data_type: ty.into(),
+                data_type: Some(ty.to_string()),
                 nullable: None,
             }),
             confirm: Some(true),
@@ -1207,11 +1256,80 @@ mod tests {
             sql,
             "ALTER TABLE [t] ADD [id]]; DROP TABLE secrets; --] INT"
         );
-        params.column.as_mut().unwrap().data_type = "INT; DROP TABLE secrets".into();
+        params.column.as_mut().unwrap().data_type = Some("INT; DROP TABLE secrets".into());
         assert!(build_ddl_sql(&params, EngineKind::SqlServer).is_err());
     }
 
     // --- SQL-SEC-14: data_type allowlist ---
+
+    #[test]
+    fn trailing_nullability_qualifier_is_stripped() {
+        for (raw, expected) in [
+            ("VARCHAR(100) NULL", "VARCHAR(100)"),
+            ("VARCHAR(100) NOT NULL", "VARCHAR(100)"),
+            ("varchar(100)   not null", "varchar(100)"),
+            ("INT NULL NOT NULL", "INT"),
+            ("Nullable(String) NOT NULL", "Nullable(String)"),
+        ] {
+            let engine = if raw.starts_with("Nullable") {
+                EngineKind::ClickHouse
+            } else {
+                EngineKind::Postgres
+            };
+            assert_eq!(
+                validate_column_type(raw, engine).unwrap(),
+                expected,
+                "raw={raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn nullability_stripping_does_not_admit_injection() {
+        for ty in [
+            "INT; DROP TABLE x; --",
+            "VARCHAR(10) NULL; DROP TABLE x",
+            "INT NULL DEFAULT 1",
+        ] {
+            assert!(
+                validate_column_type(ty, EngineKind::Postgres).is_err(),
+                "type should be rejected: {ty:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn drop_column_requires_only_the_name() {
+        let params = SchemaMutateParams {
+            action: SchemaMutateAction::DropColumn,
+            schema: None,
+            table: Some("t".into()),
+            ddl: None,
+            column: Some(ColumnDef {
+                name: "c".into(),
+                data_type: None,
+                nullable: None,
+            }),
+            confirm: Some(true),
+            approval_id: None,
+            statements: None,
+            plan_id: None,
+            dry_run: None,
+            source: None,
+        };
+        assert_eq!(
+            build_ddl_sql(&params, EngineKind::MySql).unwrap(),
+            "ALTER TABLE `t` DROP COLUMN `c`"
+        );
+    }
+
+    #[test]
+    fn add_column_without_type_has_actionable_error() {
+        let mut params = mutate_params(SchemaMutateAction::AddColumn, None, Some("INT"));
+        params.column.as_mut().unwrap().data_type = None;
+        let err = build_ddl_sql(&params, EngineKind::MySql).unwrap_err();
+        assert!(err.to_string().contains("column.type"), "{err}");
+    }
 
     #[test]
     fn valid_column_types_pass() {
@@ -1264,7 +1382,6 @@ mod tests {
         for ty in [
             "Int64); DROP TABLE x; --",
             "Int64) ENGINE = Log",
-            "Nullable(String) NOT NULL",
             "Array(Int64",
             "Enum8('a' = 1",
             "SOME_RANDOM_TYPE",
@@ -1284,7 +1401,6 @@ mod tests {
             "INT); DROP TABLE x; --",
             "INT, (SELECT password FROM users)",
             "VARCHAR(10) DEFAULT 'x'",
-            "INT NOT NULL",
             "INT REFERENCES other(id)",
             "INT); GRANT ALL ON t TO bob; --",
             "SOME_RANDOM_TYPE",
