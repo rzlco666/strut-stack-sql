@@ -7,6 +7,13 @@ the intended strictness fixes below.
 
 ### Fixed
 
+- **`tools/list` stays inside the byte budgets (R1-05).** Redundant
+  `serde(default)` attributes on `Option` fields no longer emit
+  `"default": null`, the per-tool `$schema` URL is dropped (MCP already pins
+  JSON Schema 2020-12), and schema prose is trimmed. The default three-tool
+  payload measures 2,643 bytes (cap 3,072) and the full 20-tool payload 10,853
+  bytes (cap 12,000). Parameter names, types, `deny_unknown_fields`, and the
+  `focus` alias are unchanged.
 - **Unknown tool arguments are rejected (V2).** Every tool-parameter struct now
   uses `serde(deny_unknown_fields)`, including nested batch entries
   (`queries[]`). A typo such as `keywords`, `page_size` on `list_tables`, or

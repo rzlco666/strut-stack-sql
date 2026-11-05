@@ -65,19 +65,14 @@ pub struct SummaryParams {
     /// Table to summarize; `schema.table` is accepted.
     pub table: String,
     /// Columns to return (sample only). Defaults to every catalog column.
-    #[serde(default)]
     pub columns: Option<Vec<String>>,
     /// Group keys (count/aggregate only).
-    #[serde(default)]
     pub group_by: Option<Vec<String>>,
     /// Aggregate function (aggregate only).
-    #[serde(default)]
     pub aggregate: Option<AggregateFn>,
     /// Column the aggregate applies to (aggregate only; count may omit it).
-    #[serde(default)]
     pub column: Option<String>,
     /// Rows (sample) or groups (count/aggregate) to return; capped by --max-rows.
-    #[serde(default)]
     pub limit: Option<usize>,
 }
 
