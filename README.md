@@ -371,7 +371,7 @@ Strut Stack SQL does not charge them:
 - **Columnar results** — `{cols, rows, meta}` sends column names once, not once per row.
 - **Every statement passes one AST guard** — parsed with `sqlparser`, classified recursively (including CTE bodies), checked against a tier, LIMIT-clamped, and rejected *before* a pool connection is checked out.
 - **One static binary, six engines**, behind a stable driver contract.
-- **Measured, not claimed** — idle RSS under 8 MB, `tools/list` at 3,039 bytes in core mode, cold start to `initialize` at 2.52 ms p95 over stdio. Full numbers and their limits: [Benchmarks](#benchmarks-measured).
+- **Measured, not claimed** — idle RSS under 8 MB, `tools/list` at 2,643 bytes in lite mode (625 tokens `o200k_base`; 10,853 bytes / 2,549 tokens in full mode), cold start to `initialize` at 2.52 ms p95 over stdio. Token numbers are v2.0.1 (2026-11-05); runtime numbers are v2.0.0 (2026-11-02). Full numbers and their limits: [Benchmarks](#benchmarks-measured).
 
 ## Tools — exactly 20
 
@@ -512,7 +512,8 @@ shared. Full crate map: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 Raw artifact: [`scripts/benchmark/results/2.0.0.json`](scripts/benchmark/results/2.0.0.json) —
 2026-11-02, WSL2 Ubuntu 24.04, Intel i5-13420H (6 vCPU), 5.79 GB RAM, SQLite temp database,
 n=120 iterations after 20 warmups, 20 cold-start runs. Reproduce with
-`./scripts/benchmark/run-bench.sh`.
+`./scripts/benchmark/run-bench.sh`. The table below is the v2.0.0 runtime benchmark — for the
+v2.0.1 token numbers, see [Token benchmark](#token-benchmark-v201) below.
 
 | Metric | Target | stdio | HTTP |
 |---|---:|---:|---:|
@@ -524,7 +525,7 @@ n=120 iterations after 20 warmups, 20 cold-start runs. Reproduce with
 
 Two measurement classes are kept apart instead of blended:
 
-- **In-process** — engine work on a local SQLite file. `tools/list` is **3,039 bytes** for the core
+- **In-process** — engine work on a local SQLite file. `tools/list` is **3,039 bytes** (v2.0.0) for the core
   surface, and a 100 × 8 result is **7,526 bytes** of columnar text before truncation (column names
   once, not once per row). These numbers describe payload shape, not network cost.
 - **Roundtrip over stdio/HTTP** — process spawn → `initialize`, plus one request/response per
@@ -536,6 +537,26 @@ the session handshake, and each HTTP `execute_sql` is a fresh request, so transp
 dominates. PostgreSQL and MySQL were not measured (no live server on the reference machine) and
 are recorded as `not_run`, together with the competitor comparison. Methodology and limits:
 [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+
+### Token benchmark (v2.0.1)
+
+Measured 2026-11-05 (run 1) and independently re-run 2026-11-06 (run 2, byte-identical payloads)
+against the v2.0.1 release binary (`strut-stack-sql 2.0.1`, commit `805d18f`, MCP protocol
+2025-06-18, tiktoken 0.14.0). Tokens count only what the model sees — per-tool `name` +
+`description` + `inputSchema` (method: octomind.run, 2026-10-02). These are schema tokens, not
+session tokens and not a Claude bill. Full method, per-tool tables, and reproduction steps:
+[docs/TOKEN-BENCHMARK.md](docs/TOKEN-BENCHMARK.md).
+
+| Profile | Tools | Canonical (name+desc+schema) | Tokens `o200k_base` | Tokens `cl100k_base` | Byte cap (CI) | Token budget |
+|---|---|---|---|---|---|---|
+| lite | 3 | 2,629 B | 625 | 605 | ≤ 3,072 B ✅ | ≤ 750 |
+| standard | 13 | 5,655 B | 1,313 | 1,279 | — | — |
+| full | 20 | 10,822 B | 2,549 | 2,479 | ≤ 12,000 B ✅ | ≤ 3,000 |
+
+Raw `tools/list` payloads: lite 2,643 B, standard 5,679 B, full 10,853 B. The old headline figure
+of 3,039 bytes was the v2.0.0 payload; it does not apply to v2.0.1. Token budgets (lite ≤ 750,
+full ≤ 3,000 `o200k_base`) are adopted design budgets; the CI job enforcing them is follow-up
+work, not yet a gate.
 
 ## Protocol and clients
 
