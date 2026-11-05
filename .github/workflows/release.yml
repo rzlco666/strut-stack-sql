@@ -10,8 +10,10 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # Soft size budget for stripped Linux x64 (plan target ≤12MB; fail loudly if huge)
-  MAX_LINUX_X64_BYTES: "16000000"
+  # Soft size budget for Linux x64 binary. v2 embeds the DuckDB C++ engine,
+  # so the binary measured 45,542,608 bytes in run 41947059951; the budget
+  # guards against egregious bloat, not leanness.
+  MAX_LINUX_X64_BYTES: "50000000"
 
 jobs:
   build:
@@ -28,7 +30,7 @@ jobs:
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             asset: strut-stack-sql-linux-arm64
-            cross: true
+            host_cross: true
           - os: macos-latest
             target: x86_64-apple-darwin
             asset: strut-stack-sql-macos-x64
@@ -48,18 +50,25 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install cross
-        if: matrix.cross == true
-        run: cargo install cross --locked
+      # The cross-rs Docker image for aarch64 (0.2.5) ships a g++ whose
+      # libstdc++ headers lack <optional>, breaking the DuckDB C++ build.
+      # Use Ubuntu's complete host cross toolchain instead. No openssl-sys
+      # in the tree, so no arm64 libssl package is needed.
+      - name: Install aarch64 host cross toolchain
+        if: matrix.host_cross == true
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
       - name: Build release binary
         shell: bash
+        env:
+          # Target-specific only: ignored by non-aarch64 builds. The host
+          # cross toolchain (installed above for host_cross jobs) supplies
+          # the complete C++ headers that the cross-rs image lacks.
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: |
-          if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }} --bins
-          else
-            cargo build --release --target ${{ matrix.target }} --bins
-          fi
+          cargo build --release --target ${{ matrix.target }} --bins
 
       - name: Package binary (Unix)
         if: matrix.os != 'windows-latest'
