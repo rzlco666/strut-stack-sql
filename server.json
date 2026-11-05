@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.rzlco666/strut-stack-sql",
-  "description": "Token-efficient MCP server for MySQL, PostgreSQL, and SQLite",
+  "description": "Token-efficient MCP server for MySQL, PostgreSQL, SQLite, DuckDB, SQL Server, and ClickHouse",
   "repository": {
     "url": "https://github.com/rzlco666/strut-stack-sql",
     "source": "github"
