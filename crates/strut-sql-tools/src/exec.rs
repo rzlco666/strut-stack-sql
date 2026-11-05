@@ -141,12 +141,13 @@ pub async fn execute_query(
     // cap the rows actually taken from the DB at max_rows (+1 probe row) and
     // mark the result truncated.
     let fetch_rows = class_fetches_rows(&prepared.class);
-    let client_page_size = opts.page_size.unwrap_or(opts.max_rows as usize);
-    let client_page_size = if engine == EngineKind::SqlServer {
-        client_page_size.min(opts.max_rows as usize)
-    } else {
-        client_page_size
-    };
+    // V4: `max_rows` is a hard client-side ceiling on every engine, not just
+    // SQL Server. A page_size above it is clamped here (the guard clamps it
+    // for server pagination as well; this covers stream-cap paths).
+    let client_page_size = opts
+        .page_size
+        .unwrap_or(opts.max_rows as usize)
+        .min(opts.max_rows as usize);
     // Preserve a caller's TOP/FETCH semantics, but fetch only the prefix needed
     // for client slicing even when that bound is a verified, very large literal.
     let sqlserver_client_page = engine == EngineKind::SqlServer
@@ -198,7 +199,7 @@ pub async fn execute_query(
             if prepared.server_pagination {
                 // V4: never return more than max_rows even when the caller
                 // asked for a larger page.
-                let page_size = prepared.page_size as usize;
+                let page_size = (prepared.page_size as usize).min(opts.max_rows as usize);
                 let fetched = columnar.rows.len();
                 let has_more = fetched > page_size;
                 if has_more {

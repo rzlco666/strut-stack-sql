@@ -429,3 +429,21 @@ async fn injected_limit_does_not_mark_truncated_at_exactly_max_rows() {
     assert_eq!(data.meta.truncated, false);
     assert_eq!(data.meta.limit_injected, Some(true));
 }
+
+// --- V4: page_size is capped by max_rows on every engine --------------------
+
+#[tokio::test]
+async fn oversized_page_size_is_capped_by_max_rows() {
+    let pool = sqlite_pool().await;
+    seed_rows(&pool, 142).await;
+    let mut read_opts = exec_opts(WriteMode::ReadOnly);
+    read_opts.page_size = Some(500);
+
+    let result = execute_query(&pool, "SELECT id FROM big ORDER BY id", &[], &read_opts)
+        .await
+        .expect("paged select");
+    let data = result.data.expect("data");
+    assert_eq!(data.rows.len(), 100);
+    assert_eq!(data.meta.page_size, Some(100));
+    assert_eq!(data.meta.has_more, Some(true));
+}

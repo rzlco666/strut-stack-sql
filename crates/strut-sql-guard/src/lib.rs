@@ -250,7 +250,13 @@ pub fn validate_and_prepare_with_options(
     }
 
     let wants_pagination = prepare_opts.page_offset > 0 || prepare_opts.page_size.is_some();
-    let page_size = prepare_opts.page_size.unwrap_or(default_limit as usize) as u32;
+    // V4: the row cap is a hard ceiling for every engine. A caller-supplied
+    // page_size above it must not widen the page (SQL Server already clamped
+    // inside `sqlserver::prepare`; this closes the same hole for the rest).
+    let page_size = prepare_opts
+        .page_size
+        .unwrap_or(default_limit as usize)
+        .min(default_limit as usize) as u32;
 
     let needs_limit = class.is_select_like()
         && !wants_pagination
