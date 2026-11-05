@@ -152,7 +152,9 @@ Behaviour that matters:
 }
 ```
 
-`meta.limit_injected` is set when the guard auto-appends `LIMIT` (no user LIMIT). `meta.limit_clamped` is set when a user-specified LIMIT exceeds `--max-rows` and was reduced. When `--deny-columns` matches result columns, cells are replaced with `"[redacted]"` and `meta.redacted_columns` lists those names.
+`meta.limit_injected` is set when the guard appends `LIMIT max_rows + 1` because the statement had no LIMIT; the extra row is a probe, is never returned, and `meta.truncated` is `true` only when it existed (a table holding exactly `max_rows` rows reports `truncated: false`). `meta.limit_clamped` is set when a user-specified LIMIT exceeds `--max-rows` and was reduced.
+
+`--deny-columns` is **redaction, not denial**: when a returned column name matches an entry exactly (case-insensitive), its cells are replaced with `"[redacted]"` and `meta.redacted_columns` lists that name. The column name itself still appears, and an alias (`SELECT password AS p`) evades the match — this is accidental-exposure protection, not an access-control boundary; use a read-only database user and views for real isolation.
 
 Typed Postgres values (`uuid`, `timestamptz`, `inet`, `citext`, …) serialize as JSON strings by default (no agent-side `::text` cast required).
 
@@ -217,7 +219,7 @@ Introspection (always when `--full-tools`):
 | `describe_table` | Columns + indexes (`unique` + `columns[]`; PG domain types via `udt_name`) |
 | `list_indexes` | Flat indexes: `{schema?,table?,name,columns,unique}` (no nested `indexes[]`, no `CREATE INDEX` blob) |
 | `list_foreign_keys` | Foreign keys for schema/table |
-| `schema_overview` | One-shot: tables + approx row counts (`meta.row_counts=approx`; omit if never-analyzed / unknown — do not treat missing/`0`-after-ANALYZE as exact; use `COUNT(*)` for exact) + FKs + per-table `fk_in`/`fk_out`, `hub` and `orphan` markers (`meta.hubs`, `meta.orphans`); cap 200 tables stated as `meta.truncated` |
+| `schema_overview` | One-shot: tables + **estimated** row counts (`meta.row_counts=approx`; on MySQL/InnoDB these come from `information_schema` statistics, on other engines from planner/catalog stats — never exact; omitted when unknown, and `0` after `ANALYZE` is still an estimate; use `COUNT(*)` for exact) + FKs + per-table `fk_in`/`fk_out`, `hub` and `orphan` markers (`meta.hubs`, `meta.orphans`); cap 200 tables stated as `meta.truncated` |
 | `get_relationship_graph` | `{schema?, source?, table?, depth?}` → `{nodes, edges, meta}` from FK metadata; `depth` default 2, max 4 (focus table only) |
 | `suggest_joins` | `{tables: [2..8], schema?, source?}` → shortest FK paths with copy-ready `on` conditions and `confidence`; no-FK-path same-name candidates are marked `guess: true` |
 | `get_schema_context` | `{schema?, source?, token_budget? (default 4000, max 32000), tables?, keyword?}` → deterministic compact digest (`context`) with `meta {approx_tokens, truncated, tables_included, tables_total, tables_omitted, columns_omitted, relations_omitted}`; expands around focus tables via the FK graph |

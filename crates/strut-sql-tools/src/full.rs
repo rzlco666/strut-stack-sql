@@ -14,43 +14,35 @@ fn catalog_error(message: String) -> rmcp::ErrorData {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SourceParams {
-    #[serde(default)]
     pub source: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DescribeTableParams {
     pub table: String,
-    #[serde(default)]
     pub schema: Option<String>,
-    #[serde(default)]
     pub source: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ListTablesParams {
-    #[serde(default)]
     pub schema: Option<String>,
-    #[serde(default)]
     pub keyword: Option<String>,
-    #[serde(default)]
     pub source: Option<String>,
-    #[serde(default)]
     pub offset: Option<usize>,
-    #[serde(default)]
     pub limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ListIndexesParams {
-    #[serde(default)]
     pub schema: Option<String>,
-    #[serde(default)]
     pub table: Option<String>,
-    #[serde(default)]
     pub keyword: Option<String>,
-    #[serde(default)]
     pub source: Option<String>,
 }
 
@@ -133,6 +125,12 @@ pub async fn handle_list_schemas(
     let objects = introspect::list_schemas(&driver, None)
         .await
         .map_err(catalog_error)?;
+    // V1: an allowlist decides which databases exist as far as the agent is
+    // concerned.
+    let objects: Vec<_> = objects
+        .into_iter()
+        .filter(|object| config.tables.allows_database(driver.kind(), &object.name))
+        .collect();
     json_result(&objects)
 }
 
@@ -141,6 +139,7 @@ pub async fn handle_list_tables(
     params: ListTablesParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     let (driver, source_name, _url) = source_driver(config, params.source.as_deref()).await?;
+    crate::core::ensure_schema_allowed(config, driver.kind(), params.schema.as_deref())?;
     let offset = params.offset.unwrap_or(0);
     let limit = params.limit.unwrap_or(50).min(200);
     let page = introspect::list_tables_page(
@@ -175,13 +174,15 @@ pub async fn handle_describe_table(
     config: &Arc<AppConfig>,
     params: DescribeTableParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
+    let (driver, _, _) = source_driver(config, params.source.as_deref()).await?;
+    crate::core::ensure_schema_allowed(config, driver.kind(), params.schema.as_deref())?;
+    crate::core::ensure_table_database_allowed(config, driver.kind(), Some(&params.table))?;
     if !introspect::table_visible(&config.tables, params.schema.as_deref(), &params.table) {
         return Err(crate::core::tool_error(format!(
             "table '{}' is not accessible to this principal",
             params.table
         )));
     }
-    let (driver, _, _) = source_driver(config, params.source.as_deref()).await?;
     let object = introspect::describe_table(&driver, params.schema.as_deref(), &params.table)
         .await
         .map_err(catalog_error)?;
@@ -193,6 +194,8 @@ pub async fn handle_list_indexes(
     params: ListIndexesParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     let (driver, source_name, _) = source_driver(config, params.source.as_deref()).await?;
+    crate::core::ensure_schema_allowed(config, driver.kind(), params.schema.as_deref())?;
+    crate::core::ensure_table_database_allowed(config, driver.kind(), params.table.as_deref())?;
     let listed = introspect::list_indexes(
         &driver,
         Some(&source_name),
@@ -218,20 +221,17 @@ pub async fn handle_list_indexes(
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ListForeignKeysParams {
-    #[serde(default)]
     pub schema: Option<String>,
-    #[serde(default)]
     pub table: Option<String>,
-    #[serde(default)]
     pub source: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SchemaOverviewParams {
-    #[serde(default)]
     pub schema: Option<String>,
-    #[serde(default)]
     pub source: Option<String>,
 }
 
@@ -240,6 +240,8 @@ pub async fn handle_list_foreign_keys(
     params: ListForeignKeysParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     let (driver, _, _) = source_driver(config, params.source.as_deref()).await?;
+    crate::core::ensure_schema_allowed(config, driver.kind(), params.schema.as_deref())?;
+    crate::core::ensure_table_database_allowed(config, driver.kind(), params.table.as_deref())?;
     let fks =
         introspect::list_foreign_keys(&driver, params.schema.as_deref(), params.table.as_deref())
             .await
@@ -259,6 +261,7 @@ pub async fn handle_schema_overview(
     params: SchemaOverviewParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     let (driver, source_name, _) = source_driver(config, params.source.as_deref()).await?;
+    crate::core::ensure_schema_allowed(config, driver.kind(), params.schema.as_deref())?;
     let mut overview =
         introspect::schema_overview(&driver, Some(&source_name), params.schema.as_deref())
             .await

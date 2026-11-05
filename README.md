@@ -10,7 +10,7 @@
   <a href="https://registry.modelcontextprotocol.io/v0/servers?search=io.github.rzlco666/strut-stack-sql"><img src="https://img.shields.io/badge/MCP%20Registry-io.github.rzlco666%2Fstrut--stack--sql-purple" alt="MCP Registry"></a>
   <img src="https://img.shields.io/badge/Rust-1.88%2B-orange" alt="Rust 1.88+">
   <img src="https://img.shields.io/badge/engines-PostgreSQL%20%C2%B7%20MySQL%20%C2%B7%20SQLite%20%C2%B7%20DuckDB%20%C2%B7%20ClickHouse%20%C2%B7%20SQL%20Server-informational" alt="PostgreSQL · MySQL · SQLite · DuckDB · ClickHouse · SQL Server">
-  <img src="https://img.shields.io/badge/version-2.0.0-success" alt="Version 2.0.0">
+  <img src="https://img.shields.io/badge/version-2.0.1-success" alt="Version 2.0.1">
 </p>
 
 <p align="center">
@@ -368,7 +368,7 @@ Most SQL MCP servers make agents pay three taxes:
 
 Strut Stack SQL does not charge them:
 
-- **3 tools by default.** The other 17 are opt-in: 10 introspection tools with `--full-tools`, and 7 DDL tools only when `--full-tools --allow-ddl` is set.
+- **3 tools by default — the `lite` profile.** The other 17 are opt-in: 10 introspection tools with `--full-tools`, and 7 DDL tools only when `--full-tools --allow-ddl` is set. A fresh install that shows three tools is working as designed.
 - **Columnar results** — `{cols, rows, meta}` sends column names once, not once per row.
 - **Every statement passes one AST guard** — parsed with `sqlparser`, classified recursively (including CTE bodies), checked against a tier, LIMIT-clamped, and rejected *before* a pool connection is checked out.
 - **One static binary, six engines**, behind a stable driver contract.
@@ -398,7 +398,7 @@ Profiles are presets over the same flags — no second authorization system:
 | `admin` | ddl | yes | required |
 
 ```bash
-strut-stack-sql --profile standard   # read-only + all 13 introspection tools
+strut-stack-sql --profile standard   # read-only, 13 tools (3 core + 10 introspection)
 ```
 
 `list_tools` and invocation use the same authorization function, so a tool hidden from the list is
@@ -410,7 +410,9 @@ also rejected when called directly. Full schemas and error contract: [docs/TOOLS
 - **Recursive classification** — writes hidden in CTEs (`WITH … DELETE … RETURNING … SELECT …`), `SELECT … INTO`, `INTO OUTFILE`/`DUMPFILE`, row-locking clauses, and dangerous functions (`pg_read_file`, `LOAD_FILE`, `pg_sleep`, …) are never counted as reads.
 - **Per-principal grants** — `read < writes < ddl < admin` per principal × source, with optional row/byte/timeout ceilings. The process flags (`--allow-writes`, `--allow-ddl`) are a ceiling no grant can exceed.
 - **Admin gate** — `GRANT`/`REVOKE` use the separate `Admin` tier and additionally require `--allow-grants`.
-- **Redaction built in** — `--deny-columns password_hash,totp_secret` drops columns from results; DuckDB's guard additionally blocks `read_csv`, `read_text`, `ATTACH`, `INSTALL`, and `LOAD` so an agent cannot read files outside the allowlist.
+- **Column redaction, not denial** — `--deny-columns password_hash,totp_secret` replaces matching **values** with `"[redacted]"`: exact, case-insensitive column-name match, column names stay visible. An alias (`SELECT password AS p`) evades it, so treat it as a seat-belt, not an access-control boundary — use a read-only database user and views that never select the secret. DuckDB's guard additionally blocks `read_csv`, `read_text`, `ATTACH`, `INSTALL`, and `LOAD` so an agent cannot read files outside the allowlist.
+- **Dry runs and explicit consent** — DDL accepts `dry_run: true` (parse, classify, and report without executing), destructive aliases require `confirm: true`, and the `admin` profile adds single-use approvals (`approval_id` / MCP elicitation) on top.
+- **Per-database allowlist (opt-in)** — `--allow-databases app,analytics` denies cross-database table qualifiers, hides other databases from `list_schemas`, and rejects `schema: "*"`; unqualified names still resolve on the connected database, so pair it with a database-scoped credential ([limits](docs/CONFIGURATION.md#hardening)).
 - **HTTP auth** — `STRUT_STACK_SQL_HTTP_TOKENS` entries are `name:secret:mode[:source…]`; secrets may be stored as `sha256:<64 hex>` and are compared in constant time. OAuth 2.1 resource-server mode validates RS256 JWTs against the issuer's JWKS and fails closed if discovery fails. A non-loopback HTTP bind with no auth fails startup unless `--allow-unauthenticated-http` is passed explicitly.
 
 Remote HTTP mode:
@@ -448,6 +450,19 @@ cargo install --path . --bins
 MCPB bundles for every platform are attached to each
 [GitHub Release](https://github.com/rzlco666/strut-stack-sql/releases/latest) and described by
 [`server.json`](server.json) for the MCP Registry.
+
+## Open source
+
+The whole stack is [MIT](LICENSE) licensed: one static Rust binary for six engines
+(PostgreSQL, MySQL, SQLite, DuckDB, ClickHouse, SQL Server), with the guard, formatter, tools,
+server, and drivers as separate crates. Choose a surface with `--profile lite|standard|full|admin`
+instead of maintaining four builds — profiles are presets over the same flags and grants, not a
+second authorization system ([docs/PROFILES.md](docs/PROFILES.md)).
+
+- Security model and threat model: [docs/SECURITY.md](docs/SECURITY.md).
+- Install channels: one-line installer, Homebrew, Scoop, winget, Docker, `cargo install --path .`,
+  and per-platform MCPB bundles ([docs/INSTALL.md](docs/INSTALL.md)).
+- Contributions: [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md).
 
 ## Architecture
 
@@ -494,6 +509,15 @@ n=120 iterations after 20 warmups, 20 cold-start runs. Reproduce with
 | `tools/list` (core mode) | ≤ 3,072 B | **3,039 B** ✅ | **3,039 B** ✅ |
 | 100 rows × 8 cols (before truncation) | ≤ 70 KB | **7,526 B** ✅ | **7,526 B** ✅ |
 | `execute_sql` SELECT by PK, p50 | ≤ 1 ms | **0.80 ms** ✅ | **1.68 ms** ❌ |
+
+Two measurement classes are kept apart instead of blended:
+
+- **In-process** — engine work on a local SQLite file. `tools/list` is **3,039 bytes** for the core
+  surface, and a 100 × 8 result is **7,526 bytes** of columnar text before truncation (column names
+  once, not once per row). These numbers describe payload shape, not network cost.
+- **Roundtrip over stdio/HTTP** — process spawn → `initialize`, plus one request/response per
+  `execute_sql`. The 0.80 ms stdio p50 includes local SQLite execution and JSON-RPC framing; the
+  harness cannot split tool overhead from database time on an in-process file.
 
 The two HTTP misses are real and are not rounded away: cold start includes listener readiness and
 the session handshake, and each HTTP `execute_sql` is a fresh request, so transport framing

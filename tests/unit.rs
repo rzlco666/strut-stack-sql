@@ -28,7 +28,9 @@ mod guard_tests {
             100,
         )
         .unwrap();
-        assert!(p.sql.contains("LIMIT 100"));
+        // V3: the guard injects max_rows + 1 (probe row) and the execution
+        // layer reports truncation only when the probe exists.
+        assert!(p.sql.contains("LIMIT 101"), "{}", p.sql);
     }
 
     #[test]
@@ -110,7 +112,7 @@ mod execute_params_tests {
         assert_eq!(items.len(), 2);
         match &items[0] {
             BatchQueryItem::Legacy(s) => assert_eq!(s, "SELECT 1"),
-            BatchQueryItem::Parameterized { .. } => panic!("expected legacy"),
+            BatchQueryItem::Parameterized(_) => panic!("expected legacy"),
         }
     }
 
@@ -120,9 +122,9 @@ mod execute_params_tests {
         let p: ExecuteSqlParams = serde_json::from_str(raw).unwrap();
         let items = p.queries.unwrap();
         match &items[0] {
-            BatchQueryItem::Parameterized { sql, params } => {
-                assert_eq!(sql, "SELECT ? AS v");
-                assert_eq!(params.as_ref().unwrap()[0], serde_json::json!(42));
+            BatchQueryItem::Parameterized(item) => {
+                assert_eq!(item.sql, "SELECT ? AS v");
+                assert_eq!(item.params.as_ref().unwrap()[0], serde_json::json!(42));
             }
             BatchQueryItem::Legacy(_) => panic!("expected parameterized"),
         }

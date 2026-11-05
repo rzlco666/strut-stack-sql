@@ -280,7 +280,9 @@ pub struct Cli {
     #[arg(long)]
     pub allow_ddl: bool,
 
-    /// Expose additional schema tools (list_schemas, describe_table, etc.).
+    /// Expose the 10 introspection tools (standard profile: 13 tools total).
+    /// Without this flag and without --profile the server runs the lite
+    /// profile with 3 core tools — that is the default, not a bug.
     #[arg(long)]
     pub full_tools: bool,
 
@@ -299,8 +301,10 @@ pub struct Cli {
     #[arg(long)]
     pub allow_unauthenticated_http: bool,
 
-    /// Tool profile preset: lite, standard, full, or admin (R4-02). Explicit
-    /// flags may raise, never lower, what the profile sets.
+    /// Tool profile preset: lite (3 core tools, read-only; the default),
+    /// standard (adds introspection), full (adds writes), or admin (adds DDL,
+    /// grants, and approvals). Explicit flags may raise, never lower, what the
+    /// profile sets. See docs/PROFILES.md.
     #[arg(long, global = true)]
     pub profile: Option<String>,
 
@@ -311,6 +315,14 @@ pub struct Cli {
     /// Directories or files a DuckDB source may live under (repeatable).
     #[arg(long, global = true, value_delimiter = ',')]
     pub duckdb_allowlist: Vec<PathBuf>,
+
+    /// Restrict database qualifiers to these databases (repeatable or
+    /// comma-separated). Also: STRUT_STACK_SQL_ALLOW_DATABASES=db1,db2.
+    /// Enforced for MySQL/ClickHouse database prefixes, SQLite attached
+    /// databases, and SQL Server three-part names. When set, `list_schemas`
+    /// lists only these databases and `SHOW DATABASES` is denied.
+    #[arg(long, global = true, value_delimiter = ',')]
+    pub allow_databases: Vec<String>,
 
     /// Include the prepared SQL text in trace/log events (off by default;
     /// ignored when the grant carries table rules or row filters).
@@ -534,6 +546,7 @@ fn table_policy_from_config(grant: &GrantConfig) -> anyhow::Result<crate::auth::
     Ok(TablePolicy {
         allow: grant.allow_tables.iter().map(|raw| rule(raw)).collect(),
         deny: grant.deny_tables.iter().map(|raw| rule(raw)).collect(),
+        databases: Vec::new(),
         row_filters: filters,
         masks: grant
             .mask
@@ -672,6 +685,9 @@ impl AppConfig {
         scoped.principal_id = authz.principal_id.clone();
         scoped.query_history = authz.query_history;
         scoped.tables = authz.tables.clone();
+        // The database allowlist is process-wide; a grant narrows tables but
+        // must never widen the reachable databases.
+        scoped.tables.databases = self.tables.databases.clone();
         scoped.limiter = self.limiter.clone();
         if !scoped.tables.is_empty() {
             scoped.trace_sql = false;
@@ -729,6 +745,30 @@ fn resolve_allow_grants(cli: &Cli) -> bool {
 
 fn resolve_allow_explain_analyze(cli: &Cli) -> bool {
     cli.allow_explain_analyze || env_truthy("STRUT_STACK_SQL_ALLOW_EXPLAIN_ANALYZE")
+}
+
+/// Resolve the per-database allowlist from `--allow-databases` and
+/// `STRUT_STACK_SQL_ALLOW_DATABASES` (comma-separated). Empty means "no
+/// restriction"; duplicates are removed case-insensitively.
+fn resolve_allow_databases(cli: &Cli) -> Vec<String> {
+    let mut names = cli.allow_databases.clone();
+    if let Ok(value) = std::env::var("STRUT_STACK_SQL_ALLOW_DATABASES") {
+        names.extend(value.split(',').map(str::to_string));
+    }
+    let mut resolved: Vec<String> = Vec::new();
+    for name in names {
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        if !resolved
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(name))
+        {
+            resolved.push(name.to_string());
+        }
+    }
+    resolved
 }
 
 /// Resolve the optional OAuth resource-server settings.
@@ -1130,6 +1170,7 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
     let allow_grants =
         resolve_allow_grants(cli) || profile.is_some_and(|profile| profile.allow_grants);
     let allow_explain_analyze = resolve_allow_explain_analyze(cli);
+    let allow_databases = resolve_allow_databases(cli);
     let oauth = resolve_oauth_settings()?;
 
     let read_only = !write_mode.allows_dml();
@@ -1245,7 +1286,10 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
                 || env_truthy("STRUT_STACK_SQL_REQUIRE_APPROVAL"),
             approvals: std::sync::Arc::new(crate::approvals::ApprovalQueue::new()),
             plans: std::sync::Arc::new(crate::migrations::PlanStore::new()),
-            tables: crate::auth::TablePolicy::default(),
+            tables: crate::auth::TablePolicy {
+                databases: allow_databases.clone(),
+                ..Default::default()
+            },
             ephemeral: false,
             hide_endpoints,
         });
@@ -1364,7 +1408,10 @@ pub async fn load_config(cli: &Cli) -> Result<AppConfig> {
             || env_truthy("STRUT_STACK_SQL_REQUIRE_APPROVAL"),
         approvals: std::sync::Arc::new(crate::approvals::ApprovalQueue::new()),
         plans: std::sync::Arc::new(crate::migrations::PlanStore::new()),
-        tables: crate::auth::TablePolicy::default(),
+        tables: crate::auth::TablePolicy {
+            databases: allow_databases,
+            ..Default::default()
+        },
         ephemeral,
         hide_endpoints,
     })
@@ -2220,6 +2267,7 @@ max_rows = 7
             profile: None,
             sqlite_allowlist: Vec::new(),
             duckdb_allowlist: Vec::new(),
+            allow_databases: Vec::new(),
             require_approval: false,
             allow_explain_analyze: false,
             http_rate_limit_per_minute: 600,

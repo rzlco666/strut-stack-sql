@@ -23,25 +23,28 @@ use crate::intel;
 use crate::introspect::{search_objects_ranked, ObjectType};
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SearchObjectsParams {
     /// Object kind to search.
     pub object_type: ObjectType,
     /// Optional keyword filter.
-    #[serde(default)]
     pub keyword: Option<String>,
     /// Schema/database name scope.
-    #[serde(default)]
     pub schema: Option<String>,
     /// Named connection source.
-    #[serde(default)]
     pub source: Option<String>,
-    #[serde(default)]
     pub offset: Option<usize>,
-    #[serde(default)]
     pub limit: Option<usize>,
-    /// Include per-object relevance score.
-    #[serde(default)]
+    /// Include relevance score.
     pub include_score: Option<bool>,
+}
+
+/// Batch entry with bound params.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BatchQuery {
+    pub sql: String,
+    pub params: Option<Vec<Value>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -50,48 +53,34 @@ pub enum BatchQueryItem {
     /// Legacy batch entry: raw SQL string.
     Legacy(String),
     /// Parameterized batch entry.
-    Parameterized {
-        sql: String,
-        #[serde(default)]
-        params: Option<Vec<Value>>,
-    },
+    Parameterized(BatchQuery),
 }
 
 impl BatchQueryItem {
     fn into_sql_params(self) -> (String, Vec<Value>) {
         match self {
             Self::Legacy(sql) => (sql, Vec::new()),
-            Self::Parameterized { sql, params } => (sql, params.unwrap_or_default()),
+            Self::Parameterized(BatchQuery { sql, params }) => (sql, params.unwrap_or_default()),
         }
     }
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ExecuteSqlParams {
     /// Single SQL statement.
-    #[serde(default)]
     pub sql: Option<String>,
-    #[serde(default)]
     pub params: Option<Vec<Value>>,
-    #[serde(default)]
     pub queries: Option<Vec<BatchQueryItem>>,
-    #[serde(default)]
     pub page_offset: Option<usize>,
-    #[serde(default)]
     pub page_size: Option<usize>,
-    /// Cursor for the next page; expires in 10 min.
-    #[serde(default)]
+    /// Page cursor; expires in 10 min.
     pub cursor: Option<String>,
-    #[serde(default)]
     pub source: Option<String>,
-    #[serde(default)]
     pub format: Option<ResultFormat>,
-    #[serde(default)]
     #[schemars(schema_with = "summary_schema")]
     pub summary: Option<crate::summary::SummaryParams>,
-    #[serde(default)]
     pub approval_id: Option<String>,
-    #[serde(default)]
     pub dry_run: Option<bool>,
 }
 
@@ -107,15 +96,13 @@ fn summary_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AnalyzeQueryParams {
     pub sql: String,
     /// Bound values for `?` placeholders.
-    #[serde(default)]
     pub params: Option<Vec<Value>>,
-    #[serde(default)]
     pub source: Option<String>,
-    /// Run EXPLAIN ANALYZE (executes SQL); requires --allow-explain-analyze.
-    #[serde(default)]
+    /// Run EXPLAIN ANALYZE (executes; needs flag).
     pub analyze: Option<bool>,
 }
 
@@ -263,6 +250,58 @@ fn format_batch_result(batch: &BatchResult, format: ResultFormat) -> serde_json:
     })
 }
 
+/// V1: an active database allowlist also scopes catalog arguments. Engines
+/// where a table qualifier is a schema rather than a database (PostgreSQL,
+/// DuckDB) stay unrestricted.
+pub(crate) fn ensure_schema_allowed(
+    config: &AppConfig,
+    engine: EngineKind,
+    schema: Option<&str>,
+) -> Result<(), McpError> {
+    if config.tables.databases.is_empty() || !strut_sql_guard::TablePolicy::scopes_databases(engine)
+    {
+        return Ok(());
+    }
+    match schema {
+        Some("*") => Err(tool_error(
+            "schema \"*\" is disabled while a database allowlist is active; name an allowed database",
+        )),
+        Some(name) if !config.tables.allows_database(engine, name) => Err(tool_error(format!(
+            "database '{name}' is not accessible to this principal"
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// Catalog tools accept a table argument that may carry a database qualifier
+/// (`other.users`). Drivers such as MySQL and SQLite split that qualifier
+/// themselves, so the schema check alone would let metadata for a denied
+/// database through. Parse the argument with the same rules as SQL policy and
+/// apply the database allowlist.
+pub(crate) fn ensure_table_database_allowed(
+    config: &AppConfig,
+    engine: EngineKind,
+    table: Option<&str>,
+) -> Result<(), McpError> {
+    if config.tables.databases.is_empty() || !strut_sql_guard::TablePolicy::scopes_databases(engine)
+    {
+        return Ok(());
+    }
+    let Some(table) = table else {
+        return Ok(());
+    };
+    let database = strut_sql_guard::table_argument_database(engine, table)
+        .map_err(|error| tool_error(error.to_string()))?;
+    if let Some(database) = database {
+        if !config.tables.allows_database(engine, &database) {
+            return Err(tool_error(format!(
+                "database '{database}' is not accessible to this principal"
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub async fn handle_search_objects(
     config: &Arc<AppConfig>,
     params: SearchObjectsParams,
@@ -274,6 +313,7 @@ pub async fn handle_search_objects(
         .driver()
         .await
         .map_err(|e| tool_error_code(e.to_string(), ToolErrorKind::Execution))?;
+    ensure_schema_allowed(config, driver.kind(), params.schema.as_deref())?;
     let offset = params.offset.unwrap_or(0);
     let limit = params.limit.unwrap_or(50).min(200);
 

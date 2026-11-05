@@ -68,8 +68,8 @@ pub use params::{
 };
 pub use patterns::{detect_anti_patterns, AntiPattern, PatternContext};
 pub use policy::{
-    enforce_table_policy, referenced_tables, ColumnMask, MaskMode, RowFilter, TablePolicy,
-    TableRef, TableRule,
+    enforce_table_policy, referenced_tables, table_argument_database, ColumnMask, MaskMode,
+    RowFilter, TablePolicy, TableRef, TableRule,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -84,6 +84,9 @@ pub struct PrepareOptions {
 pub struct PreparedSql {
     pub sql: String,
     pub params: Vec<Value>,
+    /// True when the guard appended a row limit (`max_rows + 1`) because the
+    /// statement had none. The execution layer drops the probe row and sets
+    /// `truncated` when it exists.
     pub limit_injected: bool,
     pub limit_clamped: bool,
     /// SQL-SEC-12: true when the statement carries a row limit whose size
@@ -222,6 +225,35 @@ pub fn validate_and_prepare_with_options(
 
     if let Some(policy) = &prepare_opts.table_policy {
         if !policy.is_empty() {
+            // V1: with a database allowlist, SHOW statements can enumerate
+            // or qualify databases the allowlist is hiding, and their output
+            // is not filtered. Fail closed and send the agent to the catalog
+            // tools, which are scoped.
+            if !policy.databases.is_empty()
+                && TablePolicy::scopes_databases(engine)
+                && matches!(
+                    &stmt,
+                    Statement::ShowTables { .. }
+                        | Statement::ShowColumns { .. }
+                        | Statement::ShowVariable { .. }
+                        | Statement::ShowVariables { .. }
+                        | Statement::ShowSchemas { .. }
+                        | Statement::ShowDatabases { .. }
+                        | Statement::ShowCatalogs { .. }
+                        | Statement::ShowCreate { .. }
+                        | Statement::ShowViews { .. }
+                        | Statement::ShowFunctions { .. }
+                        | Statement::ShowStatus { .. }
+                        | Statement::ShowCollation { .. }
+                        | Statement::ShowProcessList { .. }
+                )
+            {
+                return Err(GuardError::Denied(
+                    "SHOW statements are disabled while a database allowlist is active; \
+                     use the catalog tools (list_tables, describe_table, list_schemas)"
+                        .into(),
+                ));
+            }
             enforce_table_policy(&mut stmt, &class, policy, engine)?;
         }
     }
@@ -247,7 +279,13 @@ pub fn validate_and_prepare_with_options(
     }
 
     let wants_pagination = prepare_opts.page_offset > 0 || prepare_opts.page_size.is_some();
-    let page_size = prepare_opts.page_size.unwrap_or(default_limit as usize) as u32;
+    // V4: the row cap is a hard ceiling for every engine. A caller-supplied
+    // page_size above it must not widen the page (SQL Server already clamped
+    // inside `sqlserver::prepare`; this closes the same hole for the rest).
+    let page_size = prepare_opts
+        .page_size
+        .unwrap_or(default_limit as usize)
+        .min(default_limit as usize) as u32;
 
     let needs_limit = class.is_select_like()
         && !wants_pagination
@@ -281,15 +319,19 @@ pub fn validate_and_prepare_with_options(
             ));
         }
     } else if needs_limit {
+        // V3: inject `max_rows + 1`, not `max_rows`. The extra row is a probe:
+        // the execution layer drops it and reports `truncated: true` only when
+        // it exists, so a result of exactly max_rows stays `truncated: false`.
+        let probe_limit = default_limit.saturating_add(1);
         if policy_rewrote {
             // The table policy injected derived subqueries into the AST;
             // serializing the original text would silently drop them.
             if let Statement::Query(q) = &mut stmt {
-                set_query_limit(q, default_limit);
+                set_query_limit(q, probe_limit);
             }
             (stmt.to_string(), false)
         } else {
-            (format!("{trimmed} LIMIT {default_limit}"), false)
+            (format!("{trimmed} LIMIT {probe_limit}"), false)
         }
     } else if limit_clamped || policy_rewrote {
         (stmt.to_string(), false)
@@ -1969,7 +2011,9 @@ mod tests {
         .unwrap();
         assert!(p.limit_injected);
         assert!(!p.limit_unverified);
-        assert!(p.sql.ends_with("LIMIT 100"));
+        // V3: the injected limit is max_rows + 1; the extra row is a probe
+        // the execution layer drops while reporting `truncated`.
+        assert!(p.sql.ends_with("LIMIT 101"), "{}", p.sql);
     }
 
     #[test]
@@ -2665,5 +2709,140 @@ mod tests {
         .unwrap();
         assert_eq!(shape.table, "t");
         assert_eq!(shape.table_qualified, "db.schema.t");
+    }
+
+    #[test]
+    fn database_allowlist_is_part_of_is_empty() {
+        let policy = TablePolicy {
+            databases: vec!["app".into()],
+            ..Default::default()
+        };
+        assert!(!policy.is_empty());
+        assert!(policy.allows_database(EngineKind::MySql, "APP"));
+        assert!(!policy.allows_database(EngineKind::MySql, "other"));
+        // Schema qualifiers on PostgreSQL are not databases.
+        assert!(policy.allows_database(EngineKind::Postgres, "public"));
+    }
+
+    fn allow_databases_policy() -> TablePolicy {
+        TablePolicy {
+            databases: vec!["app".into()],
+            ..Default::default()
+        }
+    }
+
+    fn prepare_with_policy(
+        sql: &str,
+        engine: EngineKind,
+        policy: TablePolicy,
+    ) -> Result<PreparedSql, GuardError> {
+        validate_and_prepare_with_options(
+            sql,
+            &[],
+            engine,
+            WriteMode::ReadOnly,
+            100,
+            PrepareOptions {
+                table_policy: Some(policy),
+                ..Default::default()
+            },
+        )
+    }
+
+    #[test]
+    fn database_allowlist_scopes_mysql_qualifiers() {
+        let policy = allow_databases_policy();
+        assert!(
+            prepare_with_policy("SELECT * FROM users", EngineKind::MySql, policy.clone()).is_ok()
+        );
+        assert!(
+            prepare_with_policy("SELECT * FROM app.users", EngineKind::MySql, policy.clone())
+                .is_ok()
+        );
+        let err = prepare_with_policy("SELECT * FROM other.users", EngineKind::MySql, policy)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("database 'other'"), "{err}");
+    }
+
+    #[test]
+    fn database_allowlist_leaves_postgres_schemas_alone() {
+        let policy = allow_databases_policy();
+        assert!(
+            prepare_with_policy("SELECT * FROM public.users", EngineKind::Postgres, policy).is_ok()
+        );
+    }
+
+    #[test]
+    fn database_allowlist_denies_show_databases_but_not_without_it() {
+        let err = prepare_with_policy(
+            "SHOW DATABASES",
+            EngineKind::MySql,
+            allow_databases_policy(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("SHOW statements"), "{err}");
+        assert!(
+            prepare_with_policy("SHOW DATABASES", EngineKind::MySql, TablePolicy::default())
+                .is_ok()
+        );
+        let err = prepare_with_policy("SHOW TABLES", EngineKind::MySql, allow_databases_policy())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("SHOW statements"), "{err}");
+    }
+
+    #[test]
+    fn table_argument_database_uses_policy_component_rules() {
+        assert_eq!(
+            table_argument_database(EngineKind::MySql, "app.users").unwrap(),
+            Some("app".to_string())
+        );
+        assert_eq!(
+            table_argument_database(EngineKind::MySql, "`app`.`users`").unwrap(),
+            Some("app".to_string())
+        );
+        // A dot inside a quoted identifier is part of the database name.
+        assert_eq!(
+            table_argument_database(EngineKind::MySql, "`ledger.2026`.`users`").unwrap(),
+            Some("ledger.2026".to_string())
+        );
+        assert_eq!(
+            table_argument_database(EngineKind::MySql, "users").unwrap(),
+            None
+        );
+        assert_eq!(
+            table_argument_database(EngineKind::SqlServer, "app.dbo.users").unwrap(),
+            Some("app".to_string())
+        );
+        assert_eq!(
+            table_argument_database(EngineKind::SqlServer, "dbo.users").unwrap(),
+            None
+        );
+        // PostgreSQL/DuckDB qualifications are schemas, not databases.
+        assert_eq!(
+            table_argument_database(EngineKind::Postgres, "public.users").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn database_allowlist_scopes_sqlserver_three_part_names() {
+        let policy = allow_databases_policy();
+        assert!(prepare_with_policy(
+            "SELECT * FROM app.dbo.users",
+            EngineKind::SqlServer,
+            policy.clone()
+        )
+        .is_ok());
+        let err = prepare_with_policy(
+            "SELECT * FROM other.dbo.users",
+            EngineKind::SqlServer,
+            policy,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("database 'other'"), "{err}");
     }
 }

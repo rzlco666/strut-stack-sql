@@ -104,6 +104,21 @@ of only the best number. Engine rows and payload sizes are stable across runs.
 
 ## Methodology notes
 
+### Two measurement classes
+
+Numbers in this document come from two different setups and must not be
+combined into one "speed" figure:
+
+| Class | What it measures | Numbers on this page |
+|---|---|---|
+| **In-process** | Payload shape and engine work on a local SQLite file; no network or editor in the path. | `tools/list` bytes, 100 × 8 result bytes, SQLite execution time |
+| **Roundtrip** | Process spawn → `initialize`, and one stdio/HTTP request/response per call, with JSON-RPC framing. | cold start, `execute_sql` p50/p95 per transport, RSS under load |
+
+A SQLite file inside the server process means engine time and tool time cannot
+be separated; latency figures are therefore labelled by transport, and the
+result-size figures are explicitly "before truncation" and are not compared
+against a remote database roundtrip.
+
 - `cold start` = process spawn → `initialize` response (HTTP additionally waits for the listening socket).
 - `tools/list bytes` = compact JSON-RPC result payload; the 20-tool figure is the `--full-tools --allow-ddl` surface. Both are enforced as CI caps by `scripts/conformance/run.sh` (`stdio.tools.list.default_bytes`, `stdio.tools.list.full_bytes`, `http.tools.list.full_bytes`).
 - `result_100x8_bytes` = `tools/call` text payload before truncation (`--max-bytes` raised to 20 MB for the measurement).

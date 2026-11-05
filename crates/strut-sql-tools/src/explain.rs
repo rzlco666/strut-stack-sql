@@ -788,7 +788,7 @@ fn advise(summary: &mut ExplainSummary, stats: &[TableStats], engine: EngineKind
     let mut seen_suggestions: BTreeSet<(String, Vec<String>)> = BTreeSet::new();
     let total_cost = summary.total_cost;
 
-    for node in &summary.nodes {
+    for (node_index, node) in summary.nodes.iter().enumerate() {
         let upper = if engine == EngineKind::DuckDb {
             node.node_type.to_uppercase().replace('_', " ")
         } else {
@@ -822,23 +822,32 @@ fn advise(summary: &mut ExplainSummary, stats: &[TableStats], engine: EngineKind
                 Some(rows) => ("info", format!("full scan over ~{rows} rows")),
                 None => ("warning", "full scan over unknown row count".to_string()),
             };
-            issues.push(issue(
-                severity,
-                "full_scan",
-                &message,
-                if engine == EngineKind::DuckDb {
-                    "Sequential scans are normal in DuckDB; narrow predicates/projections and inspect selectivity before considering an ART index for selective equality lookups."
-                } else {
-                    "Add an index on the filter/join columns, or narrow the predicate."
-                },
-            ));
-            if let (Some(table), Some(columns)) = (
-                node.relation.as_deref(),
-                node.filter
-                    .as_deref()
-                    .filter(|_| engine != EngineKind::DuckDb)
-                    .and_then(candidate_columns),
-            ) {
+            // V7: name the columns the plan actually compares instead of a
+            // generic sentence. A multi-column filter gets a composite index.
+            let predicate = node.filter.as_deref().map(scan_filter).unwrap_or_default();
+            let advice = if engine == EngineKind::DuckDb {
+                "Sequential scans are normal in DuckDB; narrow predicates/projections and inspect selectivity before considering an ART index for selective equality lookups.".to_string()
+            } else {
+                match predicate.columns.as_slice() {
+                    [] => "Add an index on the filter/join columns, or narrow the predicate."
+                        .to_string(),
+                    [only] => format!(
+                        "The scan filter compares {only}; add an index on {only}, or narrow the predicate."
+                    ),
+                    columns => format!(
+                        "The scan filter compares {}; add a composite index on ({}) with the most selective column first.",
+                        columns.join(", "),
+                        columns.join(", ")
+                    ),
+                }
+            };
+            issues.push(issue(severity, "full_scan", &message, &advice));
+            if let Some(table) = node
+                .relation
+                .as_deref()
+                .filter(|_| engine != EngineKind::DuckDb)
+            {
+                let columns = predicate.columns;
                 let covered = table_stats.is_some_and(|s| {
                     s.indexes.iter().any(|idx| {
                         idx.columns.first().is_some_and(|leading| {
@@ -849,6 +858,17 @@ fn advise(summary: &mut ExplainSummary, stats: &[TableStats], engine: EngineKind
                 let key = (table.to_string(), columns.clone());
                 if !covered && !columns.is_empty() && seen_suggestions.insert(key) {
                     let sql = create_index_sql(engine, table, &columns);
+                    let reason = if columns.len() > 1 {
+                        format!(
+                            "sequential scan filters on unindexed columns {} — a composite index is needed",
+                            columns.join(", ")
+                        )
+                    } else {
+                        format!(
+                            "sequential scan with a filter on unindexed column {}",
+                            columns[0]
+                        )
+                    };
                     suggestions.push(IndexSuggestion {
                         sql,
                         table: table.to_string(),
@@ -860,7 +880,7 @@ fn advise(summary: &mut ExplainSummary, stats: &[TableStats], engine: EngineKind
                         } else {
                             "medium".into()
                         },
-                        reason: "sequential scan with a filter on unindexed column(s)".into(),
+                        reason,
                     });
                 }
             }
@@ -869,11 +889,38 @@ fn advise(summary: &mut ExplainSummary, stats: &[TableStats], engine: EngineKind
         if upper.contains("NESTED LOOP") {
             if let Some(rows) = estimated_rows {
                 if rows >= 10_000 {
+                    // V7: join keys seen in this node or its subtree, so the
+                    // advice names the actual columns instead of a template.
+                    let pairs = subtree_join_pairs(&summary.nodes[node_index..]);
+                    let advice = if pairs.is_empty() {
+                        "Add a join index, reduce the input with a predicate, or prefer a hash join."
+                            .to_string()
+                    } else {
+                        let rendered: Vec<String> = pairs
+                            .iter()
+                            .take(3)
+                            .map(|(l, r)| format!("{l} = {r}"))
+                            .collect();
+                        let inner: Vec<String> = pairs
+                            .iter()
+                            .take(3)
+                            .map(|(_, r)| last_segment(r).to_string())
+                            .collect();
+                        format!(
+                            "Join keys are {}; index the inner side on ({}) or prefer a hash join.",
+                            rendered.join(", "),
+                            inner.join(", ")
+                        )
+                    };
                     issues.push(issue(
-                        if rows >= 1_000_000 { "critical" } else { "warning" },
+                        if rows >= 1_000_000 {
+                            "critical"
+                        } else {
+                            "warning"
+                        },
                         "nested_loop_large",
                         &format!("nested loop over ~{rows} estimated rows"),
-                        "Add a join index, reduce the input with a predicate, or prefer a hash join.",
+                        &advice,
                     ));
                 }
             }
@@ -971,49 +1018,279 @@ fn issue(severity: &str, code: &str, message: &str, suggestion: &str) -> Explain
     }
 }
 
-/// Extract candidate filter columns from the textual plan filter. The
-/// grammar varies by engine, so this intentionally accepts simple
-/// `column <op> value` / `table.column <op> value` tokens only.
-fn candidate_columns(filter: &str) -> Option<Vec<String>> {
-    let mut columns = Vec::new();
-    for token in filter
-        .split(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | ',' | '=' | '<' | '>' | '!'))
-    {
-        let token = token.trim_matches('"').trim_matches('\'');
-        if token.is_empty() {
+/// Columns compared in a plan filter, plus `a = b` join equalities.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct FilterPredicate {
+    /// Column names (last path segment) that take part in a comparison.
+    columns: Vec<String>,
+    /// Equality pairs where both sides are identifiers (join predicates),
+    /// rendered as the names they appear with (`t1.a`, `t2.a`).
+    equalities: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PredicateToken {
+    Ident { full: String, last: String },
+    Compare,
+    Keyword(String),
+    Literal,
+    Punct,
+    Cast,
+}
+
+fn is_filter_keyword(word: &str) -> bool {
+    matches!(
+        word.to_ascii_uppercase().as_str(),
+        "AND"
+            | "OR"
+            | "NOT"
+            | "IS"
+            | "NULL"
+            | "IN"
+            | "LIKE"
+            | "BETWEEN"
+            | "ON"
+            | "USING"
+            | "WHERE"
+            | "FILTER"
+            | "TRUE"
+            | "FALSE"
+            | "AS"
+    )
+}
+
+/// Parse an identifier chain (`a`, `t.a`, `"db"."t"."c"`, `[t].[c]`).
+/// Returns the unquoted full name, its last segment, and the next byte index.
+fn parse_ident(bytes: &[u8], start: usize) -> Option<(String, String, usize)> {
+    let mut index = start;
+    let mut segments: Vec<String> = Vec::new();
+    loop {
+        while index < bytes.len() && (bytes[index] == b' ' || bytes[index] == b'\t') {
+            index += 1;
+        }
+        let segment = match bytes.get(index).copied()? {
+            quote @ (b'"' | b'`') => {
+                index += 1;
+                let mut segment = String::new();
+                loop {
+                    let byte = *bytes.get(index)?;
+                    if byte == quote {
+                        if bytes.get(index + 1) == Some(&quote) {
+                            segment.push(quote as char);
+                            index += 2;
+                            continue;
+                        }
+                        index += 1;
+                        break;
+                    }
+                    segment.push(byte as char);
+                    index += 1;
+                }
+                segment
+            }
+            b'[' => {
+                index += 1;
+                let mut segment = String::new();
+                loop {
+                    let byte = *bytes.get(index)?;
+                    if byte == b']' {
+                        if bytes.get(index + 1) == Some(&b']') {
+                            segment.push(']');
+                            index += 2;
+                            continue;
+                        }
+                        index += 1;
+                        break;
+                    }
+                    segment.push(byte as char);
+                    index += 1;
+                }
+                segment
+            }
+            byte if byte.is_ascii_alphabetic() || byte == b'_' => {
+                let begin = index;
+                while index < bytes.len()
+                    && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+                {
+                    index += 1;
+                }
+                String::from_utf8_lossy(&bytes[begin..index]).into_owned()
+            }
+            _ => return None,
+        };
+        segments.push(segment);
+        if bytes.get(index) == Some(&b'.') {
+            index += 1;
             continue;
         }
-        let column = token.rsplit('.').next().unwrap_or(token);
-        if !column
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        break;
+    }
+    let last = segments.last()?.clone();
+    Some((segments.join("."), last, index))
+}
+
+/// Tokenizer for textual plan filters. String literals, numbers, placeholders
+/// and cast type names become `Literal`/`Cast`, so they can never be mistaken
+/// for a column (`status = 'open'::text` yields exactly `status`).
+fn predicate_tokens(filter: &str) -> Vec<PredicateToken> {
+    let bytes = filter.as_bytes();
+    let mut tokens = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b' ' | b'\t' | b'\n' | b'\r' => index += 1,
+            b'\'' => {
+                index += 1;
+                while index < bytes.len() {
+                    if bytes[index] == b'\'' {
+                        if bytes.get(index + 1) == Some(&b'\'') {
+                            index += 2;
+                            continue;
+                        }
+                        index += 1;
+                        break;
+                    }
+                    index += 1;
+                }
+                tokens.push(PredicateToken::Literal);
+            }
+            byte if byte.is_ascii_digit() => {
+                while index < bytes.len() && (bytes[index].is_ascii_digit() || bytes[index] == b'.')
+                {
+                    index += 1;
+                }
+                tokens.push(PredicateToken::Literal);
+            }
+            b'?' => {
+                index += 1;
+                tokens.push(PredicateToken::Literal);
+            }
+            b'$' | b'@' | b':' => {
+                let is_cast = bytes[index] == b':' && bytes.get(index + 1) == Some(&b':');
+                index += if is_cast { 2 } else { 1 };
+                while index < bytes.len()
+                    && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+                {
+                    index += 1;
+                }
+                tokens.push(if is_cast {
+                    PredicateToken::Cast
+                } else {
+                    PredicateToken::Literal
+                });
+            }
+            b'=' | b'<' | b'>' | b'!' => {
+                index += 1;
+                while index < bytes.len() && matches!(bytes[index], b'=' | b'<' | b'>' | b'!') {
+                    index += 1;
+                }
+                tokens.push(PredicateToken::Compare);
+            }
+            b'(' | b')' | b',' => {
+                index += 1;
+                tokens.push(PredicateToken::Punct);
+            }
+            _ => match parse_ident(bytes, index) {
+                Some((full, last, next)) => {
+                    index = next;
+                    if is_filter_keyword(&full) {
+                        tokens.push(PredicateToken::Keyword(full.to_ascii_uppercase()));
+                    } else {
+                        tokens.push(PredicateToken::Ident { full, last });
+                    }
+                }
+                None => index += 1,
+            },
+        }
+    }
+    tokens
+}
+
+fn push_unique(columns: &mut Vec<String>, column: &str) {
+    if !columns.iter().any(|c| c.eq_ignore_ascii_case(column)) {
+        columns.push(column.to_string());
+    }
+}
+
+/// Extract the compared columns (and equality join pairs) from a plan filter.
+fn scan_filter(filter: &str) -> FilterPredicate {
+    let tokens = predicate_tokens(filter);
+    let mut predicate = FilterPredicate::default();
+    for (position, token) in tokens.iter().enumerate() {
+        let PredicateToken::Ident { full, last } = token else {
+            continue;
+        };
+        let mut next = position + 1;
+        while matches!(tokens.get(next), Some(PredicateToken::Cast)) {
+            next += 1;
+        }
+        let compares = matches!(tokens.get(next), Some(PredicateToken::Compare))
+            || matches!(
+                tokens.get(next),
+                Some(PredicateToken::Keyword(word))
+                    if matches!(word.as_str(), "LIKE" | "IN" | "BETWEEN" | "IS")
+            );
+        if compares {
+            push_unique(&mut predicate.columns, last);
+            if matches!(tokens.get(next), Some(PredicateToken::Compare)) {
+                let mut right = next + 1;
+                while matches!(tokens.get(right), Some(PredicateToken::Cast)) {
+                    right += 1;
+                }
+                if let Some(PredicateToken::Ident {
+                    full: right_full, ..
+                }) = tokens.get(right)
+                {
+                    let pair = (full.clone(), right_full.clone());
+                    if !predicate.equalities.contains(&pair) {
+                        predicate.equalities.push(pair);
+                    }
+                }
+            }
+        } else if position > 0
+            && matches!(tokens.get(position - 1), Some(PredicateToken::Compare))
+            && !matches!(
+                tokens.get(position.wrapping_sub(2)),
+                Some(PredicateToken::Ident { .. })
+            )
         {
-            continue;
+            // `? = column`: the column is on the right-hand side. A join
+            // equality (`a.x = b.y`) is reported through `equalities`, not as
+            // a second filter column.
+            push_unique(&mut predicate.columns, last);
         }
-        if !column
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_alphabetic())
-        {
-            continue;
-        }
-        if matches!(
-            column.to_ascii_lowercase().as_str(),
-            "and" | "or" | "not" | "is" | "null" | "like" | "in" | "between" | "filter"
-        ) {
-            continue;
-        }
-        if !columns
-            .iter()
-            .any(|c: &String| c.eq_ignore_ascii_case(column))
-        {
-            columns.push(column.to_string());
-        }
-        if columns.len() >= 4 {
+        if predicate.columns.len() >= 4 {
             break;
         }
     }
-    Some(columns)
+    predicate
+}
+
+fn last_segment(name: &str) -> &str {
+    name.rsplit('.').next().unwrap_or(name)
+}
+
+/// Equality join pairs in the filter of `start` or of its immediate children.
+fn subtree_join_pairs(nodes: &[PlanNode]) -> Vec<(String, String)> {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    let Some(root) = nodes.first() else {
+        return pairs;
+    };
+    let root_depth = root.depth;
+    let filters = std::iter::once(root.filter.as_deref()).chain(
+        nodes
+            .iter()
+            .filter(|n| n.depth > root_depth)
+            .map(|n| n.filter.as_deref()),
+    );
+    for filter in filters.flatten() {
+        for pair in scan_filter(filter).equalities {
+            if !pairs.contains(&pair) {
+                pairs.push(pair);
+            }
+        }
+    }
+    pairs
 }
 
 fn quote_ident(engine: EngineKind, ident: &str) -> String {
@@ -1120,6 +1397,133 @@ mod tests {
         assert!(summary.index_suggestions[0]
             .columns
             .contains(&"status".to_string()));
+    }
+
+    #[test]
+    fn pg_full_scan_advice_names_the_filter_column_only() {
+        let mut summary =
+            normalize_postgres("SELECT * FROM orders WHERE status = 'open'", pg_fixture());
+        advise(&mut summary, &stats(), EngineKind::Postgres);
+        let issue = summary
+            .issues
+            .iter()
+            .find(|i| i.code == "full_scan")
+            .expect("full_scan issue");
+        assert!(issue.suggestion.contains("status"), "{}", issue.suggestion);
+        // String literal and cast type are not columns.
+        assert!(!issue.suggestion.contains("open"), "{}", issue.suggestion);
+        assert!(!issue.suggestion.contains("text"), "{}", issue.suggestion);
+        assert_eq!(
+            summary.index_suggestions[0].columns,
+            vec!["status".to_string()]
+        );
+    }
+
+    #[test]
+    fn multi_column_filter_recommends_a_composite_index() {
+        let mut summary = normalize_postgres(
+            "SELECT * FROM orders WHERE status = 'open' AND region = 'eu'",
+            json!([{
+                "Plan": {
+                    "Node Type": "Seq Scan",
+                    "Relation Name": "orders",
+                    "Total Cost": 100.0,
+                    "Plan Rows": 50000,
+                    "Filter": "((status = 'open'::text) AND (region = 'eu'::text))",
+                    "Plans": []
+                }
+            }]),
+        );
+        advise(&mut summary, &stats(), EngineKind::Postgres);
+        let issue = summary
+            .issues
+            .iter()
+            .find(|i| i.code == "full_scan")
+            .expect("full_scan issue");
+        assert!(
+            issue.suggestion.contains("(status, region)"),
+            "{}",
+            issue.suggestion
+        );
+        let suggestion = &summary.index_suggestions[0];
+        assert_eq!(
+            suggestion.columns,
+            vec!["status".to_string(), "region".to_string()]
+        );
+        assert!(suggestion.sql.contains("\"status\", \"region\""));
+        assert!(suggestion.reason.contains("composite index"));
+    }
+
+    #[test]
+    fn nested_loop_advice_names_join_columns() {
+        let mut summary = normalize_postgres(
+            "SELECT * FROM a JOIN b ON a.id = b.a_id",
+            json!([{
+                "Plan": {
+                    "Node Type": "Nested Loop",
+                    "Total Cost": 900.0,
+                    "Plan Rows": 50000,
+                    "Plans": [
+                        {
+                            "Node Type": "Seq Scan",
+                            "Relation Name": "b",
+                            "Total Cost": 800.0,
+                            "Plan Rows": 50000,
+                            "Filter": "(b.a_id = a.id)",
+                            "Plans": []
+                        },
+                        {
+                            "Node Type": "Index Scan",
+                            "Relation Name": "a",
+                            "Total Cost": 0.3,
+                            "Plan Rows": 1,
+                            "Plans": []
+                        }
+                    ]
+                }
+            }]),
+        );
+        advise(&mut summary, &stats(), EngineKind::Postgres);
+        let issue = summary
+            .issues
+            .iter()
+            .find(|i| i.code == "nested_loop_large")
+            .expect("nested_loop_large issue");
+        assert!(
+            issue.suggestion.contains("b.a_id = a.id"),
+            "{}",
+            issue.suggestion
+        );
+    }
+
+    #[test]
+    fn sqlite_pk_lookup_keeps_plan_node_without_findings() {
+        let mut summary = normalize_sqlite(
+            "SELECT * FROM orders WHERE id = 1",
+            vec!["SEARCH orders USING INTEGER PRIMARY KEY (rowid=?)".into()],
+        );
+        advise(&mut summary, &stats(), EngineKind::Sqlite);
+        assert_eq!(summary.nodes.len(), 1);
+        assert_eq!(summary.nodes[0].node_type, "SEARCH");
+        assert_eq!(summary.nodes[0].relation.as_deref(), Some("orders"));
+        assert!(summary.issues.is_empty(), "{:?}", summary.issues);
+        assert!(summary.index_suggestions.is_empty());
+    }
+
+    #[test]
+    fn filter_scanner_ignores_literals_casts_and_placeholders() {
+        let pg = scan_filter("((status = 'open'::text) AND (id > 42))");
+        assert_eq!(pg.columns, vec!["status".to_string(), "id".to_string()]);
+        let join = scan_filter("(b.a_id = a.id)");
+        assert_eq!(join.columns, vec!["a_id".to_string()]);
+        assert_eq!(
+            join.equalities,
+            vec![("b.a_id".to_string(), "a.id".to_string())]
+        );
+        let sqlserver = scan_filter("[a]]b].[id]>@P1");
+        assert_eq!(sqlserver.columns, vec!["id".to_string()]);
+        let mysql = scan_filter("(`demo`.`orders`.`status` = 'open')");
+        assert_eq!(mysql.columns, vec!["status".to_string()]);
     }
 
     #[test]
