@@ -2,7 +2,7 @@
   "manifest_version": "0.2",
   "name": "strut-stack-sql",
   "version": "2.0.1",
-  "description": "Strut Stack SQL \u2014 token-efficient MCP for MySQL, PostgreSQL, and SQLite",
+  "description": "Strut Stack SQL \u2014 token-efficient MCP for MySQL, PostgreSQL, SQLite, DuckDB, SQL Server, and ClickHouse",
   "author": {
     "name": "rzlco666"
   },

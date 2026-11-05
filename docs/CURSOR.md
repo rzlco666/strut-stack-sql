@@ -1,6 +1,6 @@
 # Cursor IDE setup — strut-stack-sql
 
-Zero-config global MCP for MySQL, PostgreSQL, and SQLite using the official launcher in this repo.
+Zero-config global MCP for MySQL, PostgreSQL, SQLite, DuckDB, SQL Server, and ClickHouse using the official launcher in this repo.
 
 ## Prerequisites
 
