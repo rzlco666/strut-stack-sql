@@ -84,6 +84,9 @@ pub struct PrepareOptions {
 pub struct PreparedSql {
     pub sql: String,
     pub params: Vec<Value>,
+    /// True when the guard appended a row limit (`max_rows + 1`) because the
+    /// statement had none. The execution layer drops the probe row and sets
+    /// `truncated` when it exists.
     pub limit_injected: bool,
     pub limit_clamped: bool,
     /// SQL-SEC-12: true when the statement carries a row limit whose size
@@ -281,15 +284,19 @@ pub fn validate_and_prepare_with_options(
             ));
         }
     } else if needs_limit {
+        // V3: inject `max_rows + 1`, not `max_rows`. The extra row is a probe:
+        // the execution layer drops it and reports `truncated: true` only when
+        // it exists, so a result of exactly max_rows stays `truncated: false`.
+        let probe_limit = default_limit.saturating_add(1);
         if policy_rewrote {
             // The table policy injected derived subqueries into the AST;
             // serializing the original text would silently drop them.
             if let Statement::Query(q) = &mut stmt {
-                set_query_limit(q, default_limit);
+                set_query_limit(q, probe_limit);
             }
             (stmt.to_string(), false)
         } else {
-            (format!("{trimmed} LIMIT {default_limit}"), false)
+            (format!("{trimmed} LIMIT {probe_limit}"), false)
         }
     } else if limit_clamped || policy_rewrote {
         (stmt.to_string(), false)
@@ -1969,7 +1976,9 @@ mod tests {
         .unwrap();
         assert!(p.limit_injected);
         assert!(!p.limit_unverified);
-        assert!(p.sql.ends_with("LIMIT 100"));
+        // V3: the injected limit is max_rows + 1; the extra row is a probe
+        // the execution layer drops while reporting `truncated`.
+        assert!(p.sql.ends_with("LIMIT 101"), "{}", p.sql);
     }
 
     #[test]

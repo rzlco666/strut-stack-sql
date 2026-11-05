@@ -182,11 +182,22 @@ pub async fn execute_query(
         Ok(Ok(mut columnar)) => {
             if prepared.limit_injected {
                 columnar.meta.limit_injected = Some(true);
+                // V3: the guard injected `LIMIT max_rows + 1`. The row past
+                // max_rows is a probe, never returned; its presence is the
+                // only honest evidence that more rows exist.
+                let cap = opts.max_rows as usize;
+                if columnar.rows.len() > cap {
+                    columnar.rows.truncate(cap);
+                    columnar.meta.n = columnar.rows.len();
+                    columnar.meta.truncated = true;
+                }
             }
             if prepared.limit_clamped {
                 columnar.meta.limit_clamped = Some(true);
             }
             if prepared.server_pagination {
+                // V4: never return more than max_rows even when the caller
+                // asked for a larger page.
                 let page_size = prepared.page_size as usize;
                 let fetched = columnar.rows.len();
                 let has_more = fetched > page_size;
