@@ -148,6 +148,9 @@ pub async fn handle_suggest_joins(
         .map_err(|e| tool_error(e.to_string()))?;
     let driver = source_driver(config, params.source.as_deref()).await?;
     crate::core::ensure_schema_allowed(config, driver.kind(), params.schema.as_deref())?;
+    for table in &params.tables {
+        crate::core::ensure_table_database_allowed(config, driver.kind(), Some(table))?;
+    }
     let result = graph::suggest_joins(
         &driver,
         Some(&source.name),

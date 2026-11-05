@@ -188,6 +188,7 @@ pub async fn handle_describe_table(
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     let (driver, _, _) = source_driver(config, params.source.as_deref()).await?;
     crate::core::ensure_schema_allowed(config, driver.kind(), params.schema.as_deref())?;
+    crate::core::ensure_table_database_allowed(config, driver.kind(), Some(&params.table))?;
     if !introspect::table_visible(&config.tables, params.schema.as_deref(), &params.table) {
         return Err(crate::core::tool_error(format!(
             "table '{}' is not accessible to this principal",
@@ -206,6 +207,7 @@ pub async fn handle_list_indexes(
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     let (driver, source_name, _) = source_driver(config, params.source.as_deref()).await?;
     crate::core::ensure_schema_allowed(config, driver.kind(), params.schema.as_deref())?;
+    crate::core::ensure_table_database_allowed(config, driver.kind(), params.table.as_deref())?;
     let listed = introspect::list_indexes(
         &driver,
         Some(&source_name),
@@ -256,6 +258,7 @@ pub async fn handle_list_foreign_keys(
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     let (driver, _, _) = source_driver(config, params.source.as_deref()).await?;
     crate::core::ensure_schema_allowed(config, driver.kind(), params.schema.as_deref())?;
+    crate::core::ensure_table_database_allowed(config, driver.kind(), params.table.as_deref())?;
     let fks =
         introspect::list_foreign_keys(&driver, params.schema.as_deref(), params.table.as_deref())
             .await

@@ -63,7 +63,10 @@ the intended strictness fixes below.
   names another database (MySQL/ClickHouse prefixes, SQLite attached databases,
   SQL Server three-part names), denies `SHOW` statements (unfiltered metadata), filters
   `list_schemas`, and makes the catalog tools reject `schema: "*"` and unlisted
-  schema names. The list is process-wide; grants cannot widen it.
+  schema names. Catalog tools also reject database-qualified table arguments
+  (`describe_table(table="other.users")`, `list_indexes`, `list_foreign_keys`,
+  `suggest_joins`) instead of trusting the driver to split the qualifier. The
+  list is process-wide; grants cannot widen it.
 
 ### Known limits
 

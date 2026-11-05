@@ -42,6 +42,7 @@ pub enum ExportFormat {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExportRequest {
     pub sql: String,
     #[serde(default)]

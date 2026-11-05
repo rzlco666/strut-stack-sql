@@ -407,6 +407,38 @@ fn database_qualifier(engine: strut_sql_driver_api::EngineKind, table: &TableRef
     table.schema.as_deref()
 }
 
+/// Database named by an explicit table argument (catalog tools such as
+/// `describe_table`, `list_indexes`, `list_foreign_keys`, `suggest_joins`).
+///
+/// Catalog handlers get a table name, not SQL, so a database-qualified
+/// argument must be checked before it reaches a driver that splits the
+/// qualifier (MySQL, SQLite, SQL Server). Parsing `SELECT 1 FROM <table>`
+/// reuses the SQL policy's component rules, including quoted identifiers and
+/// SQL Server three-part names, instead of splitting a rendered name on `.`.
+///
+/// Returns `None` for unqualified names and for engines where a qualifier is a
+/// schema/catalog (PostgreSQL, DuckDB); those are covered by the schema checks.
+pub fn table_argument_database(
+    engine: strut_sql_driver_api::EngineKind,
+    table: &str,
+) -> Result<Option<String>, GuardError> {
+    use strut_sql_driver_api::EngineKind;
+
+    if !TablePolicy::scopes_databases(engine) {
+        return Ok(None);
+    }
+    let referenced = referenced_tables(&format!("SELECT 1 FROM {table}"), engine)?;
+    let [reference] = referenced.as_slice() else {
+        return Err(GuardError::Denied(format!(
+            "table argument '{table}' is not a single table name"
+        )));
+    };
+    Ok(match engine {
+        EngineKind::SqlServer => reference.database.clone(),
+        _ => reference.schema.clone(),
+    })
+}
+
 /// Check the allow/deny rules for every referenced table and wrap filtered
 /// tables as `FROM (SELECT * FROM t WHERE (predicate)) AS t`.
 ///

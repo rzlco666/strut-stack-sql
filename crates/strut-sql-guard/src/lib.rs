@@ -68,8 +68,8 @@ pub use params::{
 };
 pub use patterns::{detect_anti_patterns, AntiPattern, PatternContext};
 pub use policy::{
-    enforce_table_policy, referenced_tables, ColumnMask, MaskMode, RowFilter, TablePolicy,
-    TableRef, TableRule,
+    enforce_table_policy, referenced_tables, table_argument_database, ColumnMask, MaskMode,
+    RowFilter, TablePolicy, TableRef, TableRule,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -2791,6 +2791,40 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("SHOW statements"), "{err}");
+    }
+
+    #[test]
+    fn table_argument_database_uses_policy_component_rules() {
+        assert_eq!(
+            table_argument_database(EngineKind::MySql, "app.users").unwrap(),
+            Some("app".to_string())
+        );
+        assert_eq!(
+            table_argument_database(EngineKind::MySql, "`app`.`users`").unwrap(),
+            Some("app".to_string())
+        );
+        // A dot inside a quoted identifier is part of the database name.
+        assert_eq!(
+            table_argument_database(EngineKind::MySql, "`ledger.2026`.`users`").unwrap(),
+            Some("ledger.2026".to_string())
+        );
+        assert_eq!(
+            table_argument_database(EngineKind::MySql, "users").unwrap(),
+            None
+        );
+        assert_eq!(
+            table_argument_database(EngineKind::SqlServer, "app.dbo.users").unwrap(),
+            Some("app".to_string())
+        );
+        assert_eq!(
+            table_argument_database(EngineKind::SqlServer, "dbo.users").unwrap(),
+            None
+        );
+        // PostgreSQL/DuckDB qualifications are schemas, not databases.
+        assert_eq!(
+            table_argument_database(EngineKind::Postgres, "public.users").unwrap(),
+            None
+        );
     }
 
     #[test]

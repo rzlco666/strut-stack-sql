@@ -295,6 +295,35 @@ pub(crate) fn ensure_schema_allowed(
     }
 }
 
+/// Catalog tools accept a table argument that may carry a database qualifier
+/// (`other.users`). Drivers such as MySQL and SQLite split that qualifier
+/// themselves, so the schema check alone would let metadata for a denied
+/// database through. Parse the argument with the same rules as SQL policy and
+/// apply the database allowlist.
+pub(crate) fn ensure_table_database_allowed(
+    config: &AppConfig,
+    engine: EngineKind,
+    table: Option<&str>,
+) -> Result<(), McpError> {
+    if config.tables.databases.is_empty() || !strut_sql_guard::TablePolicy::scopes_databases(engine)
+    {
+        return Ok(());
+    }
+    let Some(table) = table else {
+        return Ok(());
+    };
+    let database = strut_sql_guard::table_argument_database(engine, table)
+        .map_err(|error| tool_error(error.to_string()))?;
+    if let Some(database) = database {
+        if !config.tables.allows_database(engine, &database) {
+            return Err(tool_error(format!(
+                "database '{database}' is not accessible to this principal"
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub async fn handle_search_objects(
     config: &Arc<AppConfig>,
     params: SearchObjectsParams,

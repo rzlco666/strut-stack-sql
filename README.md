@@ -10,7 +10,7 @@
   <a href="https://registry.modelcontextprotocol.io/v0/servers?search=io.github.rzlco666/strut-stack-sql"><img src="https://img.shields.io/badge/MCP%20Registry-io.github.rzlco666%2Fstrut--stack--sql-purple" alt="MCP Registry"></a>
   <img src="https://img.shields.io/badge/Rust-1.88%2B-orange" alt="Rust 1.88+">
   <img src="https://img.shields.io/badge/engines-PostgreSQL%20%C2%B7%20MySQL%20%C2%B7%20SQLite%20%C2%B7%20DuckDB%20%C2%B7%20ClickHouse%20%C2%B7%20SQL%20Server-informational" alt="PostgreSQL · MySQL · SQLite · DuckDB · ClickHouse · SQL Server">
-  <img src="https://img.shields.io/badge/version-2.0.1-success" alt="Version 2.0.0">
+  <img src="https://img.shields.io/badge/version-2.0.1-success" alt="Version 2.0.1">
 </p>
 
 <p align="center">

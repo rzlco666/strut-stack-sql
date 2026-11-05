@@ -406,3 +406,95 @@ async fn database_allowlist_filters_list_schemas() {
     );
     assert_eq!(listed.as_array().map(Vec::len), Some(0), "{listed}");
 }
+
+#[tokio::test]
+async fn catalog_tools_reject_table_arguments_qualified_by_a_denied_database() {
+    use strut_stack_sql::tools::full::{
+        handle_describe_table, handle_list_foreign_keys, handle_list_indexes, DescribeTableParams,
+        ListForeignKeysParams, ListIndexesParams,
+    };
+    use strut_stack_sql::tools::intel::{handle_suggest_joins, SuggestJoinsParams};
+
+    let (config, driver) = config_with(TablePolicy {
+        databases: vec!["main".into()],
+        ..Default::default()
+    })
+    .await;
+    seed(&driver).await;
+
+    let err = handle_describe_table(
+        &config,
+        DescribeTableParams {
+            table: "other.users".into(),
+            schema: None,
+            source: None,
+        },
+    )
+    .await
+    .expect_err("describe_table must not split a denied qualifier");
+    assert!(
+        err.message.contains("database 'other' is not accessible"),
+        "{err}"
+    );
+
+    let err = handle_list_indexes(
+        &config,
+        ListIndexesParams {
+            schema: None,
+            table: Some("other.users".into()),
+            keyword: None,
+            source: None,
+        },
+    )
+    .await
+    .expect_err("list_indexes must not accept a denied qualifier");
+    assert!(
+        err.message.contains("database 'other' is not accessible"),
+        "{err}"
+    );
+
+    let err = handle_list_foreign_keys(
+        &config,
+        ListForeignKeysParams {
+            schema: None,
+            table: Some("other.users".into()),
+            source: None,
+        },
+    )
+    .await
+    .expect_err("list_foreign_keys must not accept a denied qualifier");
+    assert!(
+        err.message.contains("database 'other' is not accessible"),
+        "{err}"
+    );
+
+    let err = handle_suggest_joins(
+        &config,
+        SuggestJoinsParams {
+            tables: vec!["main.orders".into(), "other.users".into()],
+            schema: None,
+            source: None,
+        },
+    )
+    .await
+    .expect_err("suggest_joins must not accept a denied qualifier");
+    assert!(
+        err.message.contains("database 'other' is not accessible"),
+        "{err}"
+    );
+
+    // An allowed qualifier keeps working; the guard must not reject every dot.
+    let described = handle_describe_table(
+        &config,
+        DescribeTableParams {
+            table: "main.orders".into(),
+            schema: None,
+            source: None,
+        },
+    )
+    .await
+    .expect("allowed database qualifier");
+    let payload = body(described);
+    assert_eq!(payload["name"], "orders", "{payload}");
+    assert_eq!(payload["schema"], "main", "{payload}");
+}
