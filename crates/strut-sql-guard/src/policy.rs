@@ -399,10 +399,7 @@ fn dedup_tables(tables: Vec<TableRef>) -> Result<Vec<TableRef>, GuardError> {
 
 /// The database (or attached-database) a name qualification points at, for
 /// engines where a qualifier means a database rather than a schema.
-fn database_qualifier<'a>(
-    engine: strut_sql_driver_api::EngineKind,
-    table: &'a TableRef,
-) -> Option<&'a str> {
+fn database_qualifier(engine: strut_sql_driver_api::EngineKind, table: &TableRef) -> Option<&str> {
     use strut_sql_driver_api::EngineKind;
     if !TablePolicy::scopes_databases(engine) || engine == EngineKind::SqlServer {
         return None;

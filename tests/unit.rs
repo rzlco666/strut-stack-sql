@@ -112,7 +112,7 @@ mod execute_params_tests {
         assert_eq!(items.len(), 2);
         match &items[0] {
             BatchQueryItem::Legacy(s) => assert_eq!(s, "SELECT 1"),
-            BatchQueryItem::Parameterized { .. } => panic!("expected legacy"),
+            BatchQueryItem::Parameterized(_) => panic!("expected legacy"),
         }
     }
 

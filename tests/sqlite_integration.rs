@@ -411,7 +411,7 @@ async fn injected_limit_marks_truncated_when_probe_row_exists() {
     let data = result.data.expect("data");
     assert_eq!(data.rows.len(), 100);
     assert_eq!(data.meta.n, 100);
-    assert_eq!(data.meta.truncated, true);
+    assert!(data.meta.truncated);
     assert_eq!(data.meta.limit_injected, Some(true));
 }
 
@@ -426,7 +426,7 @@ async fn injected_limit_does_not_mark_truncated_at_exactly_max_rows() {
         .expect("select exactly 100 rows");
     let data = result.data.expect("data");
     assert_eq!(data.rows.len(), 100);
-    assert_eq!(data.meta.truncated, false);
+    assert!(!data.meta.truncated);
     assert_eq!(data.meta.limit_injected, Some(true));
 }
 

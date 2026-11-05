@@ -20,7 +20,7 @@ use strut_stack_sql::core::auth::{Grant, GrantSource, Policy, Tier};
 use strut_stack_sql::guard::validate_and_prepare;
 use strut_stack_sql::server::build_http_router;
 use strut_stack_sql::tools::core::{
-    handle_execute_sql, handle_search_objects, BatchQueryItem, ExecuteSqlParams,
+    handle_execute_sql, handle_search_objects, BatchQuery, BatchQueryItem, ExecuteSqlParams,
     SearchObjectsParams,
 };
 use strut_stack_sql::tools::introspect::{describe_table, schema_overview, ObjectType};
@@ -667,10 +667,10 @@ async fn batch_parameterized() {
         ExecuteSqlParams {
             sql: None,
             params: None,
-            queries: Some(vec![BatchQueryItem::Parameterized {
+            queries: Some(vec![BatchQueryItem::Parameterized(BatchQuery {
                 sql: "SELECT ? AS v".into(),
                 params: Some(vec![json!(42)]),
-            }]),
+            })]),
             page_offset: None,
             page_size: None,
             cursor: None,
