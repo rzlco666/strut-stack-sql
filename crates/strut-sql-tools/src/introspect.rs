@@ -588,6 +588,20 @@ async fn driver_indexes_page(
     Ok(fresh)
 }
 
+/// Cached unpaginated index listing that keeps engine-native index metadata
+/// (including the primary-key flag) for internal catalog consumers.
+pub(crate) async fn cached_indexes(
+    driver: &Arc<dyn EngineDriver>,
+    source: Option<&str>,
+    schema: Option<&str>,
+) -> Result<Vec<DriverIndexInfo>, String> {
+    Ok(
+        driver_indexes_page(driver, source, schema, None, None, 0, CATALOG_PAGE_MAX)
+            .await?
+            .indexes,
+    )
+}
+
 /// Backwards-compatible unpaginated schema listing.
 pub async fn list_schemas(
     driver: &Arc<dyn EngineDriver>,

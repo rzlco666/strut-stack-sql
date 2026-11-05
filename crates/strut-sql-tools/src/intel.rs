@@ -195,11 +195,26 @@ async fn build_schema_context(
     keyword: Option<&str>,
     policy: Option<&strut_sql_guard::TablePolicy>,
 ) -> Result<SchemaContext, String> {
-    let schema_name = driver
-        .resolve_schema(schema)
-        .await
-        .map_err(|e| e.to_string())?;
-    let mut tables = introspect::list_tables(driver, source, Some(&schema_name), None).await?;
+    // V5: every input comes from the schema cache. The cached overview
+    // carries the table list, approximate row counts and foreign keys, so a
+    // warm call performs no driver introspection at all (previously two
+    // all-table scans — FK and row-count — ran on every call).
+    let overview = introspect::schema_overview(driver, source, schema).await?;
+    let schema_name = overview.schema.clone();
+    // The overview caps its own table list at 200; the cached catalog page
+    // still supplies every table, so no extra scan is needed even then. Only
+    // row estimates beyond that cap are absent (they are optional hints).
+    let mut table_names: Vec<String> =
+        introspect::list_tables(driver, source, Some(&schema_name), None)
+            .await?
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+    let rows: BTreeMap<String, Option<i64>> = overview
+        .tables
+        .iter()
+        .map(|t| (t.name.clone(), t.approx_rows))
+        .collect();
     let mut columns = introspect::list_columns(driver, source, Some(&schema_name), None).await?;
     if let Some(policy) = policy {
         if !policy.is_empty() {
@@ -210,7 +225,7 @@ async fn build_schema_context(
                     ));
                 }
             }
-            tables.retain(|table| policy.allows_table(Some(&schema_name), &table.name));
+            table_names.retain(|table| policy.allows_table(Some(&schema_name), table));
             columns.retain(|column| {
                 column
                     .table
@@ -220,10 +235,7 @@ async fn build_schema_context(
             });
         }
     }
-    let mut fks = driver
-        .list_foreign_keys(Some(&schema_name), None)
-        .await
-        .map_err(|e| e.to_string())?;
+    let mut fks = overview.foreign_keys.clone();
     if let Some(policy) = policy {
         if !policy.is_empty() {
             fks.retain(|fk| {
@@ -232,17 +244,7 @@ async fn build_schema_context(
             });
         }
     }
-    let indexes = driver
-        .list_indexes(Some(&schema_name), None)
-        .await
-        .map_err(|e| e.to_string())?;
-    let rows: BTreeMap<String, Option<i64>> = driver
-        .approximate_row_counts(Some(&schema_name))
-        .await
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .map(|r| (r.name, r.approx_rows))
-        .collect();
+    let indexes = introspect::cached_indexes(driver, source, Some(&schema_name)).await?;
 
     let mut columns_by_table: BTreeMap<String, Vec<&introspect::SchemaObject>> = BTreeMap::new();
     for column in &columns {
@@ -277,7 +279,6 @@ async fn build_schema_context(
         *degree.entry(fk.ref_table.clone()).or_default() += 1;
     }
 
-    let table_names: Vec<String> = tables.iter().map(|t| t.name.clone()).collect();
     let known: BTreeSet<&str> = table_names.iter().map(String::as_str).collect();
     let mut focus_missing = Vec::new();
     let mut priority: Vec<String> = Vec::new();
