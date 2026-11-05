@@ -1,5 +1,69 @@
 # Changelog
 
+## [2.0.1] — 2026-11-05
+
+Patch release from the v2 test findings. No breaking tool-schema changes beyond
+the intended strictness fixes below.
+
+### Fixed
+
+- **Unknown tool arguments are rejected (V2).** Every tool-parameter struct now
+  uses `serde(deny_unknown_fields)`, including nested batch entries
+  (`queries[]`). A typo such as `keywords`, `page_size` on `list_tables`, or
+  `focuss` now fails with `invalid_params` naming the unknown field and the
+  valid field list instead of being silently ignored. `get_relationship_graph`
+  accepts `focus` as an alias for `table`, and every parameter field carries a
+  doc comment in the generated JSON schema. Harnesses that relied on extra
+  arguments must drop them.
+- **Injected limits report truncation honestly (V3).** The guard appends
+  `LIMIT max_rows + 1`; the execution layer drops the probe row and sets
+  `meta.truncated = true` only when it existed. A table with exactly
+  `max_rows` rows now returns `truncated: false` instead of an unverifiable
+  result. `meta.limit_injected` is unchanged.
+- **`page_size` is capped by `max_rows` on every engine (V4).** Previously only
+  SQL Server clamped it; `page_size: 500` with `max_rows: 100` returned every
+  row of a 142-row table with `has_more: false`. It now returns 100 rows with
+  `has_more: true`. Explicit-LIMIT clamping (`meta.limit_clamped`) is
+  unchanged.
+- **`get_schema_context` reuses the schema cache (V5).** The packer used to run
+  the foreign-key and row-count scans on every call (plus uncached index
+  introspection). It now reads the cached schema overview, so a warm call
+  performs no driver introspection and cold calls reuse the same cached
+  artifacts as `schema_overview`.
+- **`drop_column` needs only the column name (V6).** `column.type` is optional
+  and ignored for drop; `add_column`/`alter_column` still require it and return
+  an actionable error when it is missing. Column-type validation accepts a
+  trailing `NULL` / `NOT NULL` qualifier (`VARCHAR(100) NULL`) and strips it,
+  since nullability has its own structured field; injection attempts are still
+  rejected.
+- **Advisor advice names the real columns (V7).** Full-scan advice names the
+  filter columns actually compared (string literals, casts, and placeholders
+  are no longer mistaken for columns) and recommends a composite index when
+  several columns are filtered. Large nested-loop advice names the equality
+  join keys when the plan exposes them. Plan nodes are preserved for primary-key
+  lookups, which produce no findings.
+
+### Documentation
+
+- Default profile (`lite`, three core tools) is now stated in `--help`,
+  `docs/PROFILES.md`, and the README; the forked `tools/list` sizes are
+  documented as in-process measurements, separate from stdio/HTTP roundtrips.
+- README highlights guard fail-closed behavior, columnar token efficiency with
+  measured numbers, `dry_run`/`confirm`/approvals, column redaction semantics
+  (values censored, names visible, exact case-insensitive match — not an
+  access-control boundary), multi-engine single binary, profiles, the security
+  threat model, and install channels under MIT.
+- `schema_overview` row counts are documented as engine statistics (InnoDB
+  `information_schema` estimates on MySQL), never exact counts.
+
+### Known gaps
+
+- A true per-database allowlist (hiding disallowed databases from
+  `list_schemas` and denying cross-database SQL) is **not** part of 2.0.1.
+  Mitigate with one source per database and a database-scoped credential; do
+  not rely on the `schema` argument for isolation. A first implementation was
+  scoped but not completed in this patch.
+
 ## [Unreleased]
 
 ### Added
