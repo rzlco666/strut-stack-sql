@@ -10,7 +10,7 @@ run:
 Both are wired into CI; the release workflow makes the repo runner a required
 dependency of publishing (PRD-CONF-01).
 
-## Result summary
+## Historical 2.0.0 result summary
 
 | Item | Value |
 |---|---|
@@ -28,6 +28,11 @@ dependency of publishing (PRD-CONF-01).
 `node`/`npx` are not installed on the reference machine (`which node npx` →
 not found). `bunx` is installed and ran the official suite; this is recorded
 here rather than silently skipped.
+
+This is recorded evidence for the binary/source above, not a current-worktree
+pass claim. SQL Server was added after that evidence; the historical counts,
+payload sizes and official-suite results below do not validate its driver,
+guard, catalog or plan paths.
 
 ## Pinned spec version and why
 
@@ -181,9 +186,10 @@ regression tests:
   runner covers stdio.
 - Official suite scenarios that require resources, prompts, logging, or the
   suite's fixture tools: not applicable (see table above).
-- PostgreSQL/MySQL conformance: this runner uses SQLite. The three official
-  drivers are covered separately by the Driver Conformance Test Kit; the Docker
-  integration suite remains the engine-level gate.
+- Engine conformance: this MCP runner uses SQLite, not PostgreSQL, MySQL or
+  SQL Server. Driver Conformance Test Kit and live integration targets are
+  separate engine-level gates; adding a driver does not extend the historical
+  MCP results to that engine.
 - Real OAuth token issuance: the runner uses a fake authorization server for
   discovery/metadata and invalid-token rejection; it does not mint a valid RS256
   access token.
@@ -192,3 +198,26 @@ regression tests:
   parsed and shape-checked, and the documented generic stdio command line is
   spawned for `initialize` + `tools/list`; the per-client application smoke
   from PRD-CONF-03 remains a release-environment step.
+
+## SQL Server live engine gates
+
+Set `SQLSERVER_DATABASE_URL` securely to a **disposable** SQL Server database
+(`sqlserver://` or `mssql://`), then run from the workspace root:
+
+```bash
+CARGO_BUILD_JOBS=1 cargo +1.99 test -p strut-sql-driver-sqlserver \
+  --test conformance -- --ignored --test-threads=1
+CARGO_BUILD_JOBS=1 cargo +1.99 test --test sqlserver_integration \
+  -- --ignored --test-threads=1
+```
+
+These ignored tests exercise live codecs/empty metadata/row caps, command
+execution, connection discard, catalogs/composite keys, table policy/masking,
+pagination and estimated/actual XML plans. They create/drop fixture objects;
+use fixture DDL/DML permissions plus `SHOWPLAN`, never production credentials.
+SQL Server TLS defaults and limitations are documented in
+[CONFIGURATION.md](CONFIGURATION.md#sql-server).
+
+No SQL Server pass count is recorded here. Run and retain fresh evidence for
+the exact worktree/binary before treating these as passed release gates.
+

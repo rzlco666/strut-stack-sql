@@ -4,6 +4,7 @@ mod duckdb;
 mod params;
 mod patterns;
 mod policy;
+mod sqlserver;
 
 use serde_json::Value;
 use sqlparser::ast::{
@@ -12,9 +13,12 @@ use sqlparser::ast::{
     SelectItem, SetExpr, Statement, TableFactor, Value as SqlValue, Values,
 };
 use sqlparser::dialect::{
-    ClickHouseDialect, Dialect, DuckDbDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect,
+    ClickHouseDialect, Dialect, DuckDbDialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect,
+    SQLiteDialect,
 };
+use sqlparser::keywords::Keyword;
 use sqlparser::parser::Parser;
+use sqlparser::tokenizer::{Token, Tokenizer};
 
 use strut_sql_driver_api::EngineKind;
 
@@ -123,10 +127,7 @@ pub(crate) fn parse_single_statement(
     engine: EngineKind,
 ) -> Result<Statement, GuardError> {
     reject_file_export_syntax(sql)?;
-    let normalized = normalize_sql_for_engine(sql, engine);
-    let dialect = dialect_for(engine);
-    let statements = Parser::parse_sql(dialect.as_ref(), &normalized)
-        .map_err(|e| GuardError::Denied(format!("parse error: {e}")))?;
+    let statements = parse_statements_for_engine(sql, engine)?;
     if statements.len() != 1 {
         return Err(GuardError::Denied(format!(
             "expected exactly one statement, got {}",
@@ -165,6 +166,7 @@ fn dialect_for(engine: EngineKind) -> Box<dyn Dialect> {
         EngineKind::Sqlite => Box::new(SQLiteDialect {}),
         EngineKind::DuckDb => Box::new(DuckDbDialect),
         EngineKind::ClickHouse => Box::new(ClickHouseDialect {}),
+        EngineKind::SqlServer => Box::new(MsSqlDialect {}),
     }
 }
 
@@ -197,10 +199,7 @@ pub fn validate_and_prepare_with_options(
     reject_file_export_syntax(sql)?;
 
     let normalized = normalize_sql_for_engine(sql, engine);
-    let dialect = dialect_for(engine);
-
-    let statements = Parser::parse_sql(dialect.as_ref(), &normalized)
-        .map_err(|e| GuardError::Denied(format!("parse error: {e}")))?;
+    let statements = parse_statements_for_engine(sql, engine)?;
 
     if statements.is_empty() {
         return Err(GuardError::Denied("empty query".into()));
@@ -242,6 +241,10 @@ pub fn validate_and_prepare_with_options(
     }
 
     enforce_write_mode(&class, write_mode)?;
+
+    if engine == EngineKind::SqlServer {
+        return sqlserver::prepare(stmt, class, query_params, default_limit, &prepare_opts, sql);
+    }
 
     let wants_pagination = prepare_opts.page_offset > 0 || prepare_opts.page_size.is_some();
     let page_size = prepare_opts.page_size.unwrap_or(default_limit as usize) as u32;
@@ -313,8 +316,125 @@ fn normalize_sql_for_engine(sql: &str, engine: EngineKind) -> String {
         EngineKind::Postgres if count_question_mark_placeholders(sql) > 0 => {
             rewrite_placeholders_for_postgres(sql)
         }
+        EngineKind::SqlServer => params::normalize_sqlserver_identifiers(sql),
         _ => sql.to_string(),
     }
+}
+
+fn parse_error(error: impl std::fmt::Display) -> GuardError {
+    GuardError::Denied(format!("parse error: {error}"))
+}
+
+/// One parse path for the guard, the tools and the advisor.
+///
+/// SQL Server's `ALTER COLUMN <name> <type> [NULL | NOT NULL]` is valid T-SQL
+/// but unrepresentable in sqlparser 0.62: its ALTER branch accepts only
+/// SET/DROP NOT NULL, SET/DROP DEFAULT and SET DATA TYPE after the column
+/// name. Rewrite that operation at the token level to the grammar's `MODIFY
+/// COLUMN` form (which accepts the same data type and nullability options),
+/// then parse the whole statement normally. This is a parse-only adaptation;
+/// execution keeps the caller's original T-SQL text. Token-level rewriting
+/// cannot touch strings or comments, and the rewrite is skipped when the
+/// existing SET/DROP/TYPE/ADD grammar applies.
+pub(crate) fn parse_statements_for_engine(
+    sql: &str,
+    engine: EngineKind,
+) -> Result<Vec<Statement>, GuardError> {
+    let normalized = normalize_sql_for_engine(sql, engine);
+    let dialect = dialect_for(engine);
+    if engine == EngineKind::SqlServer {
+        let mut tokenizer = Tokenizer::new(dialect.as_ref(), &normalized);
+        let tokens = tokenizer.tokenize().map_err(parse_error)?;
+        let mut parser = Parser::new(dialect.as_ref()).with_tokens(adapt_tsql_alter_column(tokens));
+        parser.parse_statements().map_err(parse_error)
+    } else {
+        Parser::parse_sql(dialect.as_ref(), &normalized).map_err(parse_error)
+    }
+}
+
+fn adapt_tsql_alter_column(tokens: Vec<Token>) -> Vec<Token> {
+    fn keyword(token: &Token, expected: Keyword) -> bool {
+        matches!(
+            token,
+            Token::Word(word) if word.quote_style.is_none() && word.keyword == expected
+        )
+    }
+
+    fn next_visible(tokens: &[Token], mut index: usize) -> Option<usize> {
+        while index < tokens.len() {
+            if !matches!(&tokens[index], Token::Whitespace(_)) {
+                return Some(index);
+            }
+            index += 1;
+        }
+        None
+    }
+
+    let Some(alter) = next_visible(&tokens, 0) else {
+        return tokens;
+    };
+    if !keyword(&tokens[alter], Keyword::ALTER) {
+        return tokens;
+    }
+    let Some(table) = next_visible(&tokens, alter + 1) else {
+        return tokens;
+    };
+    if !keyword(&tokens[table], Keyword::TABLE) {
+        return tokens;
+    }
+
+    let mut tokens = tokens;
+    let mut depth = 0u32;
+    let mut index = 0usize;
+    while index < tokens.len() {
+        match &tokens[index] {
+            Token::LParen => {
+                depth = depth.saturating_add(1);
+                index += 1;
+                continue;
+            }
+            Token::RParen => {
+                depth = depth.saturating_sub(1);
+                index += 1;
+                continue;
+            }
+            _ => {}
+        }
+        let alter_column = matches!(
+            &tokens[index],
+            Token::Word(word)
+                if depth == 0
+                    && word.quote_style.is_none()
+                    && word.keyword == Keyword::ALTER
+        );
+        if alter_column {
+            if let Some(column) = next_visible(&tokens, index + 1) {
+                if keyword(&tokens[column], Keyword::COLUMN) {
+                    if let Some(name) = next_visible(&tokens, column + 1) {
+                        if let Some(after_name) = next_visible(&tokens, name + 1) {
+                            let existing_grammar = matches!(
+                                &tokens[after_name],
+                                Token::Word(word)
+                                    if word.quote_style.is_none()
+                                        && matches!(
+                                            word.keyword,
+                                            Keyword::SET
+                                                | Keyword::DROP
+                                                | Keyword::TYPE
+                                                | Keyword::ADD
+                                        )
+                            );
+                            if !existing_grammar {
+                                tokens[index] = Token::make_keyword("MODIFY");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        index += 1;
+    }
+    tokens
 }
 
 fn enforce_write_mode(class: &StmtClass, mode: WriteMode) -> Result<(), GuardError> {
@@ -570,10 +690,14 @@ fn denied_functions_for(engine: EngineKind) -> &'static [DeniedFunction] {
         EngineKind::Sqlite => DENIED_FUNCTIONS_SQLITE,
         EngineKind::DuckDb => &[],
         EngineKind::ClickHouse => DENIED_FUNCTIONS_CLICKHOUSE,
+        EngineKind::SqlServer => &[],
     }
 }
 
 fn check_denied_functions(stmt: &Statement, engine: EngineKind) -> Result<(), GuardError> {
+    if engine == EngineKind::SqlServer {
+        return sqlserver::check_statement(stmt);
+    }
     let denied = denied_functions_for(engine);
     let mut check = |name: &str| {
         let reason = denied
@@ -1504,7 +1628,7 @@ fn expr_has_function(expr: &Expr) -> bool {
 /// Extract the keyset shape of a parsed query, or explain why the query cannot
 /// be paged by keyset. Kept deliberately narrow: OFFSET is not involved, so a
 /// row inserted or deleted between pages can neither duplicate nor skip a row.
-fn extract_keyset_shape(q: &Query) -> Result<KeysetShape, GuardError> {
+fn extract_keyset_shape(q: &Query, engine: EngineKind) -> Result<KeysetShape, GuardError> {
     if q.with.is_some() {
         return Err(keyset_denied(
             "cursor pagination does not support WITH/CTE queries; page the outer SELECT instead",
@@ -1525,6 +1649,11 @@ fn extract_keyset_shape(q: &Query) -> Result<KeysetShape, GuardError> {
             "cursor pagination requires a single SELECT (no UNION/EXCEPT/INTERSECT/VALUES)",
         ));
     };
+    if select.top.is_some() {
+        return Err(keyset_denied(
+            "cursor pagination sets its own row bound; remove TOP from the SQL",
+        ));
+    }
     if select.distinct.is_some() {
         return Err(keyset_denied(
             "cursor pagination does not support DISTINCT; deduplicate client-side instead",
@@ -1558,12 +1687,17 @@ fn extract_keyset_shape(q: &Query) -> Result<KeysetShape, GuardError> {
             "cursor pagination requires a plain table (not a subquery or table function)",
         ));
     };
-    let qualified = name.to_string().replace(['"', '`'], "");
-    let table = qualified
-        .rsplit('.')
-        .next()
-        .unwrap_or(&qualified)
-        .to_string();
+    let parts = policy::object_name_parts(name);
+    if engine == EngineKind::SqlServer && parts.len() > 2 {
+        // The tools layer derives schema/table from the suffix of
+        // `table_qualified`; a database qualifier would send an ambiguous
+        // schema to list_indexes/describe_table.
+        return Err(keyset_denied(
+            "cursor pagination requires a schema.table name without a database qualifier on SQL Server",
+        ));
+    }
+    let table = parts.last().cloned().unwrap_or_default();
+    let qualified = parts.join(".");
 
     let order = q
         .order_by
@@ -1607,9 +1741,7 @@ fn extract_keyset_shape(q: &Query) -> Result<KeysetShape, GuardError> {
 /// Public shape probe used by the tool layer before issuing a cursor, so the
 /// ordering column can be checked against the engine's unique indexes.
 pub fn keyset_shape(sql: &str, engine: EngineKind) -> Result<KeysetShape, GuardError> {
-    let normalized = normalize_sql_for_engine(sql, engine);
-    let statements = Parser::parse_sql(dialect_for(engine).as_ref(), &normalized)
-        .map_err(|e| GuardError::Denied(format!("parse error: {e}")))?;
+    let statements = parse_statements_for_engine(sql, engine)?;
     if statements.len() != 1 {
         return Err(keyset_denied(
             "cursor pagination requires exactly one statement",
@@ -1620,7 +1752,7 @@ pub fn keyset_shape(sql: &str, engine: EngineKind) -> Result<KeysetShape, GuardE
             "cursor pagination is only supported on SELECT queries",
         ));
     };
-    extract_keyset_shape(q)
+    extract_keyset_shape(q, engine)
 }
 
 /// Prepare one keyset page: `WHERE (original) AND key > $N ORDER BY key LIMIT n+1`.
@@ -1641,9 +1773,7 @@ pub fn validate_and_prepare_keyset(
     validate_param_count(sql, query_params, engine)?;
     reject_file_export_syntax(sql)?;
 
-    let normalized = normalize_sql_for_engine(sql, engine);
-    let statements = Parser::parse_sql(dialect_for(engine).as_ref(), &normalized)
-        .map_err(|e| GuardError::Denied(format!("parse error: {e}")))?;
+    let statements = parse_statements_for_engine(sql, engine)?;
     if statements.is_empty() {
         return Err(GuardError::Denied("empty query".into()));
     }
@@ -1659,6 +1789,16 @@ pub fn validate_and_prepare_keyset(
     let class = classify::classify(&stmt)?;
     check_query_complexity(&stmt)?;
     check_denied_functions(&stmt, engine)?;
+    // Row policies replace base tables with derived tables. Extract the
+    // caller's validated shape first, then retain the policy rewrite below.
+    let sqlserver_shape = if engine == EngineKind::SqlServer {
+        let Statement::Query(query) = &stmt else {
+            return Err(keyset_denied("cursor pagination requires a SELECT query"));
+        };
+        Some(extract_keyset_shape(query, engine)?)
+    } else {
+        None
+    };
     if let Some(policy) = &request.table_policy {
         if !policy.is_empty() {
             enforce_table_policy(&mut stmt, &class, policy, engine)?;
@@ -1676,7 +1816,10 @@ pub fn validate_and_prepare_keyset(
             "cursor pagination is only supported on SELECT queries".into(),
         ));
     };
-    let shape = extract_keyset_shape(q)?;
+    let shape = match sqlserver_shape {
+        Some(shape) => shape,
+        None => extract_keyset_shape(q, engine)?,
+    };
 
     if let Some(_after) = &request.after {
         let placeholder = match engine {
@@ -1684,9 +1827,11 @@ pub fn validate_and_prepare_keyset(
             _ => "?".to_string(),
         };
         let predicate = Expr::BinaryOp {
-            left: Box::new(Expr::Identifier(sqlparser::ast::Ident::new(
-                shape.order_column.clone(),
-            ))),
+            left: Box::new(if engine == EngineKind::SqlServer {
+                sqlserver::keyset_order_expr(q)?
+            } else {
+                Expr::Identifier(sqlparser::ast::Ident::new(shape.order_column.clone()))
+            }),
             op: if shape.descending {
                 sqlparser::ast::BinaryOperator::Lt
             } else {
@@ -1706,14 +1851,18 @@ pub fn validate_and_prepare_keyset(
             None => predicate,
         });
     }
-    q.limit_clause = Some(LimitClause::LimitOffset {
-        limit: Some(Expr::value(SqlValue::Number(
-            (request.page_size as u64 + 1).to_string(),
-            false,
-        ))),
-        offset: None,
-        limit_by: vec![],
-    });
+    if engine == EngineKind::SqlServer {
+        sqlserver::set_top(q, request.page_size as u64 + 1)?;
+    } else {
+        q.limit_clause = Some(LimitClause::LimitOffset {
+            limit: Some(Expr::value(SqlValue::Number(
+                (request.page_size as u64 + 1).to_string(),
+                false,
+            ))),
+            offset: None,
+            limit_by: vec![],
+        });
+    }
 
     let final_sql = stmt.to_string();
     let mut all_params = query_params.to_vec();
@@ -2414,5 +2563,107 @@ mod tests {
                     .unwrap_or_else(|e| panic!("{sql} should be allowed: {e}"));
             assert!(!prepared.sql.is_empty());
         }
+    }
+
+    #[test]
+    fn quoted_identifiers_keep_their_characters_in_policy_and_keyset() {
+        // `"ledger[2026]"` is one identifier: stripping quotes/brackets from
+        // the rendered name would turn it into `ledger2026` and bypass a deny
+        // rule (or make a keyset catalog lookup target the wrong table).
+        let deny = TablePolicy {
+            deny: vec![TableRule {
+                schema: None,
+                table: "ledger[2026]".into(),
+            }],
+            ..Default::default()
+        };
+        let error = validate_and_prepare_with_options(
+            "SELECT * FROM \"ledger[2026]\"",
+            &[],
+            EngineKind::Postgres,
+            WriteMode::ReadOnly,
+            10,
+            PrepareOptions {
+                table_policy: Some(deny),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("not accessible"), "{error}");
+
+        let bracketed = keyset_shape(
+            "SELECT id FROM \"ledger[2026]\" ORDER BY id",
+            EngineKind::Postgres,
+        )
+        .unwrap();
+        assert_eq!(bracketed.table, "ledger[2026]");
+        assert_eq!(bracketed.table_qualified, "ledger[2026]");
+
+        // A dot inside a quoted identifier is part of the table name, not a
+        // schema separator.
+        let dotted = keyset_shape(
+            "SELECT id FROM \"ledger.2026\" ORDER BY id",
+            EngineKind::Postgres,
+        )
+        .unwrap();
+        assert_eq!(dotted.table, "ledger.2026");
+        assert_eq!(dotted.table_qualified, "ledger.2026");
+    }
+
+    #[test]
+    fn multi_part_policy_semantics_stay_unchanged_outside_sqlserver() {
+        // PG/MySQL keep the pre-existing split: every component except the
+        // last is the schema, and a database qualifier is not rejected.
+        let deny_schema = TablePolicy {
+            deny: vec![TableRule {
+                schema: Some("db.schema".into()),
+                table: "t".into(),
+            }],
+            ..Default::default()
+        };
+        let error = validate_and_prepare_with_options(
+            "SELECT * FROM db.schema.t",
+            &[],
+            EngineKind::Postgres,
+            WriteMode::ReadOnly,
+            10,
+            PrepareOptions {
+                table_policy: Some(deny_schema),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("not accessible"), "{error}");
+
+        // A rule for the last schema component alone must not match, exactly
+        // as before: the schema is the joined prefix.
+        let deny_last = TablePolicy {
+            deny: vec![TableRule {
+                schema: Some("schema".into()),
+                table: "t".into(),
+            }],
+            ..Default::default()
+        };
+        validate_and_prepare_with_options(
+            "SELECT * FROM db.schema.t",
+            &[],
+            EngineKind::Postgres,
+            WriteMode::ReadOnly,
+            10,
+            PrepareOptions {
+                table_policy: Some(deny_last),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // Keyset shape keeps the same joined-prefix rule outside SQL Server.
+        let shape = keyset_shape(
+            "SELECT id FROM db.schema.t ORDER BY id",
+            EngineKind::Postgres,
+        )
+        .unwrap();
+        assert_eq!(shape.table, "t");
+        assert_eq!(shape.table_qualified, "db.schema.t");
     }
 }

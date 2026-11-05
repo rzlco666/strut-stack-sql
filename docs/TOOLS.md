@@ -230,7 +230,7 @@ DDL tools appear **only** when `--full-tools` **and** `--allow-ddl` (hidden in r
 | `create_table` | Alias — `ddl` CREATE TABLE string |
 | `drop_table` | Alias — needs `confirm: true` |
 | `add_column` | Alias — `table` + `column` |
-| `alter_column` | Alias — MySQL `MODIFY`, Postgres `TYPE`; SQLite unsupported |
+| `alter_column` | Alias — MySQL `MODIFY`, Postgres `TYPE`, SQL Server `ALTER COLUMN` (explicit `nullable` required); SQLite unsupported |
 | `drop_column` | Alias — needs `confirm: true` |
 | `truncate_table` | Alias — needs `confirm: true` |
 

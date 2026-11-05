@@ -126,68 +126,134 @@ impl TablePolicy {
 }
 
 /// A table reference found in a statement.
+///
+/// `database` is set only on SQL Server, for names with more than two
+/// components (`database.schema.table`, and linked-server
+/// `server.database.schema.table`). SQL Server policy enforcement rejects such
+/// references instead of guessing which database the name resolves to.
+/// PostgreSQL/MySQL keep their existing rule: the schema is everything before
+/// the final component.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableRef {
     pub schema: Option<String>,
     pub table: String,
+    pub database: Option<String>,
 }
 
-fn table_ref_from_name(name: &sqlparser::ast::ObjectName) -> TableRef {
-    let qualified = name.to_string().replace(['"', '`'], "");
-    match qualified.rsplit_once('.') {
-        Some((schema, table)) => TableRef {
-            schema: Some(schema.to_string()),
-            table: table.to_string(),
-        },
-        None => TableRef {
+pub(crate) fn object_name_parts(name: &sqlparser::ast::ObjectName) -> Vec<String> {
+    name.0
+        .iter()
+        .map(|part| {
+            part.as_ident()
+                .map(|ident| ident.value.clone())
+                .unwrap_or_else(|| part.to_string())
+        })
+        .collect()
+}
+
+/// Use the AST identifier components, never a rendered name split on `.`:
+/// `dbo.[ledger.2026]]raw]` is schema `dbo` plus table `ledger.2026]raw`, and
+/// `"ledger[2026]"` is one table name that happens to contain brackets/dots.
+fn table_ref_from_name(
+    name: &sqlparser::ast::ObjectName,
+    engine: strut_sql_driver_api::EngineKind,
+) -> TableRef {
+    use strut_sql_driver_api::EngineKind;
+
+    let parts = object_name_parts(name);
+    match parts.as_slice() {
+        [] => TableRef {
             schema: None,
-            table: qualified,
+            table: String::new(),
+            database: None,
         },
-    }
-}
-
-fn collect_from_select(select: &Select, out: &mut Vec<TableRef>) {
-    for item in &select.from {
-        collect_table_factor(&item.relation, out);
-        for join in &item.joins {
-            collect_table_factor(&join.relation, out);
+        [table] => TableRef {
+            schema: None,
+            table: table.clone(),
+            database: None,
+        },
+        [schema, table] => TableRef {
+            schema: Some(schema.clone()),
+            table: table.clone(),
+            database: None,
+        },
+        _ if engine == EngineKind::SqlServer => {
+            let table = parts[parts.len() - 1].clone();
+            let schema = parts[parts.len() - 2].clone();
+            TableRef {
+                schema: Some(schema),
+                table,
+                database: Some(parts[..parts.len() - 2].join(".")),
+            }
+        }
+        _ => {
+            // PG/MySQL multi-part names keep the pre-existing schema/table
+            // split: every component except the last is the schema. This is
+            // SQLServer-only policy hardening, not a cross-engine change.
+            let table = parts[parts.len() - 1].clone();
+            TableRef {
+                schema: Some(parts[..parts.len() - 1].join(".")),
+                table,
+                database: None,
+            }
         }
     }
 }
 
-fn collect_table_factor(factor: &TableFactor, out: &mut Vec<TableRef>) {
+fn collect_from_select(
+    select: &Select,
+    out: &mut Vec<TableRef>,
+    engine: strut_sql_driver_api::EngineKind,
+) {
+    for item in &select.from {
+        collect_table_factor(&item.relation, out, engine);
+        for join in &item.joins {
+            collect_table_factor(&join.relation, out, engine);
+        }
+    }
+}
+
+fn collect_table_factor(
+    factor: &TableFactor,
+    out: &mut Vec<TableRef>,
+    engine: strut_sql_driver_api::EngineKind,
+) {
     match factor {
-        TableFactor::Table { name, .. } => out.push(table_ref_from_name(name)),
-        TableFactor::Derived { subquery, .. } => collect_query(subquery, out),
+        TableFactor::Table { name, .. } => out.push(table_ref_from_name(name, engine)),
+        TableFactor::Derived { subquery, .. } => collect_query(subquery, out, engine),
         TableFactor::NestedJoin {
             table_with_joins, ..
         } => {
-            collect_table_factor(&table_with_joins.relation, out);
+            collect_table_factor(&table_with_joins.relation, out, engine);
             for join in &table_with_joins.joins {
-                collect_table_factor(&join.relation, out);
+                collect_table_factor(&join.relation, out, engine);
             }
         }
         _ => {}
     }
 }
 
-fn collect_query(query: &Query, out: &mut Vec<TableRef>) {
+fn collect_query(query: &Query, out: &mut Vec<TableRef>, engine: strut_sql_driver_api::EngineKind) {
     if let Some(with) = &query.with {
         for cte in &with.cte_tables {
-            collect_query(&cte.query, out);
+            collect_query(&cte.query, out, engine);
         }
     }
-    collect_set_expr(&query.body, out);
+    collect_set_expr(&query.body, out, engine);
 }
 
-fn collect_set_expr(body: &SetExpr, out: &mut Vec<TableRef>) {
+fn collect_set_expr(
+    body: &SetExpr,
+    out: &mut Vec<TableRef>,
+    engine: strut_sql_driver_api::EngineKind,
+) {
     match body {
-        SetExpr::Select(select) => collect_from_select(select, out),
+        SetExpr::Select(select) => collect_from_select(select, out, engine),
         SetExpr::SetOperation { left, right, .. } => {
-            collect_set_expr(left, out);
-            collect_set_expr(right, out);
+            collect_set_expr(left, out, engine);
+            collect_set_expr(right, out, engine);
         }
-        SetExpr::Query(query) => collect_query(query, out),
+        SetExpr::Query(query) => collect_query(query, out, engine),
         _ => {}
     }
 }
@@ -199,72 +265,75 @@ pub fn referenced_tables(
     sql: &str,
     engine: strut_sql_driver_api::EngineKind,
 ) -> Result<Vec<TableRef>, GuardError> {
-    use crate::dialect_for;
-    use sqlparser::parser::Parser;
-
-    let normalized = crate::normalize_sql_for_engine(sql, engine);
-    let statements = Parser::parse_sql(dialect_for(engine).as_ref(), &normalized)
-        .map_err(|e| GuardError::Denied(format!("parse error: {e}")))?;
+    let statements = crate::parse_statements_for_engine(sql, engine)?;
     let mut out = Vec::new();
     for statement in &statements {
-        collect_statement_tables(statement, &mut out);
+        collect_statement_tables(statement, &mut out, engine);
     }
     dedup_tables(out)
 }
 
-fn collect_statement_tables(statement: &Statement, out: &mut Vec<TableRef>) {
-    fn collect_table_with_joins(item: &sqlparser::ast::TableWithJoins, out: &mut Vec<TableRef>) {
-        collect_table_factor(&item.relation, out);
+fn collect_statement_tables(
+    statement: &Statement,
+    out: &mut Vec<TableRef>,
+    engine: strut_sql_driver_api::EngineKind,
+) {
+    fn collect_table_with_joins(
+        item: &sqlparser::ast::TableWithJoins,
+        out: &mut Vec<TableRef>,
+        engine: strut_sql_driver_api::EngineKind,
+    ) {
+        collect_table_factor(&item.relation, out, engine);
         for join in &item.joins {
-            collect_table_factor(&join.relation, out);
+            collect_table_factor(&join.relation, out, engine);
         }
     }
     match statement {
-        Statement::Query(query) => collect_query(query, out),
+        Statement::Query(query) => collect_query(query, out, engine),
         Statement::Insert(insert) => {
             if let sqlparser::ast::TableObject::TableName(name) = &insert.table {
-                out.push(table_ref_from_name(name));
+                out.push(table_ref_from_name(name, engine));
             }
             if let Some(source) = &insert.source {
-                collect_query(source, out);
+                collect_query(source, out, engine);
             }
         }
         Statement::Update(update) => {
-            collect_table_with_joins(&update.table, out);
+            collect_table_with_joins(&update.table, out, engine);
             if let Some(from) = &update.from {
                 let tables = match from {
                     sqlparser::ast::UpdateTableFromKind::BeforeSet(tables)
                     | sqlparser::ast::UpdateTableFromKind::AfterSet(tables) => tables,
                 };
                 for item in tables {
-                    collect_table_with_joins(item, out);
+                    collect_table_with_joins(item, out, engine);
                 }
             }
         }
         Statement::Delete(delete) => {
             for name in &delete.tables {
-                out.push(table_ref_from_name(name));
+                out.push(table_ref_from_name(name, engine));
             }
             let from_tables = match &delete.from {
                 sqlparser::ast::FromTable::WithFromKeyword(tables)
                 | sqlparser::ast::FromTable::WithoutKeyword(tables) => tables,
             };
             for item in from_tables {
-                collect_table_with_joins(item, out);
+                collect_table_with_joins(item, out, engine);
             }
             if let Some(using) = &delete.using {
                 for item in using {
-                    collect_table_with_joins(item, out);
+                    collect_table_with_joins(item, out, engine);
                 }
             }
         }
-        Statement::Explain { statement, .. } => collect_statement_tables(statement, out),
+        Statement::Explain { statement, .. } => collect_statement_tables(statement, out, engine),
         Statement::CreateTable(create) => {
-            out.push(table_ref_from_name(&create.name));
+            out.push(table_ref_from_name(&create.name, engine));
         }
         Statement::Drop { names, .. } => {
             for name in names {
-                out.push(table_ref_from_name(name));
+                out.push(table_ref_from_name(name, engine));
             }
         }
         _ => {}
@@ -297,11 +366,27 @@ pub fn enforce_table_policy(
         crate::duckdb::policy_tables(statement, policy)?
     } else {
         let mut tables = Vec::new();
-        collect_statement_tables(statement, &mut tables);
+        collect_statement_tables(statement, &mut tables, engine);
         tables
     };
     let tables = dedup_tables(tables)?;
     for table in &tables {
+        if engine == strut_sql_driver_api::EngineKind::SqlServer {
+            if let Some(database) = &table.database {
+                // SQL Server's three- and four-part names can resolve to
+                // another database (or linked server). The policy model names
+                // only schema and table, so guessing the connected database
+                // would let a database qualifier bypass deny rules and row
+                // filters. Other engines keep their existing schema/table
+                // split (see `table_ref_from_name`).
+                return Err(GuardError::Denied(format!(
+                    "table '{database}.{}.{}' is database-qualified; table policy can only \
+                     authorize schema.table names on the connected database",
+                    table.schema.as_deref().unwrap_or_default(),
+                    table.table
+                )));
+            }
+        }
         if !policy.allows_table(table.schema.as_deref(), &table.table) {
             return Err(GuardError::Denied(format!(
                 "table '{}' is not accessible to this principal",
@@ -335,13 +420,13 @@ pub fn enforce_table_policy(
     // reference (expression subquery, unusual shape): reject instead of
     // silently running unfiltered.
     let mut after = Vec::new();
-    collect_statement_tables(statement, &mut after);
+    collect_statement_tables(statement, &mut after, engine);
     for table in dedup_tables(after)? {
         if policy
             .row_filter_for(table.schema.as_deref(), &table.table)
             .is_some()
             && !policy.row_filters.is_empty()
-            && !filtered_positions_include(statement, policy, &table)
+            && !filtered_positions_include(statement, policy, &table, engine)
         {
             return Err(GuardError::Denied(format!(
                 "row filter for table '{}' could not be applied to this statement; \
@@ -362,12 +447,13 @@ fn filtered_positions_include(
     statement: &Statement,
     policy: &TablePolicy,
     table: &TableRef,
+    engine: strut_sql_driver_api::EngineKind,
 ) -> bool {
     // The rewrite replaces every supported occurrence with a derived table
     // whose subquery already carries the filter; the remaining check only has
     // to prove the table is no longer reachable as a bare FROM target.
     let mut bare = Vec::new();
-    collect_bare_tables(statement, &mut bare);
+    collect_bare_tables(statement, &mut bare, engine);
     !bare.iter().any(|t| {
         t == table
             && policy
@@ -376,18 +462,26 @@ fn filtered_positions_include(
     })
 }
 
-fn collect_bare_tables(statement: &Statement, out: &mut Vec<TableRef>) {
+fn collect_bare_tables(
+    statement: &Statement,
+    out: &mut Vec<TableRef>,
+    engine: strut_sql_driver_api::EngineKind,
+) {
     // Same traversal as collect_statement_tables but stops at Derived
     // subqueries: a filtered table wrapped in a derived table is no longer a
     // bare reference.
-    fn select_bare(select: &Select, out: &mut Vec<TableRef>) {
+    fn select_bare(
+        select: &Select,
+        out: &mut Vec<TableRef>,
+        engine: strut_sql_driver_api::EngineKind,
+    ) {
         for item in &select.from {
             if let TableFactor::Table { name, .. } = &item.relation {
-                out.push(table_ref_from_name(name));
+                out.push(table_ref_from_name(name, engine));
             }
             for join in &item.joins {
                 if let TableFactor::Table { name, .. } = &join.relation {
-                    out.push(table_ref_from_name(name));
+                    out.push(table_ref_from_name(name, engine));
                 }
             }
         }
@@ -395,10 +489,10 @@ fn collect_bare_tables(statement: &Statement, out: &mut Vec<TableRef>) {
     match statement {
         Statement::Query(query) => {
             if let SetExpr::Select(select) = query.body.as_ref() {
-                select_bare(select, out);
+                select_bare(select, out, engine);
             }
         }
-        Statement::Explain { statement, .. } => collect_bare_tables(statement, out),
+        Statement::Explain { statement, .. } => collect_bare_tables(statement, out, engine),
         _ => {}
     }
 }
@@ -471,7 +565,7 @@ fn apply_filter_to_factor(
             Ok(())
         }
         TableFactor::Table { name, alias, .. } => {
-            let table = table_ref_from_name(name);
+            let table = table_ref_from_name(name, engine);
             let Some(filter) = policy.row_filter_for(table.schema.as_deref(), &table.table) else {
                 return Ok(());
             };
@@ -480,7 +574,15 @@ fn apply_filter_to_factor(
             let inner = parse_single_query(&dialect_sql, engine)?;
             let alias = alias.clone().or(Some(TableAlias {
                 explicit: false,
-                name: sqlparser::ast::Ident::new(table.table.clone()),
+                name: if engine == strut_sql_driver_api::EngineKind::SqlServer {
+                    name.0
+                        .last()
+                        .and_then(|part| part.as_ident())
+                        .cloned()
+                        .unwrap_or_else(|| sqlparser::ast::Ident::new(table.table.clone()))
+                } else {
+                    sqlparser::ast::Ident::new(table.table.clone())
+                },
                 columns: vec![],
                 at: None,
             }));
@@ -500,10 +602,8 @@ fn parse_single_query(
     sql: &str,
     engine: strut_sql_driver_api::EngineKind,
 ) -> Result<Query, GuardError> {
-    use crate::dialect_for;
-    use sqlparser::parser::Parser;
-    let statements = Parser::parse_sql(dialect_for(engine).as_ref(), sql)
-        .map_err(|e| GuardError::Denied(format!("row filter does not parse: {e}")))?;
+    let statements = crate::parse_statements_for_engine(sql, engine)
+        .map_err(|error| GuardError::Denied(format!("row filter does not parse: {error}")))?;
     match statements.into_iter().next() {
         Some(Statement::Query(query)) => Ok(*query),
         _ => Err(GuardError::Denied("row filter is not a SELECT".into())),

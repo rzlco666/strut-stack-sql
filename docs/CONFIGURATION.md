@@ -32,6 +32,11 @@ whenever it is selected:**
 > selected with the `--config` CLI flag only. (Older docs mentioned
 > `MCP_SQL_CONFIG`; it never existed in the code and has been removed.)
 
+SQL Server uses `--url`, `--url-env`, `DATABASE_URL`, or a TOML source.
+Neither `SQLSERVER_URL` nor `SQLSERVER_DATABASE_URL` is automatically
+discovered; the latter is the explicit live-test variable and can be selected
+with `--url-env SQLSERVER_DATABASE_URL`.
+
 ## Table rules, row filters and masking (`[[grants]]`)
 
 A grant can narrow what its principal sees beyond the tier. All four fields are
@@ -147,6 +152,131 @@ POSTGRES_PASSWORD=<redacted>
 POSTGRES_DB=app
 ```
 
+## SQL Server
+
+The built-in `strut-sql-driver-sqlserver` driver uses Tiberius 0.13 with
+Rustls/TDS 7.3. Its engine label is `sqlserver`; URLs accept either
+`sqlserver://` or `mssql://`:
+
+```env
+# Placeholder secret only; replace via your secret manager/environment.
+DATABASE_URL=sqlserver://agent_reader:replace%3Ame@sql.example.com:1433/app
+```
+
+Username, password and the single database path segment are percent-decoded
+(for example `%3A` for `:` and `%40` for `@` in credentials). Host, non-empty
+username and database are required; port defaults to **1433**. This is SQL
+Server username/password authentication, not an ADO connection string or
+integrated/Windows authentication.
+
+```bash
+# With SQLSERVER_DATABASE_URL already supplied securely:
+strut-stack-sql --url-env SQLSERVER_DATABASE_URL --full-tools
+```
+
+Only these URL query options are accepted, once each, with literal
+`true`/`false` values:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `encrypt` | `true` | Require encrypted TDS; `false` explicitly disables TLS. |
+| `trust_server_certificate` | `false` | Validate the server certificate; `true` explicitly bypasses certificate validation. |
+
+Production should retain both defaults and use a certificate trusted by the
+client. For an isolated disposable server with a self-signed certificate,
+`?encrypt=true&trust_server_certificate=true` is an explicit development-only
+opt-in; it is not a secure production setting. Unknown/duplicate options,
+URL fragments and invalid percent escapes are rejected.
+
+### SQL Server tools and boundaries
+
+All 20 existing tools use the same source authorization and grant ceilings;
+SQL Server adds no tool names or policy bypass. Read-only is the default.
+
+- **`execute_sql`:** public parameters use `?`, not SQL Server variables.
+  The driver translates real placeholders to `@P1`, `@P2`, … while preserving
+  quoted text, escaped bracket identifiers, Unicode strings and nested
+  comments. Native `@PN` numbering is validated at the concrete driver/catalog
+  boundary, not exposed as public tool parameter syntax. Values are bound,
+  never concatenated. One statement per SQL string still applies, including
+  each item in a governed batch.
+- **Row caps and pages:** the guard generates `TOP`/ordered `OFFSET … FETCH`,
+  never `LIMIT`. Literal row counts are clamped where safe. Caller TOP
+  expressions, TOP PERCENT/WITH TIES and parameterized bounds are preserved
+  and marked `limit_unverified`; hard driver fetch caps still apply.
+  Offset pagination preserves existing TOP/FETCH result-set semantics using
+  shared client-side slicing when pushdown would change them. An unordered
+  SELECT can also use a capped-prefix/client-slice fallback. Keyset pagination
+  supports the shared restricted single-table/single-order-key shape and uses
+  TOP for its probe; it does not accept an existing caller TOP. As with other
+  engines, use deterministic ordering for stable pages.
+- **`analyze_query_performance`:** SELECT-like queries use `SHOWPLAN_XML`
+  for estimates; `analyze:true` uses `STATISTICS XML` and really executes the
+  query. Actual plans require `--allow-explain-analyze` plus process write
+  mode and a Write grant. The login needs query permissions and `SHOWPLAN`.
+  Modes are managed on the same connection, and the tool returns normalized
+  plan/advisor output rather than the query's data result sets. Raw `EXPLAIN`,
+  user `SET SHOWPLAN_XML` and `SET STATISTICS XML` are not public SQL paths.
+  Advice is text only, never executed.
+  Estimated plans compile typed local parameter declarations without embedding
+  values, so selectivity estimates treat parameters as unknown. SQL Server
+  omits actual plans for some trivial scalar statements; the advisor returns
+  an explicit no-plan error rather than relabeling an estimate as an actual plan.
+- **Discovery/introspection:** `list_schemas`, `list_tables`,
+  `describe_table`, index/FK tools, `search_objects`, overview and relationship/
+  join/context tools use catalogs from the connected database and share table
+  visibility rules. `schema` means `dbo` or another SQL Server schema, **not**
+  a database. Omitted/empty scope resolves via `SCHEMA_NAME()`; `schema:"*"`
+  requests wildcard scope where supported. Composite primary/foreign-key
+  column order is preserved. Routines may be listed in catalog metadata but
+  cannot be executed through the SQL guard. Some catalog page/filter methods
+  use shared in-memory fallbacks rather than server-side pagination.
+- **DDL:** all seven existing structured tools retain their tier/confirmation
+  gates and use bracket-quoted identifiers; `add_column` emits SQL Server
+  `ADD`, and `alter_column` emits `ALTER COLUMN`. Structured type alteration
+  requires explicit `nullable:true` or `nullable:false`, so a type change
+  cannot silently loosen NOT NULL. Supported raw statement families are in
+  [CAPABILITIES.md](CAPABILITIES.md); parser support is not unrestricted T-SQL.
+- **Shared controls:** table allow/deny rules, row filters, denied columns and
+  masks apply to execution, pagination, summaries, export and the advisor;
+  schema tools respect table visibility. Procedure execution, transaction
+  control, user `SET`/`USE` and dangerous file/network functions remain denied
+  in every tier.
+  With a SQL Server table policy active, database-qualified table references
+  fail closed; use schema-qualified names in the configured database.
+  Four-part linked-server references are denied in every tier.
+
+### SQL Server limitations
+
+- `ApplicationIntent=ReadOnly` is routing intent, **not database write
+  enforcement**. Use least-privilege credentials as well as the shared guard.
+- Statement timeouts are client-side. Timeout/cancellation/protocol errors
+  discard the socket rather than reuse pending TDS state; this does **not**
+  guarantee server-side cancellation or completed rollback. A row-cap early
+  exit also discards the connection when results remain unread.
+- Result columns conservatively report `nullable:true` because Tiberius does
+  not expose query-result nullability; catalog nullability remains exact.
+  Empty row results retain their column metadata.
+- Only the first row result set is returned. Later sets are drained without
+  retaining their rows; result caps may end draining by discarding the socket.
+- Time and datetimeoffset are strings, XML is text, and JSON-looking text
+  remains text. JSON parameters serialize to text; SQL arrays are unsupported
+  (use explicit JSON). Binary values use the shared tagged-hex representation.
+  Datetime parameters have 100ns precision. Decimal/numeric binds must fit
+  precision/scale 38; money/smallmoney use Tiberius' f64 decoder, so cast to
+  `decimal(19,4)` for exact monetary values.
+- Row counts are approximate catalog statistics, not exact `COUNT(*)`.
+  Ordinary rowstore table/index bytes use allocation-unit accounting
+  (including LOB/overflow pages). FILESTREAM table bytes and unsupported
+  storage paths (XML/spatial/columnstore or memory-optimized sizes) are
+  unavailable, not zero or partial totals. Catalog permissions can restrict
+  what a login can discover.
+
+The driver reports capability notes for client-only timeouts, conservative
+result nullability and read-only intent when requested. Live test commands:
+[CONTRIBUTING.md](CONTRIBUTING.md#databases-for-integration-tests).
+
+
 ## Multi-source TOML
 
 The example file in this repo is
@@ -164,6 +294,12 @@ url_env = "DATABASE_URL"
 name = "analytics"
 url_env = "ANALYTICS_DATABASE_URL"
 engine = "postgres"
+
+# Optional SQL Server source (set its environment variable first):
+# [[sources]]
+# name = "reporting"
+# url_env = "SQLSERVER_DATABASE_URL"
+# engine = "sqlserver"
 ```
 
 Rules:

@@ -23,7 +23,26 @@ MYSQL_DATABASE_URL=mysql://demo:demo@localhost:3307/demo \
 
 # SQLite (in-process, no Docker)
 cargo test --test sqlite_integration
+
+# SQL Server — disposable database only; these tests create/drop objects.
+# Provision SQLSERVER_DATABASE_URL securely (sqlserver:// or mssql://).
+# It is explicit test configuration, not automatic server env discovery.
+CARGO_BUILD_JOBS=1 cargo +1.99 test -p strut-sql-driver-sqlserver \
+  --test conformance -- --ignored --test-threads=1
+
+# Root tool/guard/policy/catalog/plan integration against SQL Server:
+CARGO_BUILD_JOBS=1 cargo +1.99 test --test sqlserver_integration \
+  -- --ignored --test-threads=1
 ```
+
+Both SQL Server commands require the exported `SQLSERVER_DATABASE_URL`.
+Do not run them against production or a shared database: fixtures create and
+drop named tables/routines. The login needs fixture DDL/DML and `SHOWPLAN`
+permissions. TLS/certificate validation defaults remain enabled; a disposable
+self-signed development server requires explicit
+`trust_server_certificate=true` in the URL, not a code default change.
+See [SQL Server configuration and limitations](CONFIGURATION.md#sql-server).
+These are runnable gates, not a claim that the current worktree passed them.
 
 ### Benchmarks
 
@@ -64,7 +83,7 @@ chore: release v2.0.0 branding
 1. SQL guard integrity (deny before pool checkout)
 2. Token efficiency (tool surface + columnar shape)
 3. No secret leakage
-4. Tri-engine correctness (PG + MySQL + SQLite)
+4. Four-engine correctness (PostgreSQL + MySQL + SQLite + SQL Server), including engine-specific guard syntax, bind/codec behavior, catalogs and XML plans
 
 ## Packaging maintenance (release manager)
 

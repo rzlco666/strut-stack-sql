@@ -192,6 +192,7 @@ pub(crate) fn policy_tables(
                     .then(|| name.0[0].as_ident().map(|ident| ident.value.clone()))
                     .flatten(),
                 table: last.value.clone(),
+                database: None,
             };
             self.tables.push(table);
             ControlFlow::Continue(())

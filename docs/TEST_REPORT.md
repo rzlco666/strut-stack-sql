@@ -1,8 +1,9 @@
 # Test Report — strut-stack-sql 2.0.0
 
-What the automated tests in this repository actually cover, counted from the
-code — no scorecards, no self-assessment. If a number here disagrees with a
-fresh count from the tree, the tree wins and this file is the bug.
+The release-freeze census below is historical: it predates the SQL Server
+driver. The later [SQL Server R3-02 verification](#sql-server-r3-02-verification)
+records exercised feature gates separately; do not quote the old census as
+the current workspace total.
 
 - **Version:** 2.0.0
 - **Counted on:** 2026-11-04 (final release-freeze recount, `cargo test --workspace`)
@@ -86,3 +87,48 @@ fresh count from the tree, the tree wins and this file is the bug.
   job supplies both, but fork PRs without secrets skip the secret-gated job.
 - Performance is not asserted by `cargo test`; see
   [BENCHMARKS.md](BENCHMARKS.md) for measured numbers and their limits.
+
+## SQL Server R3-02 verification
+
+Local feature verification on 2026-11-04, `feat/sql-r3-sqlserver`, using
+`cargo +1.99` (1.99.1), `CARGO_BUILD_JOBS=1`, and a debug workspace binary.
+The live database was a disposable SQL Server 2022 Developer CU27-GDR
+16.0.4305.5 container bound only to loopback; no production server was used.
+
+| Gate | Observed result | Exit |
+|---|---|---:|
+| `cargo +1.99 fmt --all -- --check` | Passed | 0 |
+| `cargo +1.99 check --workspace --all-targets` | Passed | 0 |
+| `cargo +1.99 clippy --workspace --all-targets -- -D warnings` | Passed | 0 |
+| `cargo +1.99 test --workspace --all-targets` | 436 passed, 28 ignored, 31 suites | 0 |
+| `cargo +1.99 test --workspace --doc` | Passed, 12 suites | 0 |
+| SQL Server driver live conformance/boundaries | 6 passed | 0 |
+| Root `sqlserver_integration` live cases | 5 passed | 0 |
+| Real SQL Server MCP stdio smoke | 37 scenarios, all 20 existing tool names exercised; harness completed without exceptions | — |
+| Repo MCP conformance, SQLite fixtures | 51 passed, 0 failed, 3 optional | 0 |
+| Client configuration matrix | 16 marked snippets checked; smoke passed | 0 |
+| `cargo +1.99 audit` | 396 dependencies scanned; 4 inherited warnings | 0 |
+
+Live cases prove command affected counts and catalog composite keys, result
+codecs/empty metadata/caps, cancellation-safe connection discard, bound
+estimated/actual XML plans and mode cleanup, policy/masking/pagination,
+quoted dotted/bracket identifiers and cursor lookup, XML set-query caps,
+T-SQL money literals, and MERGE terminators after line comments.
+The real-process smoke exercises DDL, queries,
+summaries, all catalog tools, plans, and filesystem-DMF denial.
+A killed idle connection is replaced before the next user statement. A
+separate disposable-server check enables the NOCOUNT login default and
+proves the first bound INSERT still reports one affected row; the server
+default is restored afterward.
+
+Machine evidence is generated under `target/conformance/`:
+`sqlserver-live-mcp.json`, `sqlserver-final-report.json`, and
+`sqlserver-final-clients.json`. The MCP conformance runner's SQLite fixtures
+are not evidence of SQL Server integration; the explicit live cases and
+SQL Server MCP smoke provide that evidence.
+
+Audit warnings are inherited from the base lockfile: `event-listener 5.4.1`
+(`RUSTSEC-2026-0221`), `tokio 1.52.3` (`RUSTSEC-2026-0386`),
+and yanked `chacha20 0.10.1` / `spin 0.9.8`. No advisory ignore was added.
+Release optimization, a public server, and production credentials were not
+part of this local verification.

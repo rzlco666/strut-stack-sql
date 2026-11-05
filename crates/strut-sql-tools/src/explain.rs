@@ -1,6 +1,6 @@
 //! EXPLAIN advisor v2 (PRD-F3-04/05/06).
 //!
-//! Plans from PostgreSQL, MySQL, SQLite and DuckDB are normalized to one flat node
+//! Plans from PostgreSQL, MySQL, SQLite, DuckDB, ClickHouse and SQL Server are normalized to one flat node
 //! model. Detection is deterministic rule checking over plan + catalog
 //! stats; nothing here executes DDL. `EXPLAIN ANALYZE` is opt-in at the
 //! handler because it executes the statement.
@@ -17,6 +17,8 @@ use strut_sql_guard::{detect_anti_patterns, GuardError, PatternContext, WriteMod
 use crate::bind::to_sql_values;
 
 mod duckdb;
+#[path = "explain_sqlserver.rs"]
+mod sqlserver;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ExplainError {
@@ -147,6 +149,11 @@ pub async fn analyze_query_with_options(
             }
         )));
     }
+    if engine == EngineKind::SqlServer && options.analyze && !write_mode.allows_dml() {
+        return Err(ExplainError::Guard(GuardError::Denied(
+            "analyze:true executes the query and requires --allow-writes".into(),
+        )));
+    }
     let prepared = strut_sql_guard::validate_and_prepare_with_options(
         sql,
         params,
@@ -160,6 +167,11 @@ pub async fn analyze_query_with_options(
         },
     )?;
 
+    if engine == EngineKind::SqlServer && !prepared.class.is_select_like() {
+        return Err(ExplainError::Other(
+            "analyze_query_performance only supports SELECT-like queries".into(),
+        ));
+    }
     if !prepared.class.is_select_like()
         && prepared.class.label() != "SELECT"
         && prepared.class.label() != "EXPLAIN"
@@ -185,6 +197,7 @@ pub async fn analyze_query_with_options(
         (EngineKind::Sqlite, true) => unreachable!("checked above"),
         (EngineKind::ClickHouse, false) => format!("EXPLAIN PLAN {}", prepared.sql),
         (EngineKind::ClickHouse, true) => unreachable!("checked above"),
+        (EngineKind::SqlServer, _) => prepared.sql.clone(),
     };
 
     let bound = BoundQuery {
@@ -193,7 +206,14 @@ pub async fn analyze_query_with_options(
         row_cap: None,
         fetch_rows: true,
     };
-    let result = tokio::time::timeout(timeout, driver.execute(&bound))
+    let execute = async {
+        if engine == EngineKind::SqlServer {
+            driver.explain(&bound, options.analyze).await
+        } else {
+            driver.execute(&bound).await
+        }
+    };
+    let result = tokio::time::timeout(timeout, execute)
         .await
         .map_err(|_| ExplainError::Other("explain timeout".into()))?
         .map_err(|error| {
@@ -240,6 +260,7 @@ pub async fn analyze_query_with_options(
             let lines = text_rows(&result.rows);
             normalize_clickhouse(&prepared.sql, lines)
         }
+        EngineKind::SqlServer => sqlserver::normalize(&prepared.sql, &result.rows)?,
     };
     summary.analyze = options.analyze;
 
@@ -786,6 +807,11 @@ fn advise(summary: &mut ExplainSummary, stats: &[TableStats], engine: EngineKind
             || upper.contains("SCAN TABLE")
             || upper == "SCAN"
             || upper == "ALL"
+            || (engine == EngineKind::SqlServer
+                && matches!(
+                    upper.as_str(),
+                    "TABLE SCAN" | "INDEX SCAN" | "CLUSTERED INDEX SCAN"
+                ))
             || upper.contains("FULL SCAN");
         if full_scan {
             let (severity, message) = match estimated_rows {
@@ -995,6 +1021,7 @@ fn quote_ident(engine: EngineKind, ident: &str) -> String {
         EngineKind::MySql | EngineKind::ClickHouse => {
             format!("`{}`", ident.replace('`', "``"))
         }
+        EngineKind::SqlServer => format!("[{}]", ident.replace(']', "]]")),
         _ => format!("\"{}\"", ident.replace('"', "\"\"")),
     }
 }

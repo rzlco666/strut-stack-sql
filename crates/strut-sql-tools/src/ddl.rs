@@ -623,11 +623,17 @@ fn build_ddl_sql_unchecked(
             let qualified = qualify_table(params.schema.as_deref(), table, engine);
             let data_type = validate_column_type(&column.data_type, engine)?;
             let null_sql = match column.nullable {
+                Some(true) if engine == EngineKind::SqlServer => " NULL",
                 Some(true) | None => "",
                 Some(false) => " NOT NULL",
             };
+            let add = if engine == EngineKind::SqlServer {
+                "ADD"
+            } else {
+                "ADD COLUMN"
+            };
             Ok(format!(
-                "ALTER TABLE {qualified} ADD COLUMN {} {}{}",
+                "ALTER TABLE {qualified} {add} {} {}{}",
                 quote_ident(&column.name, engine),
                 data_type,
                 null_sql
@@ -664,6 +670,18 @@ fn build_ddl_sql_unchecked(
                     }
                     Ok(format!(
                         "ALTER TABLE {qualified} ALTER COLUMN {col} TYPE {data_type}"
+                    ))
+                }
+                EngineKind::SqlServer => {
+                    let null_sql = match column.nullable {
+                        Some(true) => " NULL",
+                        Some(false) => " NOT NULL",
+                        None => return Err(tool_error(
+                            "alter_column on SQL Server requires explicit nullable:true or nullable:false to avoid changing nullability implicitly",
+                        )),
+                    };
+                    Ok(format!(
+                        "ALTER TABLE {qualified} ALTER COLUMN {col} {data_type}{null_sql}"
                     ))
                 }
                 EngineKind::Sqlite => Err(tool_error(
@@ -718,6 +736,7 @@ const TYPE_WORDS: &[&str] = &[
     "DECIMAL",
     "NUMERIC",
     "MONEY",
+    "SMALLMONEY",
     "CHAR",
     "VARCHAR",
     "CHARACTER",
@@ -744,10 +763,14 @@ const TYPE_WORDS: &[&str] = &[
     "TIMESTAMP",
     "TIMESTAMPTZ",
     "DATETIME",
+    "DATETIME2",
+    "DATETIMEOFFSET",
+    "SMALLDATETIME",
     "YEAR",
     "JSON",
     "JSONB",
     "UUID",
+    "UNIQUEIDENTIFIER",
     "INET",
     "CIDR",
     "MACADDR",
@@ -759,6 +782,11 @@ const TYPE_WORDS: &[&str] = &[
     "WITHOUT",
     "ZONE",
     "ARRAY",
+    "MAX",
+    "IMAGE",
+    "NTEXT",
+    "ROWVERSION",
+    "SQL_VARIANT",
 ];
 
 /// SQL-SEC-14: validate a user-supplied column `type` before it is spliced
@@ -982,6 +1010,7 @@ fn quote_ident(name: &str, engine: EngineKind) -> String {
             let trimmed = name.trim().trim_matches('`');
             format!("`{}`", trimmed.replace('`', "``"))
         }
+        EngineKind::SqlServer => format!("[{}]", name.replace(']', "]]")),
         EngineKind::Postgres | EngineKind::Sqlite | EngineKind::DuckDb => {
             let trimmed = name.trim().trim_matches('"');
             format!("\"{}\"", trimmed.replace('"', "\"\""))
@@ -1098,6 +1127,88 @@ mod tests {
             dry_run: None,
             source: None,
         }
+    }
+
+    #[test]
+    fn sqlserver_structured_columns_use_tsql_and_escape_brackets() {
+        let mut params = mutate_params(SchemaMutateAction::AddColumn, None, Some("NVARCHAR(MAX)"));
+        params.schema = Some("s]x".into());
+        params.table = Some("t]x".into());
+        let column = params.column.as_mut().unwrap();
+        column.name = "c]x".into();
+        column.nullable = Some(false);
+        assert_eq!(
+            build_ddl_sql(&params, EngineKind::SqlServer).unwrap(),
+            "ALTER TABLE [s]]x].[t]]x] ADD [c]]x] NVARCHAR(MAX) NOT NULL"
+        );
+        params.action = SchemaMutateAction::AlterColumn;
+        params.column.as_mut().unwrap().nullable = Some(true);
+        assert_eq!(
+            build_ddl_sql(&params, EngineKind::SqlServer).unwrap(),
+            "ALTER TABLE [s]]x].[t]]x] ALTER COLUMN [c]]x] NVARCHAR(MAX) NULL"
+        );
+        params.column.as_mut().unwrap().nullable = Some(false);
+        assert!(build_ddl_sql(&params, EngineKind::SqlServer)
+            .unwrap()
+            .ends_with("NVARCHAR(MAX) NOT NULL"));
+        params.action = SchemaMutateAction::DropColumn;
+        assert_eq!(
+            build_ddl_sql(&params, EngineKind::SqlServer).unwrap(),
+            "ALTER TABLE [s]]x].[t]]x] DROP COLUMN [c]]x]"
+        );
+    }
+
+    #[test]
+    fn sqlserver_alter_column_requires_explicit_nullability() {
+        let mut params = mutate_params(SchemaMutateAction::AlterColumn, None, Some("BIGINT"));
+        let error = build_ddl_sql(&params, EngineKind::SqlServer).unwrap_err();
+        assert!(error.message.contains("requires explicit nullable"));
+        params.column.as_mut().unwrap().nullable = Some(false);
+        assert_eq!(
+            build_ddl_sql(&params, EngineKind::SqlServer).unwrap(),
+            "ALTER TABLE [t] ALTER COLUMN [c] BIGINT NOT NULL"
+        );
+        params.column.as_mut().unwrap().nullable = Some(true);
+        assert_eq!(
+            build_ddl_sql(&params, EngineKind::SqlServer).unwrap(),
+            "ALTER TABLE [t] ALTER COLUMN [c] BIGINT NULL"
+        );
+    }
+
+    #[test]
+    fn sqlserver_alter_column_prepared_sql_stays_tsql() {
+        // The guard parses TSQL `ALTER COLUMN <type>` through a canonical form
+        // because sqlparser 0.62 has no grammar for it. The SQL the tool then
+        // sends to SQL Server must remain the original TSQL: SQL Server rejects
+        // the MySQL `MODIFY COLUMN` form.
+        let mut params =
+            mutate_params(SchemaMutateAction::AlterColumn, None, Some("NVARCHAR(MAX)"));
+        params.column.as_mut().unwrap().nullable = Some(false);
+        let sql = build_ddl_sql(&params, EngineKind::SqlServer).unwrap();
+        let prepared =
+            validate_and_prepare(&sql, &[], EngineKind::SqlServer, WriteMode::AllowDdl, 100)
+                .unwrap();
+        assert_eq!(prepared.class.sql_class(), SqlClass::Ddl);
+        assert!(prepared.sql.contains("ALTER COLUMN"), "{}", prepared.sql);
+        assert!(
+            prepared.sql.contains("NVARCHAR(MAX) NOT NULL"),
+            "{}",
+            prepared.sql
+        );
+        assert!(!prepared.sql.contains("MODIFY"), "{}", prepared.sql);
+    }
+
+    #[test]
+    fn sqlserver_ddl_fragments_cannot_escape_structured_identifiers() {
+        let mut params = mutate_params(SchemaMutateAction::AddColumn, None, Some("INT"));
+        params.column.as_mut().unwrap().name = "id]; DROP TABLE secrets; --".into();
+        let sql = build_ddl_sql(&params, EngineKind::SqlServer).unwrap();
+        assert_eq!(
+            sql,
+            "ALTER TABLE [t] ADD [id]]; DROP TABLE secrets; --] INT"
+        );
+        params.column.as_mut().unwrap().data_type = "INT; DROP TABLE secrets".into();
+        assert!(build_ddl_sql(&params, EngineKind::SqlServer).is_err());
     }
 
     // --- SQL-SEC-14: data_type allowlist ---

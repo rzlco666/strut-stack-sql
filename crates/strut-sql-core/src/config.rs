@@ -245,7 +245,7 @@ pub enum Command {
 #[command(
     name = "strut-stack-sql",
     version,
-    about = "Strut Stack SQL — token-efficient MCP for MySQL, PostgreSQL, SQLite, DuckDB, and ClickHouse"
+    about = "Strut Stack SQL — token-efficient MCP for MySQL, PostgreSQL, SQLite, DuckDB, ClickHouse, and SQL Server"
 )]
 pub struct Cli {
     /// Maintenance subcommands. Without one the server starts normally.
@@ -1599,6 +1599,7 @@ pub fn source_endpoint(url: &str, engine: EngineKind) -> SourceEndpoint {
             EngineKind::Sqlite => "sqlite".into(),
             EngineKind::DuckDb => "duckdb".into(),
             EngineKind::ClickHouse => "clickhouse".into(),
+            EngineKind::SqlServer => "sqlserver".into(),
         },
         host,
         port,
@@ -1653,6 +1654,21 @@ fn database_from_url(url: &str, engine: EngineKind) -> Option<String> {
             let db = path.split('/').nth(1)?.trim();
             (!db.is_empty()).then(|| db.to_string())
         }
+        EngineKind::SqlServer => {
+            let parsed = url::Url::parse(url).ok()?;
+            if !matches!(parsed.scheme(), "sqlserver" | "mssql") {
+                return None;
+            }
+            let database = parsed.path().strip_prefix('/')?;
+            if database.is_empty() || database.contains('/') {
+                None
+            } else {
+                percent_encoding::percent_decode_str(database)
+                    .decode_utf8()
+                    .ok()
+                    .map(|name| name.into_owned())
+            }
+        }
         EngineKind::Postgres | EngineKind::MySql => {
             let lower = url.to_ascii_lowercase();
             let rest = if lower.starts_with("postgresql://") {
@@ -1706,6 +1722,50 @@ mod tests {
         assert_eq!(
             detect_engine(None, "sqlite://./data.db").unwrap(),
             EngineKind::Sqlite
+        );
+    }
+
+    #[test]
+    fn sqlserver_endpoint_omits_credentials_and_decodes_database() {
+        let endpoint = source_endpoint(
+            "sqlserver://reader:private@db.example.com/warehouse%20reports?encrypt=true#ignored",
+            EngineKind::SqlServer,
+        );
+        assert_eq!(endpoint.engine, "sqlserver");
+        assert_eq!(endpoint.host.as_deref(), Some("db.example.com"));
+        assert_eq!(endpoint.port, Some(1433));
+        assert_eq!(endpoint.database.as_deref(), Some("warehouse reports"));
+        let public_metadata = toml::to_string(&endpoint).unwrap();
+        assert!(!public_metadata.contains("reader"));
+        assert!(!public_metadata.contains("private"));
+        assert!(!public_metadata.contains("encrypt"));
+        assert!(!public_metadata.contains("ignored"));
+
+        let alias = source_endpoint(
+            "mssql://reader:private@[::1]:14333/warehouse",
+            EngineKind::SqlServer,
+        );
+        assert_eq!(alias.engine, "sqlserver");
+        assert_eq!(alias.host.as_deref(), Some("::1"));
+        assert_eq!(alias.port, Some(14333));
+        assert_eq!(alias.database.as_deref(), Some("warehouse"));
+        for url in [
+            "sqlserver://localhost",
+            "sqlserver://localhost/warehouse/reports",
+            "sqlserver://localhost/%FF",
+        ] {
+            assert!(source_endpoint(url, EngineKind::SqlServer)
+                .database
+                .is_none());
+        }
+        assert_eq!(
+            source_endpoint(
+                "sqlserver://localhost/warehouse%2Freports",
+                EngineKind::SqlServer
+            )
+            .database
+            .as_deref(),
+            Some("warehouse/reports")
         );
     }
 
@@ -2186,6 +2246,44 @@ max_rows = 7
         ));
         std::fs::write(&path, body).expect("write temp toml");
         path
+    }
+
+    #[tokio::test]
+    async fn cli_sqlserver_url_resolves_without_connecting() {
+        let cli = Cli::try_parse_from([
+            "strut-stack-sql",
+            "--url",
+            "sqlserver://reader:private@127.0.0.1:1/warehouse",
+        ])
+        .unwrap();
+        let config = load_config(&cli).await.unwrap();
+        let source = &config.sources[&config.default_source];
+        assert_eq!(source.engine, EngineKind::SqlServer);
+        assert!(!config.ephemeral);
+        assert_eq!(
+            source_endpoint(&source.url, source.engine)
+                .database
+                .as_deref(),
+            Some("warehouse")
+        );
+    }
+
+    #[tokio::test]
+    async fn toml_sqlserver_hints_resolve_lazy_sources() {
+        for (tag, engine, scheme) in [
+            ("sqlserver-hint", "sqlserver", "mssql"),
+            ("mssql-hint", "mssql", "sqlserver"),
+        ] {
+            let body = format!(
+                "[[sources]]\nname = \"warehouse\"\nengine = \"{engine}\"\nurl = \"{scheme}://reader:private@127.0.0.1:1/reports\"\n"
+            );
+            let path = write_temp_toml(tag, &body);
+            let config = load_config(&test_cli(Some(path.clone()))).await;
+            std::fs::remove_file(path).unwrap();
+            let config = config.unwrap();
+            assert_eq!(config.default_source, "warehouse");
+            assert_eq!(config.sources["warehouse"].engine, EngineKind::SqlServer);
+        }
     }
 
     #[tokio::test]
