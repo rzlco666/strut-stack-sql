@@ -396,7 +396,7 @@ impl McpSqlServer {
             for q in queries {
                 match q {
                     BatchQueryItem::Legacy(sql) => acc.push_str(sql),
-                    BatchQueryItem::Parameterized { sql, .. } => acc.push_str(sql),
+                    BatchQueryItem::Parameterized(item) => acc.push_str(&item.sql),
                 }
                 acc.push('\n');
             }
