@@ -28,6 +28,30 @@ curl -fsSL .../install.sh | bash -s -- --version 2.0.0 --prefix ~/.local
 
 Installs `~/.local/bin/strut-stack-sql`. Add `~/.local/bin` to `PATH` if needed.
 
+### One command: install + AI setup
+
+`--setup` installs the binary and then configures every supported AI tool it
+detects (Claude Code, Cursor, VS Code, Claude Desktop, Codex, OpenCode, Windsurf,
+Zed). Existing entries for other servers are kept, and every file it touches is
+backed up first. It never uploads anything.
+
+```bash
+# Install + configure every detected tool
+curl -fsSL .../install.sh | bash -s -- --setup
+
+# With your database URL baked into the tool configs
+curl -fsSL .../install.sh | bash -s -- --setup --database-url 'postgresql://user:pass@localhost:5432/mydb'
+
+# Only specific tools, project-local configs, or setup-only (binary installed)
+curl -fsSL .../install.sh | bash -s -- --setup --tools cursor,vscode,opencode
+curl -fsSL .../install.sh | bash -s -- --setup --project
+curl -fsSL .../install.sh | bash -s -- --setup --skip-install
+```
+
+Without `--database-url` (and without `DATABASE_URL` exported), configs reference
+`${env:DATABASE_URL}` where the tool supports it (Codex forwards it instead).
+Run `install.sh --help` for every flag.
+
 ### Release asset names
 
 | Platform | Asset |
