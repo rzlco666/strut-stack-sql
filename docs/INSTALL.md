@@ -73,8 +73,12 @@ brew install rzlco666/tap/strut-stack-sql
 ## Docker (GHCR)
 
 ```bash
-docker run --rm -i -e DATABASE_URL=... ghcr.io/rzlco666/strut-stack-sql:latest
+docker run --rm -i -e DATABASE_URL=sqlite:///data/app.db \
+  ghcr.io/rzlco666/strut-stack-sql:latest --url-env DATABASE_URL
 ```
+
+The image defaults to HTTP mode on port 8000 (for Smithery hosting);
+the explicit `--url-env DATABASE_URL` argument above selects stdio mode.
 
 ## Windows
 
