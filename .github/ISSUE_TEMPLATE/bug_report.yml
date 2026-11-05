@@ -1,0 +1,76 @@
+name: Bug report
+description: Report something that does not work as documented
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please fill in every required field — a report
+        without a version, an engine, and reproduction steps cannot be triaged.
+        **Do not report a security vulnerability here** — see [SECURITY.md](../../SECURITY.md).
+  - type: input
+    id: version
+    attributes:
+      label: Server version
+      description: Output of `strut-stack-sql --version`, or the release tag you run.
+      placeholder: "2.0.1"
+    validations:
+      required: true
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Database engine
+      options:
+        - PostgreSQL
+        - MySQL
+        - SQLite
+        - DuckDB
+        - ClickHouse
+        - SQL Server
+    validations:
+      required: true
+  - type: dropdown
+    id: profile
+    attributes:
+      label: Tool profile
+      options:
+        - lite
+        - standard
+        - full
+        - admin
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Numbered steps, 1-2-3, from a fresh start.
+      placeholder: |
+        1. Start the server with `strut-stack-sql --url-env DATABASE_URL ...`
+        2. Call `execute_sql` with ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected-actual
+    attributes:
+      label: Expected vs actual behavior
+      description: What should have happened, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs / output
+      description: Paste log or tool output as text (not screenshots), plus the exact command you ran. Redact credentials and real data.
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched the existing issues and did not find a duplicate.
+          required: true
+        - label: This is not a security report (vulnerabilities go to SECURITY.md, not a public issue).
+          required: true

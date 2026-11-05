@@ -1,0 +1,20 @@
+name: Documentation
+description: Report a wrong, missing, or unclear part of the docs
+title: "[Docs]: "
+labels: ["documentation"]
+body:
+  - type: textarea
+    id: page
+    attributes:
+      label: Page / section
+      description: Which document and section is wrong or incomplete (README, docs/INSTALL.md, docs/TOOLS.md, ...)?
+      placeholder: "docs/CONFIGURATION.md, section SQL Server"
+    validations:
+      required: true
+  - type: textarea
+    id: fix
+    attributes:
+      label: What should it say?
+      description: The correction or the missing explanation, as concretely as you can state it.
+    validations:
+      required: true

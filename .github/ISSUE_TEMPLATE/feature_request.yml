@@ -1,0 +1,48 @@
+name: Feature request
+description: Suggest a new feature or an improvement
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Start with the problem, not the solution. A large change is discussed
+        here first, before code is written — see [CONTRIBUTING.md](../../CONTRIBUTING.md).
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: What can you not do today, and who else hits the same wall?
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: How you imagine it working. Include alternatives you considered and why they fall short.
+    validations:
+      required: true
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Related engine / driver (if any)
+      options:
+        - None / all engines
+        - PostgreSQL
+        - MySQL
+        - SQLite
+        - DuckDB
+        - ClickHouse
+        - SQL Server
+    validations:
+      required: false
+  - type: dropdown
+    id: willing
+    attributes:
+      label: Are you willing to work on this?
+      options:
+        - "Yes"
+        - "No"
+        - Maybe, with guidance
+    validations:
+      required: false
