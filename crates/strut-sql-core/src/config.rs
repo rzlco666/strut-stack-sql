@@ -245,7 +245,7 @@ pub enum Command {
 #[command(
     name = "strut-stack-sql",
     version,
-    about = "Strut Stack SQL — token-efficient MCP for MySQL, PostgreSQL, SQLite, DuckDB, ClickHouse, and SQL Server"
+    about = "Strut Stack SQL — token-efficient MCP for MySQL, PostgreSQL, SQLite, DuckDB, SQL Server, and ClickHouse"
 )]
 pub struct Cli {
     /// Maintenance subcommands. Without one the server starts normally.

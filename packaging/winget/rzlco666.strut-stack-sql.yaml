@@ -10,7 +10,7 @@ PackageName: strut-stack-sql
 PackageUrl: https://github.com/rzlco666/strut-stack-sql
 License: MIT
 LicenseUrl: https://github.com/rzlco666/strut-stack-sql/blob/main/LICENSE
-ShortDescription: Token-efficient MCP server for MySQL, PostgreSQL, and SQLite
+ShortDescription: Token-efficient MCP server for MySQL, PostgreSQL, SQLite, DuckDB, SQL Server, and ClickHouse
 Moniker: strut-stack-sql
 Tags:
   - mcp

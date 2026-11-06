@@ -1,6 +1,6 @@
 {
   "version": "2.0.0",
-  "description": "Token-efficient MCP server for MySQL, PostgreSQL, and SQLite",
+  "description": "Token-efficient MCP server for MySQL, PostgreSQL, SQLite, DuckDB, SQL Server, and ClickHouse",
   "homepage": "https://github.com/rzlco666/strut-stack-sql",
   "license": "MIT",
   "architecture": {

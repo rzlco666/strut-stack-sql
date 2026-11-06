@@ -1,5 +1,5 @@
 class StrutStackSql < Formula
-  desc "Token-efficient MCP server for MySQL, PostgreSQL, and SQLite"
+  desc "Token-efficient MCP server for MySQL, PostgreSQL, SQLite, DuckDB, SQL Server, and ClickHouse"
   homepage "https://github.com/rzlco666/strut-stack-sql"
   version "2.0.0"
   license "MIT"

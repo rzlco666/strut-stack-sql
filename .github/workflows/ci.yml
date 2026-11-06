@@ -17,6 +17,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Manifest description lists all six engines
+        run: |
+          python3 - <<'PY'
+          import json
+          manifest = json.load(open("mcpb/manifest.json"))["description"]
+          server = json.load(open("server.json"))["description"]
+          engines = ["MySQL", "PostgreSQL", "SQLite", "DuckDB", "SQL Server", "ClickHouse"]
+          for name, desc in (("mcpb/manifest.json", manifest), ("server.json", server)):
+              idx = [desc.find(e) for e in engines]
+              assert all(i >= 0 for i in idx), f"{name} is missing an engine: {desc}"
+              assert idx == sorted(idx), f"{name} engines out of order: {desc}"
+          print("manifest:", manifest)
+          print("server.json:", server)
+          PY
+
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
