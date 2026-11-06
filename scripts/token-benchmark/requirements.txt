@@ -1,0 +1,7 @@
+# Pinned dependencies for scripts/token-benchmark/measure.py (Phase 1).
+# Design doc §6 requires a pinned tiktoken version; the harness records the
+# installed version automatically and fails if --tiktoken-version disagrees.
+# Pinned 2026-11-06 (LeBron): tiktoken 0.14.0 was the latest on PyPI.
+# When the harness is committed to the repo, this file goes to
+# scripts/token-benchmark/requirements.txt.
+tiktoken==0.14.0
