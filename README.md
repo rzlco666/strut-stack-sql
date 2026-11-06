@@ -459,7 +459,7 @@ docker run --rm -i -e DATABASE_URL='postgresql://user:pass@host:5432/db' \
 cargo install --path . --bins
 ```
 
-The image defaults to HTTP mode on port 8000 (for Smithery hosting); the explicit `--url-env DATABASE_URL` argument above selects stdio mode.
+The image defaults to HTTP mode on port 8000 (for Smithery hosting); without `--http` the image runs in stdio mode.
 
 MCPB bundles for every platform are attached to each
 [GitHub Release](https://github.com/rzlco666/strut-stack-sql/releases/latest) and described by

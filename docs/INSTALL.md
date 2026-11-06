@@ -78,7 +78,7 @@ docker run --rm -i -e DATABASE_URL=sqlite:///data/app.db \
 ```
 
 The image defaults to HTTP mode on port 8000 (for Smithery hosting);
-the explicit `--url-env DATABASE_URL` argument above selects stdio mode.
+without `--http` the image runs in stdio mode.
 
 ## Windows
 

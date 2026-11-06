@@ -38,6 +38,7 @@ startCommand:
     properties:
       DATABASE_URL:
         type: string
+        format: password
         description: "DATABASE_URL for the database to expose (e.g. postgresql://user:password@localhost:5432/dbname). Stored as a secret; never logged."
     required:
       - DATABASE_URL
@@ -48,6 +49,7 @@ configSchema:
   properties:
     DATABASE_URL:
       type: string
+      format: password
       description: "DATABASE_URL for the database to expose (e.g. postgresql://user:password@localhost:5432/dbname). Stored as a secret; never logged."
   required:
     - DATABASE_URL
