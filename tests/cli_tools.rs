@@ -235,4 +235,35 @@ async fn profiles_expand_to_flags_and_never_add_a_second_authorization_system() 
     ]))
     .await;
     assert!(unknown.is_err(), "unknown profile must fail at startup");
+
+    // The resolved surface must reach the Policy, not just AppConfig: a
+    // profile that promises the full tool surface must authorize those
+    // tools, and lite must not. Regression guard for build_policy() being
+    // handed the raw --full-tools flag instead of the profile-resolved one.
+    use strut_stack_sql::core::auth::{Tier, DDL_TOOLS};
+
+    let exposed = |config: &strut_stack_sql::AppConfig, tool: &str, tier: Tier| {
+        config
+            .policy
+            .authorize(&config.policy.local_principal(), tool, "default", tier)
+            .is_allowed()
+    };
+
+    assert!(
+        !exposed(&lite, "list_tables", Tier::Read),
+        "lite hides the introspection surface"
+    );
+    for (name, config) in [("standard", &standard), ("full", &full), ("admin", &admin)] {
+        assert!(
+            exposed(config, "list_tables", Tier::Read),
+            "{name} authorizes introspection tools"
+        );
+    }
+    assert!(full.full_tools, "full implies the full tool surface");
+    for tool in DDL_TOOLS {
+        assert!(
+            exposed(&admin, tool, Tier::Ddl),
+            "admin authorizes the DDL tool {tool}"
+        );
+    }
 }
