@@ -453,11 +453,13 @@ winget install rzlco666.strut-stack-sql
 
 # Docker (no install at all)
 docker run --rm -i -e DATABASE_URL='postgresql://user:pass@host:5432/db' \
-  ghcr.io/rzlco666/strut-stack-sql:latest
+  ghcr.io/rzlco666/strut-stack-sql:latest --url-env DATABASE_URL
 
 # From source (crates.io publication is off)
 cargo install --path . --bins
 ```
+
+The image defaults to HTTP mode on port 8000 (for Smithery hosting); the explicit `--url-env DATABASE_URL` argument above selects stdio mode.
 
 MCPB bundles for every platform are attached to each
 [GitHub Release](https://github.com/rzlco666/strut-stack-sql/releases/latest) and described by
