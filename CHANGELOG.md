@@ -1,5 +1,33 @@
 # Changelog
 
+## [2.0.2] — 2026-11-06
+
+Patch release from the 6 November follow-up PRs. No tool-schema changes.
+
+### Fixed
+
+- **`--profile` is honoured again (PR #10).** The v2.0.1 binary ignored
+  `--profile`: `build_policy` was called with the raw `cli.full_tools`
+  flag, so only the 3 core tools were active. Security impact: none
+  (fail-closed); operational impact: none (all 8 live configs use
+  `--full-tools`). Independently reviewed with 0 findings (regression
+  reproduced FAIL then PASS by the reviewer, E2E 11/11); post-merge CI
+  SUCCESS.
+- **`.mcpb` manifest descriptions corrected (PR #12).** Five manifests
+  still carried the 3-engine description (source hardcoded in
+  `mcpb/manifest.json`); fixed, engine order aligned, and a CI guard
+  added. Post-merge CI SUCCESS.
+
+### Added
+
+- **Published token benchmark (PR #11).** Measured over two byte-identical
+  runs: lite 3 tools **625** tokens, standard 13 tools 1313, full 20 tools
+  **2549** (`o200k_base`). Adopted budgets: lite ≤750 / full ≤3000.
+- **CI token budget enforcement (PR #13).** New `token-budget` CI job
+  enforces lite ≤750 / full ≤3000 on every run (committed harness,
+  `tiktoken==0.14.0` pinned). CI 6/6 green including the Token budget job;
+  post-merge CI SUCCESS.
+
 ## [2.0.1] — 2026-11-05
 
 Patch release from the v2 test findings. No breaking tool-schema changes beyond

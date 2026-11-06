@@ -23,7 +23,7 @@ strut-stack-sql --version
 Options:
 
 ```bash
-curl -fsSL .../install.sh | bash -s -- --version 2.0.1 --prefix ~/.local
+curl -fsSL .../install.sh | bash -s -- --version 2.0.2 --prefix ~/.local
 ```
 
 Installs `~/.local/bin/strut-stack-sql`. Add `~/.local/bin` to `PATH` if needed.
@@ -114,7 +114,7 @@ Or: `cargo install --path . --force` (installs to `~/.cargo/bin`).
 ## After install
 
 ```bash
-strut-stack-sql --version   # strut-stack-sql 2.0.1
+strut-stack-sql --version   # strut-stack-sql 2.0.2
 # Cursor: see README quick start
 ```
 
