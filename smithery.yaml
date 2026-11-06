@@ -1,0 +1,57 @@
+# smithery.yaml — Smithery container runtime manifest for StrutStack SQL.
+# Smithery builds the repo Dockerfile, reads the HTTP port from EXPOSE, and
+# proxies MCP requests to http://localhost:8000/mcp (see startCommand.path).
+# Verified 2026-11-05 (Steph, docs/profile lane):
+# - /mcp route exists: crates/strut-sql-server/src/lib.rs nests the streamable
+#   HTTP service at "/mcp" (.nest_service("/mcp", service)); /livez + /readyz
+#   are the liveness/readiness endpoints.
+# - The binary starts HTTP mode ONLY via the --http CLI flag
+#   (crates/strut-sql-core/src/config.rs: --http is Option<String>, no env,
+#   no default). There is NO env support for --full-tools / --allow-ddl /
+#   --max-rows / --deny-columns either (CLI-only). The distroless runtime
+#   image has no shell, so no env->flag wrapper script is possible. The flags
+#   are therefore baked into the Dockerfile CMD: --full-tools ON,
+#   --allow-ddl OFF (DDL stays opt-in via self-hosting), --max-rows 100,
+#   --deny-columns password,salt. configSchema exposes only DATABASE_URL; a
+#   future binary change adding STRUT_STACK_SQL_* env support for those flags
+#   would let them become user toggles here.
+# - DATABASE_URL is consumed by the binary from the environment by default
+#   (config.rs:1456) and explicitly via --url-env DATABASE_URL in the CMD.
+# - The configSchema property is named DATABASE_URL (not camelCase databaseUrl):
+#   Smithery injects config values as environment variables named after the
+#   property (precedent: npm-sentinel-mcp uses NPM_REGISTRY_URL as the property
+#   name), so the property name IS the env var the binary reads via
+#   resolve_url_from_env (config.rs) and --url-env DATABASE_URL in the CMD.
+# - Re-verified 2026-11-06 on v2.0.2 (LeBron): Docker image 37a3be60edf2
+#   built from main 49181b6; /mcp initialize 200 (serverInfo 2.0.2),
+#   tools/list 13 (standard profile: --full-tools, no --allow-ddl).
+#   Renaming removes any camelCase->env mapping ambiguity.
+runtime: "container"
+build:
+  dockerfile: "Dockerfile"
+  dockerBuildPath: "."
+startCommand:
+  type: "http"
+  path: "/mcp"
+  configSchema:
+    type: object
+    properties:
+      DATABASE_URL:
+        type: string
+        format: password
+        description: "DATABASE_URL for the database to expose (e.g. postgresql://user:password@localhost:5432/dbname). Stored as a secret; never logged."
+    required:
+      - DATABASE_URL
+  exampleConfig:
+    DATABASE_URL: "postgresql://user:password@localhost:5432/dbname"
+configSchema:
+  type: object
+  properties:
+    DATABASE_URL:
+      type: string
+      format: password
+      description: "DATABASE_URL for the database to expose (e.g. postgresql://user:password@localhost:5432/dbname). Stored as a secret; never logged."
+  required:
+    - DATABASE_URL
+exampleConfig:
+  DATABASE_URL: "postgresql://user:password@localhost:5432/dbname"
