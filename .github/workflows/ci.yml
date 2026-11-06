@@ -72,6 +72,60 @@ jobs:
           path: target/conformance/
           if-no-files-found: warn
 
+  # Enforces the adopted tools/list token budgets (docs/TOKEN-BENCHMARK.md §4).
+  # Measures a DEBUG build of the PR's own source on purpose: pinning the
+  # v2.0.1 release binary would measure a snapshot and never catch a regression
+  # introduced by this PR. The tools/list payload is derived from source
+  # (static tool definitions), not from optimisation level, so debug and
+  # release binaries must yield byte-identical payloads — verified locally
+  # (lite 625 / full 2549 tokens o200k_base, raw 2643 B / 10853 B for both).
+  # Surface assertions (lite == 3 tools, full == 20 tools) and the CI byte caps
+  # (3072 B / 12000 B) are already enforced by measure.py (exit 1/2); this job
+  # adds only the token budget gate (lite <= 750, full <= 3000).
+  token-budget:
+    name: Token budget (tools/list)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build debug binary from PR source
+        run: cargo build --bin strut-stack-sql
+
+      - name: Install benchmark dependencies
+        run: python3 -m pip install -r scripts/token-benchmark/requirements.txt
+
+      - name: Measure tools/list token cost (lite, full)
+        run: |
+          for profile in lite full; do
+            python3 scripts/token-benchmark/measure.py \
+              --binary target/debug/strut-stack-sql \
+              --profile "$profile" \
+              --commit "$GITHUB_SHA" \
+              --out-dir target/token-benchmark \
+              --tiktoken-version 0.14.0
+          done
+
+      - name: Enforce token budgets (lite <= 750, full <= 3000)
+        run: python3 scripts/token-benchmark/check_budget.py --dir target/token-benchmark
+
+      - name: Upload token benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: token-benchmark
+          path: |
+            target/token-benchmark/tokens-*.json
+            target/token-benchmark/tools-list-*.json
+          if-no-files-found: warn
+
   integration-http-docker:
     name: HTTP Integration (PG + MySQL)
     runs-on: ubuntu-latest
