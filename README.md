@@ -7,13 +7,13 @@
   <a href="https://github.com/rzlco666/strut-stack-sql/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/rzlco666/strut-stack-sql/ci.yml?branch=main" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
   <a href="https://registry.modelcontextprotocol.io/v0/servers?search=io.github.rzlco666/strut-stack-sql"><img src="https://img.shields.io/badge/MCP%20Registry-io.github.rzlco666%2Fstrut--stack--sql-purple" alt="MCP Registry"></a>
-  <img src="https://img.shields.io/badge/engines-PostgreSQL%20%C2%B7%20MySQL%20%C2%B7%20SQLite%20%C2%B7%20DuckDB%20%C2%B7%20ClickHouse%20%C2%B7%20SQL%20Server-informational" alt="PostgreSQL · MySQL · SQLite · DuckDB · ClickHouse · SQL Server">
+  <img src="https://img.shields.io/badge/engines-MySQL%20%C2%B7%20PostgreSQL%20%C2%B7%20SQLite%20%C2%B7%20DuckDB%20%C2%B7%20SQL%20Server%20%C2%B7%20ClickHouse-informational" alt="MySQL · PostgreSQL · SQLite · DuckDB · SQL Server · ClickHouse">
 </p>
 
 <p align="center">
   <strong>Light strut. Extreme load.</strong><br>
   A token-efficient <a href="https://modelcontextprotocol.io">MCP</a> server that lets AI agents query
-  <strong>PostgreSQL</strong>, <strong>MySQL</strong>, <strong>SQLite</strong>, <strong>DuckDB</strong>, <strong>ClickHouse</strong>, and <strong>SQL Server</strong> — safely, in one small Rust binary.
+  <strong>MySQL</strong>, <strong>PostgreSQL</strong>, <strong>SQLite</strong>, <strong>DuckDB</strong>, <strong>SQL Server</strong>, and <strong>ClickHouse</strong> — safely, in one small Rust binary.
 </p>
 
 <p align="center">
@@ -309,12 +309,12 @@ your project), never in a pasted config — prefer `--url-env DATABASE_URL`.
 
 | Engine | URL format | Notes |
 |---|---|---|
-| PostgreSQL | `postgresql://user:pass@host:5432/dbname` | |
 | MySQL / MariaDB | `mysql://user:pass@host:3306/dbname` | `mariadb` engine hint maps here |
+| PostgreSQL | `postgresql://user:pass@host:5432/dbname` | |
 | SQLite | `sqlite:///absolute/path/app.db`, `sqlite::memory:` | Constrain files with `--sqlite-allowlist DIR[,DIR…]` |
 | DuckDB | `duckdb:///absolute/path/analytics.duckdb`, `duckdb::memory:` | Embedded engine; constrain files with `--duckdb-allowlist DIR[,DIR…]`; `:memory:` is read-only via the guard |
-| ClickHouse | `clickhouse://host:8123/db`, `clickhouses://host:8443/db` | HTTP interface; `s` = TLS |
 | SQL Server | `sqlserver://user:pass@host:1433/dbname` (`mssql://` alias) | TLS + certificate validation default **on** |
+| ClickHouse | `clickhouse://host:8123/db`, `clickhouses://host:8443/db` | HTTP interface; `s` = TLS |
 
 ```bash
 # Single database, from the environment
@@ -354,7 +354,7 @@ strut-stack-sql --config ./strut-stack-sql.toml
 ```
 
 Full CLI / env / TOML reference: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
-Per-engine notes: [Postgres](docs/POSTGRES.md) · [MySQL](docs/MYSQL.md) ·
+Per-engine notes: [MySQL](docs/MYSQL.md) · [Postgres](docs/POSTGRES.md) ·
 [SQLite](docs/SQLITE.md) · [DuckDB](docs/DUCKDB.md) · [SQL Server](docs/CONFIGURATION.md#sql-server).
 
 ## Why
@@ -468,7 +468,7 @@ MCPB bundles for every platform are attached to each
 ## Open source
 
 The whole stack is [MIT](LICENSE) licensed: one static Rust binary for six engines
-(PostgreSQL, MySQL, SQLite, DuckDB, ClickHouse, SQL Server), with the guard, formatter, tools,
+(MySQL, PostgreSQL, SQLite, DuckDB, SQL Server, ClickHouse), with the guard, formatter, tools,
 server, and drivers as separate crates. Choose a surface with `--profile lite|standard|full|admin`
 instead of maintaining four builds — profiles are presets over the same flags and grants, not a
 second authorization system ([docs/PROFILES.md](docs/PROFILES.md)).
@@ -487,18 +487,18 @@ flowchart LR
   Tools --> Guard[strut-sql-guard]
   Guard -->|allow| DriverAPI[strut-sql-driver-api]
   Guard -->|deny| NoDB[Reject before pool checkout]
-  DriverAPI --> PG[strut-sql-driver-postgres]
   DriverAPI --> MY[strut-sql-driver-mysql]
+  DriverAPI --> PG[strut-sql-driver-postgres]
   DriverAPI --> SQ[strut-sql-driver-sqlite]
   DriverAPI --> DK[strut-sql-driver-duckdb]
-  DriverAPI --> CH[strut-sql-driver-clickhouse]
   DriverAPI --> MS[strut-sql-driver-sqlserver]
-  PG --> DB[(PostgreSQL)]
-  MY --> DB2[(MySQL)]
+  DriverAPI --> CH[strut-sql-driver-clickhouse]
+  MY --> DB[(MySQL)]
+  PG --> DB2[(PostgreSQL)]
   SQ --> DB3[(SQLite)]
   DK --> DB4[(DuckDB file / memory)]
-  CH --> DB5[(ClickHouse HTTP)]
-  MS --> DB6[(SQL Server)]
+  MS --> DB5[(SQL Server)]
+  CH --> DB6[(ClickHouse HTTP)]
   Tools --> Format[strut-sql-format]
   Server --> Core[strut-sql-core]
 ```
@@ -591,7 +591,7 @@ work, not yet a gate.
 | [docs/CONFORMANCE.md](docs/CONFORMANCE.md) | MCP conformance gate and results |
 | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Measurements with their limits stated |
 | [docs/TEST_REPORT.md](docs/TEST_REPORT.md) | What the test suites cover |
-| [docs/POSTGRES.md](docs/POSTGRES.md) · [docs/MYSQL.md](docs/MYSQL.md) · [docs/SQLITE.md](docs/SQLITE.md) · [docs/DUCKDB.md](docs/DUCKDB.md) · [SQL Server](docs/CONFIGURATION.md#sql-server) | Per-engine notes |
+| [docs/MYSQL.md](docs/MYSQL.md) · [docs/POSTGRES.md](docs/POSTGRES.md) · [docs/SQLITE.md](docs/SQLITE.md) · [docs/DUCKDB.md](docs/DUCKDB.md) · [SQL Server](docs/CONFIGURATION.md#sql-server) | Per-engine notes |
 | [docs/MCP_REGISTRY.md](docs/MCP_REGISTRY.md) | MCP Registry / MCPB publishing |
 | [CHANGELOG.md](CHANGELOG.md) | What changed in 2.0.0 (breaking: no v1 compatibility layer, `mcp-sql-rust` alias removed) |
 
