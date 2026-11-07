@@ -83,7 +83,7 @@ chore: release v2.0.0 branding
 1. SQL guard integrity (deny before pool checkout)
 2. Token efficiency (tool surface + columnar shape)
 3. No secret leakage
-4. Four-engine correctness (PostgreSQL + MySQL + SQLite + SQL Server), including engine-specific guard syntax, bind/codec behavior, catalogs and XML plans
+4. Six-engine correctness (MySQL + PostgreSQL + SQLite + DuckDB + SQL Server + ClickHouse), including engine-specific guard syntax, bind/codec behavior, catalogs and XML plans
 
 ## Packaging maintenance (release manager)
 
