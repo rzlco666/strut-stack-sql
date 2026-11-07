@@ -11,29 +11,29 @@ Tiers: **read** = any grant, **writes** = `--allow-writes` plus a Write grant,
 
 ## Supported
 
-| Statement | Class | Tier | PostgreSQL | MySQL 8.4 | SQLite | DuckDB | ClickHouse | SQL Server | Notes |
+| Statement | Class | Tier | MySQL 8.4 | PostgreSQL | SQLite | DuckDB | SQL Server | ClickHouse | Notes |
 |---|---|---|---|---|---|---|---|---|---|
 | `SELECT` | Read | read | yes | yes | yes | yes | yes | yes | Guard injects/clamps LIMIT; Guard bounds rows with LIMIT/FETCH or SQL Server TOP/OFFSET FETCH. |
 | `INSERT` | Dml | writes | yes | yes | yes | yes | yes | yes | ClickHouse inserts append to the table's parts. |
-| `UPDATE` | Dml | writes | yes | yes | yes | yes | **no** | yes | ClickHouse has no `UPDATE` statement; use `ALTER TABLE … UPDATE` through a database client. |
+| `UPDATE` | Dml | writes | yes | yes | yes | yes | yes | **no** | ClickHouse has no `UPDATE` statement; use `ALTER TABLE … UPDATE` through a database client. |
 | `DELETE` | Dml | writes | yes | yes | yes | yes | yes | yes | ClickHouse lightweight `DELETE` is asynchronous by default. |
-| `MERGE` | Dml | writes | yes | **no** | **no** | yes | **no** | yes | PostgreSQL 15+ and DuckDB and SQL Server. |
+| `MERGE` | Dml | writes | **no** | yes | **no** | yes | yes | **no** | PostgreSQL 15+ and DuckDB and SQL Server. |
 | `CREATE TABLE` | Ddl | ddl | yes | yes | yes | yes | yes | yes | ClickHouse requires an `ENGINE` (and usually `ORDER BY`); pass the full DDL. `create_table` also checks the parsed class. |
 | `ALTER TABLE` | Ddl | ddl | yes | yes | yes | yes | yes | yes | SQLite supports a limited subset; DuckDB supports column type changes via `alter_column`; SQL Server structured alter requires explicit nullability. |
 | `DROP TABLE` | Ddl | ddl | yes | yes | yes | yes | yes | yes | destructive tools require `confirm:true`; Destructive tools require `confirm:true`. |
 | `TRUNCATE TABLE` | Ddl | ddl | yes | yes | **no** | yes | yes | yes | SQLite has no TRUNCATE; DuckDB implements it as DELETE (no CASCADE). |
-| `CREATE INDEX` | Ddl | ddl | yes | yes | yes | yes | **no** | yes | ClickHouse adds skipping indexes with `ALTER TABLE … ADD INDEX`. |
+| `CREATE INDEX` | Ddl | ddl | yes | yes | yes | yes | yes | **no** | ClickHouse adds skipping indexes with `ALTER TABLE … ADD INDEX`. |
 | `CREATE VIEW` | Ddl | ddl | yes | yes | yes | yes | yes | yes |  |
-| `CREATE SCHEMA` | Ddl | ddl | yes | yes | **no** | yes | **no** | yes | ClickHouse has databases, not schemas. |
+| `CREATE SCHEMA` | Ddl | ddl | yes | yes | **no** | yes | yes | **no** | ClickHouse has databases, not schemas. |
 | `CREATE DATABASE` | Ddl | ddl | yes | yes | **no** | **no** | yes | yes | SQLite/DuckDB have no CREATE DATABASE; attaching databases is not exposed. |
-| `CREATE FUNCTION` | Ddl | ddl | yes | **no** | **no** | **no** | **no** | **no** | sqlparser 0.62 parses PostgreSQL CREATE FUNCTION only; MySQL/DuckDB are rejected; ClickHouse uses `CREATE FUNCTION name AS (x) -> expr`, which this surface does not assemble; Routine bodies are not safely representable for other engines by sqlparser 0.62. |
-| `CREATE SEQUENCE` | Ddl | ddl | yes | **no** | **no** | yes | **no** | yes | MySQL uses AUTO_INCREMENT; SQLite uses rowid; ClickHouse has none. |
-| `COMMENT ON` | Ddl | ddl | yes | **no** | **no** | **no** | **no** | **no** | MySQL/SQLite comments live in DDL; sqlparser 0.62's DuckDB dialect does not parse it; ClickHouse uses `ALTER TABLE … COMMENT`; PostgreSQL syntax only. |
-| `VACUUM` | Admin | admin | yes | **no** | yes | yes | **no** | **no** | Maintenance: explicit Admin grant. |
+| `CREATE FUNCTION` | Ddl | ddl | **no** | yes | **no** | **no** | **no** | **no** | sqlparser 0.62 parses PostgreSQL CREATE FUNCTION only; MySQL/DuckDB are rejected; ClickHouse uses `CREATE FUNCTION name AS (x) -> expr`, which this surface does not assemble; Routine bodies are not safely representable for other engines by sqlparser 0.62. |
+| `CREATE SEQUENCE` | Ddl | ddl | **no** | yes | **no** | yes | yes | **no** | MySQL uses AUTO_INCREMENT; SQLite uses rowid; ClickHouse has none. |
+| `COMMENT ON` | Ddl | ddl | **no** | yes | **no** | **no** | **no** | **no** | MySQL/SQLite comments live in DDL; sqlparser 0.62's DuckDB dialect does not parse it; ClickHouse uses `ALTER TABLE … COMMENT`; PostgreSQL syntax only. |
+| `VACUUM` | Admin | admin | **no** | yes | yes | yes | **no** | **no** | Maintenance: explicit Admin grant. |
 | `ANALYZE` | Admin | admin | yes | yes | yes | yes | **no** | **no** | Maintenance: explicit Admin grant. `ANALYZE TABLE` is not ClickHouse syntax. |
 | `PRAGMA` (read-only allowlist) | Read | read | **no** | **no** | yes | **no** | **no** | **no** | `table_info`, `index_list`, `foreign_key_list`, `database_list`, `page_count`, … (SQLite only) |
-| `SHOW …` | Read | read | **no** | yes | **no** | yes | yes | **no** | MySQL introspection; DuckDB exposes SHOW TABLES only. |
-| `EXPLAIN` | Read | read | yes | yes | yes | yes | yes | **no** | Plain EXPLAIN does not execute. ClickHouse answers `EXPLAIN PLAN`; SQL Server uses the advisor instead. |
+| `SHOW …` | Read | read | yes | **no** | **no** | yes | **no** | yes | MySQL introspection; DuckDB exposes SHOW TABLES only. |
+| `EXPLAIN` | Read | read | yes | yes | yes | yes | **no** | yes | Plain EXPLAIN does not execute. ClickHouse answers `EXPLAIN PLAN`; SQL Server uses the advisor instead. |
 | `EXPLAIN ANALYZE` | Read | writes | yes | yes | **no** | yes | **no** | **no** | Executes the statement; the advisor additionally needs `--allow-explain-analyze`. |
 | `GRANT` / `REVOKE` | Admin | admin | yes | yes | **no** | **no** | yes | yes | Requires `--allow-grants`; SQLite/DuckDB have no SQL GRANT. |
 
@@ -53,25 +53,25 @@ How a supported column value arrives in a result cell (JSON representation).
 Unsupported SQL Server/TDS types can produce a typed execution error; there
 is no universal text fallback or silent-null fallback.
 
-| Type | PostgreSQL | MySQL 8.4 | SQLite | DuckDB | ClickHouse | SQL Server | Notes |
+| Type | MySQL 8.4 | PostgreSQL | SQLite | DuckDB | SQL Server | ClickHouse | Notes |
 |---|---|---|---|---|---|---|---|
 | integer / serial / identity | number | number | number | number | number | number | i64 range preserved; ClickHouse `UInt64` above `i64::MAX` arrives as an exact decimal **string**; SQL Server tinyint through bigint decode without float conversion. |
-| bigint unsigned | number (decimal string beyond 2^53) | number | number | number (decimal string beyond 2^63-1) | number (exact string beyond `i64::MAX`) | — | No float round-trip; SQL Server has no unsigned bigint. |
-| int128 / int256 | — | — | — | — | exact decimal **string** | — | The neutral value model has no 128/256-bit variant. |
+| bigint unsigned | number | number (decimal string beyond 2^53) | number | number (decimal string beyond 2^63-1) | — | number (exact string beyond `i64::MAX`) | No float round-trip; SQL Server has no unsigned bigint. |
+| int128 / int256 | — | — | — | — | — | exact decimal **string** | The neutral value model has no 128/256-bit variant. |
 | real / double | number | number | number | number | number | number | Non-finite values are an `unsupported` error on DuckDB, never null; SQL Server real/float use floating-point decoding. |
-| numeric / decimal | number when exact in f64, else exact decimal **string** | same | text (no decimal type) | exact decimal **string** | exact decimal **string** | number when exact in f64, else exact decimal **string** | Precision is never silently lost; SQL Server decimal/numeric use exact neutral BigDecimal; binds are limited to precision/scale 38. |
-| boolean / bit | `true`/`false` | `true`/`false` (BOOL/TINYINT(1)) | number (0/1) | `true`/`false` | `true`/`false` | `true`/`false` |  |
-| uuid / uniqueidentifier | string | string (as stored) | text | string | string | string |  |
-| timestamp / timestamptz / datetime2 | naive datetime / RFC 3339 string | datetime string | text | naive datetime / **unsupported** for TZ-aware | naive datetime | datetime string; datetimeoffset is RFC 3339 string | UTC offsets preserved for timestamptz; DuckDB TIMESTAMPTZ is rejected rather than coerced; ClickHouse stores no timezone in `DateTime`; `DateTime64` keeps sub-second precision; SQL Server `timestamp` means rowversion binary, not a date/time. |
-| date / time | date string / time string | date/time string | text | date string / canonical time text | date string | date string / time string | `SqlValue` has no time variant; ClickHouse has no `TIME` type; SQL Server datetime binds use 100ns precision. |
-| json / jsonb | JSON value | JSON value | text | text | JSON value (`JSON`/`Object`), string otherwise | text | Valid JSON stays structured on PG/MySQL; DuckDB JSON parameters need an explicit cast; SQL Server JSON binds are serialized text; JSON-looking text is not auto-parsed. |
-| bytea / blob / varbinary / rowversion | tagged hex object | tagged hex object | tagged hex object | tagged hex object | hex string | tagged hex object | Binary is never dropped to null. ClickHouse `String`/`FixedString` are byte strings and decode as text. |
-| arrays (`int[]`, `text[]`, …) | JSON array | — | — | JSON array (`LIST`/fixed `ARRAY`) | JSON array | unsupported | Element-wise decode for common types; SQL Server array binds are rejected; use explicit JSON text instead. |
-| `Map`, named `Tuple` | — | — | — | — | JSON object | — | Lossless fallback for shapes the neutral model cannot express. |
-| inet / citext | string | — | — | — | string (`IPv4`/`IPv6`) | — |  |
-| **vector** (pgvector) | **array of numbers** | — | — | — | — | — | Requires the `vector` extension; reads as `[1, 2.5, 3]`. There is **no** dedicated vector-search tool: query it with normal SQL (`ORDER BY embedding <-> $1`). |
-| money / smallmoney | — | — | — | — | — | number | Tiberius decodes via f64; `CAST(value AS decimal(19,4))` for exact monetary values. |
-| xml | — | — | — | — | — | string | SQL Server XML decodes as text. |
+| numeric / decimal | same | number when exact in f64, else exact decimal **string** | text (no decimal type) | exact decimal **string** | number when exact in f64, else exact decimal **string** | exact decimal **string** | Precision is never silently lost; SQL Server decimal/numeric use exact neutral BigDecimal; binds are limited to precision/scale 38. |
+| boolean / bit | `true`/`false` (BOOL/TINYINT(1)) | `true`/`false` | number (0/1) | `true`/`false` | `true`/`false` | `true`/`false` |  |
+| uuid / uniqueidentifier | string (as stored) | string | text | string | string | string |  |
+| timestamp / timestamptz / datetime2 | datetime string | naive datetime / RFC 3339 string | text | naive datetime / **unsupported** for TZ-aware | datetime string; datetimeoffset is RFC 3339 string | naive datetime | UTC offsets preserved for timestamptz; DuckDB TIMESTAMPTZ is rejected rather than coerced; ClickHouse stores no timezone in `DateTime`; `DateTime64` keeps sub-second precision; SQL Server `timestamp` means rowversion binary, not a date/time. |
+| date / time | date/time string | date string / time string | text | date string / canonical time text | date string / time string | date string | `SqlValue` has no time variant; ClickHouse has no `TIME` type; SQL Server datetime binds use 100ns precision. |
+| json / jsonb | JSON value | JSON value | text | text | text | JSON value (`JSON`/`Object`), string otherwise | Valid JSON stays structured on PG/MySQL; DuckDB JSON parameters need an explicit cast; SQL Server JSON binds are serialized text; JSON-looking text is not auto-parsed. |
+| bytea / blob / varbinary / rowversion | tagged hex object | tagged hex object | tagged hex object | tagged hex object | tagged hex object | hex string | Binary is never dropped to null. ClickHouse `String`/`FixedString` are byte strings and decode as text. |
+| arrays (`int[]`, `text[]`, …) | — | JSON array | — | JSON array (`LIST`/fixed `ARRAY`) | unsupported | JSON array | Element-wise decode for common types; SQL Server array binds are rejected; use explicit JSON text instead. |
+| `Map`, named `Tuple` | — | — | — | — | — | JSON object | Lossless fallback for shapes the neutral model cannot express. |
+| inet / citext | — | string | — | — | — | string (`IPv4`/`IPv6`) |  |
+| **vector** (pgvector) | — | **array of numbers** | — | — | — | — | Requires the `vector` extension; reads as `[1, 2.5, 3]`. There is **no** dedicated vector-search tool: query it with normal SQL (`ORDER BY embedding <-> $1`). |
+| money / smallmoney | — | — | — | — | number | — | Tiberius decodes via f64; `CAST(value AS decimal(19,4))` for exact monetary values. |
+| xml | — | — | — | — | string | — | SQL Server XML decodes as text. |
 
 ### ClickHouse parameter binding
 
@@ -106,7 +106,7 @@ drained. See [SQL Server limitations](CONFIGURATION.md#sql-server).
 
 ## Not supported
 
-| Statement | PostgreSQL | MySQL 8.4 | SQLite | DuckDB | ClickHouse | SQL Server | Reason |
+| Statement | MySQL 8.4 | PostgreSQL | SQLite | DuckDB | SQL Server | ClickHouse | Reason |
 |---|---|---|---|---|---|---|---|
 | `ALTER SEQUENCE` | no | no | no | no | no | no | Not representable by sqlparser 0.62; rejected at parse time. |
 | `PRAGMA` (write) | no | no | no | no | no | no | State-changing pragmas are never exposed. |
@@ -115,7 +115,7 @@ drained. See [SQL Server limitations](CONFIGURATION.md#sql-server).
 | `SET`, `USE` | no | no | no | no | no | no | Session state is managed by the server. |
 | `CREATE TYPE`, `CREATE ROLE`, `CREATE EXTENSION` | no | no | no | no | no | no | Administrative DDL outside the supported surface. |
 | `CALL`, `PREPARE`, `EXECUTE` / SQL Server `EXEC` | no | no | no | no | no | no | Would bypass AST classification. |
-| `SELECT … INTO OUTFILE/DUMPFILE` | n/a | no | n/a | n/a | n/a | n/a | Server-side file writes; permanently denied. |
+| `SELECT … INTO OUTFILE/DUMPFILE` | no | n/a | n/a | n/a | n/a | n/a | Server-side file writes; permanently denied. |
 
 The guard also rejects dangerous functions per engine in every tier
 (`pg_read_file`, `dblink*`, `LOAD_FILE`, `nextval`/`setval`, `pg_sleep`,

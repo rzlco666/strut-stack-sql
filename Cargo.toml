@@ -64,8 +64,8 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
-strut-sql-driver-postgres = { path = "crates/strut-sql-driver-postgres" }
 strut-sql-driver-mysql = { path = "crates/strut-sql-driver-mysql" }
+strut-sql-driver-postgres = { path = "crates/strut-sql-driver-postgres" }
 strut-sql-driver-sqlite = { path = "crates/strut-sql-driver-sqlite" }
 strut-sql-driver-duckdb = { path = "crates/strut-sql-driver-duckdb" }
 strut-sql-driver-sqlserver = { path = "crates/strut-sql-driver-sqlserver" }
