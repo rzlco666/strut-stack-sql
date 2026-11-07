@@ -2,6 +2,5 @@
 # Design doc §6 requires a pinned tiktoken version; the harness records the
 # installed version automatically and fails if --tiktoken-version disagrees.
 # Pinned 2026-11-06 (LeBron): tiktoken 0.14.0 was the latest on PyPI.
-# When the harness is committed to the repo, this file goes to
-# scripts/token-benchmark/requirements.txt.
+# Committed to the repo by PR #13 (commit 8f3a44f) at this path.
 tiktoken==0.14.0
