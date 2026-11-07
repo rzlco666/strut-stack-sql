@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Expose PostgreSQL, MySQL, SQLite, DuckDB, ClickHouse, and SQL Server to AI agents over the
+Expose MySQL, PostgreSQL, SQLite, DuckDB, SQL Server, and ClickHouse to AI agents over the
 [Model Context Protocol](https://modelcontextprotocol.io) with:
 
 - a small default tool surface and columnar results (token efficiency);

@@ -134,11 +134,12 @@ Harness: `scripts/token-benchmark/measure.py`
 (SHA-256 `04135f11ab890930206065c8695cd70ed6bcb7190b3de172ae524569784b7613`,
 316 baris).
 
-> **Catatan:** harness belum di-commit ke repo ini pada saat dokumen ini
-> terbit — script yang dipakai kedua run adalah working copy pada path
-> tersebut (SHA di atas, diverifikasi sebelum tiap run). Perintah di bawah
-> berlaku setelah harness di-commit ke path itu; meng-commit harness
-> adalah pekerjaan follow-up, bukan bagian dari PR ini.
+> **Catatan:** harness kini sudah di-commit ke repo ini (PR #13, commit
+> `8f3a44f`, merge `9d4651d`): `scripts/token-benchmark/measure.py`,
+> `scripts/token-benchmark/check_budget.py`, dan
+> `scripts/token-benchmark/requirements.txt`. File `measure.py` yang
+> ter-commit byte-identik dengan yang dipakai kedua run (SHA-256 di atas).
+> Perintah di bawah berlaku langsung.
 
 ```bash
 python3 scripts/token-benchmark/measure.py \
