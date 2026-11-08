@@ -20,6 +20,8 @@
   ⭐ If this saves you tokens, <strong>star the repo</strong> — it is the single biggest thing that helps other people find it.
 </p>
 
+> **Latest release: v2.0.2** — [release notes](https://github.com/rzlco666/strut-stack-sql/releases/tag/v2.0.2) (2026-11-06). Patch release: the `--profile` flag is honoured again, `.mcpb` manifest descriptions corrected, the measured token benchmark published (lite **625** / full **2,549** tokens), and a CI job now enforces the token budgets (lite ≤ 750 / full ≤ 3,000) on every run. No tool-schema changes from v2.0.1. Listed on the official [MCP Registry](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.rzlco666%2Fstrut-stack-sql) as `io.github.rzlco666/strut-stack-sql`.
+
 ---
 
 ## Install in one command — binary + AI setup included
@@ -371,7 +373,7 @@ Strut Stack SQL does not charge them:
 - **Columnar results** — `{cols, rows, meta}` sends column names once, not once per row.
 - **Every statement passes one AST guard** — parsed with `sqlparser`, classified recursively (including CTE bodies), checked against a tier, LIMIT-clamped, and rejected *before* a pool connection is checked out.
 - **One static binary, six engines**, behind a stable driver contract.
-- **Measured, not claimed** — idle RSS under 8 MB, `tools/list` at 2,643 bytes in lite mode (625 tokens `o200k_base`; 10,853 bytes / 2,549 tokens in full mode), cold start to `initialize` at 2.52 ms p95 over stdio. Token numbers are v2.0.1 (2026-11-05); runtime numbers are v2.0.0 (2026-11-02). Full numbers and their limits: [Benchmarks](#benchmarks-measured).
+- **Measured, not claimed** — idle RSS under 8 MB, `tools/list` at 2,643 bytes in lite mode (625 tokens `o200k_base`; 10,853 bytes / 2,549 tokens in full mode), cold start to `initialize` at 2.52 ms p95 over stdio. Token numbers were measured on the v2.0.1 binary (2026-11-05) and still apply to v2.0.2 — the patch changes no tool schemas — and the CI `token-budget` job now enforces the budgets on every run; runtime numbers are v2.0.0 (2026-11-02). Full numbers and their limits: [Benchmarks](#benchmarks-measured).
 
 ## Tools — exactly 20
 
@@ -443,13 +445,9 @@ The installer above is recommended. Everything below installs the same binary;
 full matrix and release asset names: [docs/INSTALL.md](docs/INSTALL.md).
 
 ```bash
-# Homebrew (macOS)
-brew install rzlco666/tap/strut-stack-sql
-
-# Windows
-scoop install rzlco666/strut-stack-sql
-# or
-winget install rzlco666.strut-stack-sql
+# Homebrew / Scoop / winget: manifests live in packaging/ but are not
+# published yet (no tap/bucket upstream) — use the installer, Docker, or
+# MCPB above until they are.
 
 # Docker (no install at all)
 docker run --rm -i -e DATABASE_URL='postgresql://user:pass@host:5432/db' \
@@ -459,7 +457,7 @@ docker run --rm -i -e DATABASE_URL='postgresql://user:pass@host:5432/db' \
 cargo install --path . --bins
 ```
 
-The image defaults to HTTP mode on port 8000 (for Smithery hosting); without `--http` the image runs in stdio mode.
+The image defaults to HTTP mode on port 8000; without `--http` the image runs in stdio mode.
 
 MCPB bundles for every platform are attached to each
 [GitHub Release](https://github.com/rzlco666/strut-stack-sql/releases/latest) and described by
@@ -536,8 +534,7 @@ Two measurement classes are kept apart instead of blended:
 
 The two HTTP misses are real and are not rounded away: cold start includes listener readiness and
 the session handshake, and each HTTP `execute_sql` is a fresh request, so transport framing
-dominates. PostgreSQL and MySQL were not measured (no live server on the reference machine) and
-are recorded as `not_run`, together with the competitor comparison. Methodology and limits:
+dominates. PostgreSQL and MySQL were measured on stdio only (via service containers); HTTP transport was measured for SQLite only. Only the competitor comparison is recorded as `not_run`. Methodology and limits:
 [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ### Token benchmark (v2.0.1)
@@ -557,8 +554,31 @@ session tokens and not a Claude bill. Full method, per-tool tables, and reproduc
 
 Raw `tools/list` payloads: lite 2,643 B, standard 5,679 B, full 10,853 B. The old headline figure
 of 3,039 bytes was the v2.0.0 payload; it does not apply to v2.0.1. Token budgets (lite ≤ 750,
-full ≤ 3,000 `o200k_base`) are adopted design budgets; the CI job enforcing them is follow-up
-work, not yet a gate.
+full ≤ 3,000 `o200k_base`) are adopted design budgets, enforced by the CI `token-budget` job on
+every run (PR #13).
+
+## Honest limitations (v2.0.2)
+
+Measured gaps, not hidden — see [Benchmarks](#benchmarks-measured) and [SECURITY.md](SECURITY.md):
+
+- HTTP cold start misses its target: 41.74 ms p95 vs ≤ 25 ms (listener readiness + session handshake); stdio is 2.52 ms.
+- HTTP `execute_sql` p50 is 1.68 ms vs ≤ 1 ms (a fresh request per call; transport framing dominates); stdio is 0.80 ms.
+- PostgreSQL and MySQL were measured on stdio only (via service containers); HTTP transport was measured for SQLite only.
+- No persistent audit log yet: tool calls and SQL text can appear in logs. A JSONL audit log with agent identity is on the roadmap, not in this release.
+- No competitor comparison has been run; "best" is not claimed, only measured against the budgets above.
+
+## Roadmap
+
+Planned, not promised — in SA order. None of these is in v2.0.2:
+
+- **Health** — `get_server_health` + `test_source` on the lite surface.
+- **Curated tools** — a smaller, task-shaped tool set alongside the full surface.
+- **Audit log** — JSONL sink behind the existing audit events, SHA-256 hash-chained.
+- **DBA tools** — maintenance helpers (vacuum/analyze/reindex class).
+- **Masking** — keyed HMAC-SHA256 value masking behind `MASK_MASTER_KEY_B64`.
+- **Ledger** — a change ledger table with a CLI-first workflow, no auto-rollback.
+- **Oracle driver** — `rust-oracledb`, feature-gated OFF in v2.1 (minimum 12c).
+- **SQL Server** — deeper R3 coverage, in progress on a branch.
 
 ## Protocol and clients
 
@@ -593,7 +613,7 @@ work, not yet a gate.
 | [docs/TEST_REPORT.md](docs/TEST_REPORT.md) | What the test suites cover |
 | [docs/MYSQL.md](docs/MYSQL.md) · [docs/POSTGRES.md](docs/POSTGRES.md) · [docs/SQLITE.md](docs/SQLITE.md) · [docs/DUCKDB.md](docs/DUCKDB.md) · [SQL Server](docs/CONFIGURATION.md#sql-server) | Per-engine notes |
 | [docs/MCP_REGISTRY.md](docs/MCP_REGISTRY.md) | MCP Registry / MCPB publishing |
-| [CHANGELOG.md](CHANGELOG.md) | What changed in 2.0.0 (breaking: no v1 compatibility layer, `mcp-sql-rust` alias removed) |
+| [CHANGELOG.md](CHANGELOG.md) | What changed in 2.0.2 (profile fix, manifest fix, token benchmark, CI token budget); 2.0.0 notes: no v1 compatibility layer, binary `strut-stack-sql` (`mcp-sql-rust` alias removed) |
 
 ## Contributing
 
