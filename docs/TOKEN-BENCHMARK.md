@@ -213,9 +213,9 @@ hitung ulang independen pada run 2).
 - **Budget token (DIADOPSI, keputusan Melo 2026-11-06)**:
   lite ≤ 750 token, full ≤ 3000 token (`o200k_base`). Angka ukur
   (625 / 2549) berada di dalam budget ini (sisa 125 / 451 token).
-  Job CI yang menegakkan budget ini adalah pekerjaan follow-up dan
-  **belum menjadi gate** — sampai job itu ada, 750/3000 adalah budget
-  desain yang diadopsi, bukan gate yang ditegakkan.
+  Job CI `token-budget` yang menegakkan budget ini sudah menjadi gate
+  sejak PR #13 (`.github/workflows/ci.yml:85`) — 750/3000 adalah
+  budget yang ditegakkan pada setiap run, bukan sekadar budget desain.
 
 ## 5. Catatan koreksi README — angka 3.039 B adalah v2.0.0
 

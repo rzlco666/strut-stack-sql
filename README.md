@@ -534,8 +534,7 @@ Two measurement classes are kept apart instead of blended:
 
 The two HTTP misses are real and are not rounded away: cold start includes listener readiness and
 the session handshake, and each HTTP `execute_sql` is a fresh request, so transport framing
-dominates. PostgreSQL and MySQL were not measured (no live server on the reference machine) and
-are recorded as `not_run`, together with the competitor comparison. Methodology and limits:
+dominates. PostgreSQL and MySQL were measured on stdio only (via service containers); HTTP transport was measured for SQLite only. Only the competitor comparison is recorded as `not_run`. Methodology and limits:
 [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ### Token benchmark (v2.0.1)
@@ -564,7 +563,7 @@ Measured gaps, not hidden — see [Benchmarks](#benchmarks-measured) and [SECURI
 
 - HTTP cold start misses its target: 41.74 ms p95 vs ≤ 25 ms (listener readiness + session handshake); stdio is 2.52 ms.
 - HTTP `execute_sql` p50 is 1.68 ms vs ≤ 1 ms (a fresh request per call; transport framing dominates); stdio is 0.80 ms.
-- PostgreSQL and MySQL were not measured (no live server on the reference machine) — recorded as `not_run` in the benchmark artifact.
+- PostgreSQL and MySQL were measured on stdio only (via service containers); HTTP transport was measured for SQLite only.
 - No persistent audit log yet: tool calls and SQL text can appear in logs. A JSONL audit log with agent identity is on the roadmap, not in this release.
 - No competitor comparison has been run; "best" is not claimed, only measured against the budgets above.
 
@@ -576,8 +575,8 @@ Planned, not promised — in SA order. None of these is in v2.0.2:
 - **Curated tools** — a smaller, task-shaped tool set alongside the full surface.
 - **Audit log** — JSONL sink behind the existing audit events, SHA-256 hash-chained.
 - **DBA tools** — maintenance helpers (vacuum/analyze/reindex class).
-- **Ledger** — a change ledger table with a CLI-first workflow, no auto-rollback.
 - **Masking** — keyed HMAC-SHA256 value masking behind `MASK_MASTER_KEY_B64`.
+- **Ledger** — a change ledger table with a CLI-first workflow, no auto-rollback.
 - **Oracle driver** — `rust-oracledb`, feature-gated OFF in v2.1 (minimum 12c).
 - **SQL Server** — deeper R3 coverage, in progress on a branch.
 
@@ -614,7 +613,7 @@ Planned, not promised — in SA order. None of these is in v2.0.2:
 | [docs/TEST_REPORT.md](docs/TEST_REPORT.md) | What the test suites cover |
 | [docs/MYSQL.md](docs/MYSQL.md) · [docs/POSTGRES.md](docs/POSTGRES.md) · [docs/SQLITE.md](docs/SQLITE.md) · [docs/DUCKDB.md](docs/DUCKDB.md) · [SQL Server](docs/CONFIGURATION.md#sql-server) | Per-engine notes |
 | [docs/MCP_REGISTRY.md](docs/MCP_REGISTRY.md) | MCP Registry / MCPB publishing |
-| [CHANGELOG.md](CHANGELOG.md) | What changed in 2.0.2 (profile fix, manifest fix, token benchmark, CI token budget); 2.0.0 notes: no v1 compatibility layer, binary `strut-stack-sql` (compat alias `mcp-sql-rust`) |
+| [CHANGELOG.md](CHANGELOG.md) | What changed in 2.0.2 (profile fix, manifest fix, token benchmark, CI token budget); 2.0.0 notes: no v1 compatibility layer, binary `strut-stack-sql` (`mcp-sql-rust` alias removed) |
 
 ## Contributing
 
