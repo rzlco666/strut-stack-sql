@@ -28,7 +28,7 @@ Archive naming is consistent across platforms. See [INSTALL.md](INSTALL.md) for 
 | [`.github/workflows/release.yml`](../.github/workflows/release.yml) | Build archives + MCPB + SHA256SUMS |
 | [`.github/workflows/registry-publish.yml`](../.github/workflows/registry-publish.yml) | Auto-publish on release |
 
-Crates.io is **not** used (`publish = false`). Use GitHub Releases, Homebrew tap, or `cargo binstall`.
+Crates.io is **not** used (`publish = false`). Use GitHub Releases or `cargo binstall`.
 
 ## Automated publish
 

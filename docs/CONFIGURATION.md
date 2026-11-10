@@ -616,7 +616,7 @@ See [CURSOR.md](CURSOR.md) for the official global launcher (`packaging/cursor-m
 
 | Channel | Config tip |
 |---------|------------|
-| curl / brew / releases | Put `DATABASE_URL` in project `.env` |
+| curl / releases | Put `DATABASE_URL` in project `.env` |
 | Docker | Pass `-e DATABASE_URL=...` |
 | MCP Registry `.mcpb` | Set `DATABASE_URL` in client env |
 | Dev Container | Pre-set in `devcontainer.json` / compose |

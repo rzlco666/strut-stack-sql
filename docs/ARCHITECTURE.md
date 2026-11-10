@@ -158,8 +158,6 @@ rejected with 400; JSON-RPC batches are rejected.
 |---|---|
 | GitHub Releases | `strut-stack-sql-<platform>` archives, `.mcpb` bundles, `SHA256SUMS` |
 | curl installer | [`install.sh`](../install.sh) |
-| Homebrew | [`packaging/homebrew/strut-stack-sql.rb`](../packaging/homebrew/strut-stack-sql.rb) |
-| Scoop / winget | [`packaging/scoop/`](../packaging/scoop/), [`packaging/winget/`](../packaging/winget/) |
 | Docker | [`Dockerfile`](../Dockerfile) → `ghcr.io/rzlco666/strut-stack-sql` |
 | MCP Registry | [`server.json`](../server.json) + [`mcpb/manifest.json`](../mcpb/manifest.json) |
 
