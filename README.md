@@ -472,7 +472,7 @@ instead of maintaining four builds — profiles are presets over the same flags 
 second authorization system ([docs/PROFILES.md](docs/PROFILES.md)).
 
 - Security model and threat model: [docs/SECURITY.md](docs/SECURITY.md).
-- Install channels: one-line installer, Homebrew, Scoop, winget, Docker, `cargo install --path .`,
+- Install channels: one-line installer, Docker, `cargo install --path .`,
   and per-platform MCPB bundles ([docs/INSTALL.md](docs/INSTALL.md)).
 - Contributions: [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md).
 

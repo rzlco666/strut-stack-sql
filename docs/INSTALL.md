@@ -7,9 +7,8 @@ All install paths for **strut-stack-sql**. Pick one channel; they install the sa
 | Channel | Best for |
 |---------|----------|
 | [curl install script](#curl-install-script) | Linux/macOS, **recommended** |
-| [Homebrew](#homebrew) | macOS |
 | [Docker](#docker-ghcr) | Servers, CI |
-| [Scoop / winget](#windows) | Windows |
+| [Windows .zip](#windows) | Windows |
 | [MCPB](#mcpb) | MCP Registry clients |
 | [From source](#from-source) | Contributors and custom builds |
 
@@ -64,12 +63,6 @@ Run `install.sh --help` for every flag.
 
 Each archive contains a single `strut-stack-sql` binary. `SHA256SUMS` is published on every release.
 
-## Homebrew
-
-```bash
-brew install rzlco666/tap/strut-stack-sql
-```
-
 ## Docker (GHCR)
 
 ```bash
@@ -77,16 +70,14 @@ docker run --rm -i -e DATABASE_URL=sqlite:///data/app.db \
   ghcr.io/rzlco666/strut-stack-sql:latest --url-env DATABASE_URL
 ```
 
-The image defaults to HTTP mode on port 8000 (for Smithery hosting);
+The image defaults to HTTP mode on port 8000;
 without `--http` the image runs in stdio mode.
 
 ## Windows
 
-```bash
-scoop install rzlco666/strut-stack-sql
-# or
-winget install rzlco666.strut-stack-sql
-```
+Download `strut-stack-sql-windows-x64.zip` from the
+[latest release](https://github.com/rzlco666/strut-stack-sql/releases/latest),
+unpack it, and add the folder to `PATH`.
 
 ## MCPB
 
