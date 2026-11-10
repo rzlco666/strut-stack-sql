@@ -104,7 +104,7 @@ else
     Linux)  FAMILY="linux" ;;
     Darwin) FAMILY="macos" ;;
     MINGW*|MSYS*|CYGWIN*)
-      echo "On Windows, use Scoop or winget (see docs/INSTALL.md), then run this script with --setup --skip-install from Git Bash." >&2
+      echo "On Windows, download strut-stack-sql-windows-x64.zip from the latest release (https://github.com/rzlco666/strut-stack-sql/releases/latest), unpack it, add the folder to PATH, then run this script with --setup --skip-install from Git Bash." >&2
       exit 1
       ;;
     *)
